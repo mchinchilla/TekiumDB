@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 0 de la hoja de ruta).** Hoy existen el esqueleto de la solución, los analizadores, las pruebas y la verificación de Native AOT. El motor todavía no almacena datos y no hay paquete publicado. La API y las características descritas aquí son el diseño objetivo, no funcionalidad disponible. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 0.5 de la hoja de ruta).** Hoy existe un motor mínimo de validación: pager y B+Tree copy-on-write con commit atómico, medido contra SQLite. No hay API pública, cifrado, índices secundarios ni paquete publicado. La API y las características descritas aquí son el diseño objetivo, no funcionalidad disponible. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -37,11 +37,13 @@ El competidor real de una base embebida es SQLite, y "SQLite pero más rápido" 
 | Cifrado | SEE comercial o SQLCipher | AES-256-GCM autenticado, incluido |
 | UUID v7 y fechas | `BLOB` con un índice encima | Tipos de primera clase con índices especializados |
 
-Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (joins, estimación de cardinalidad, reordenamiento). Antes de invertir en el resto, la Fase 0.5 mide un motor mínimo contra SQLite y publica los números en este repositorio.
+Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (joins, estimación de cardinalidad, reordenamiento).
+
+Antes de invertir en el resto, la Fase 0.5 midió un motor mínimo contra `Microsoft.Data.Sqlite`: lectura puntual 6× más rápida, rango de fechas 38× más rápido e inserción secuencial entre empate y 5× más rápida. Los números, las condiciones y sus advertencias están en [`docs/benchmarks/fase-0.5.md`](docs/benchmarks/fase-0.5.md).
 
 ## Características
 
-Todas forman parte del diseño; ninguna está implementada todavía.
+Todas forman parte del diseño. Hoy sólo existe, en versión mínima, el B+Tree copy-on-write con commit atómico.
 
 **Almacenamiento**
 
@@ -135,8 +137,8 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 
 | Fase | Entrega | Estado |
 | --- | --- | --- |
-| 0 | Esqueleto de la solución, CI, BenchmarkDotNet, analizadores | En curso: verde en macOS; falta la corrida de CI en Linux, Windows y macOS |
-| 0.5 | Spike de validación: pager y B+Tree mínimos medidos contra SQLite | Pendiente |
+| 0 | Esqueleto de la solución, CI, BenchmarkDotNet, analizadores | Hecho en macOS; pendiente confirmar CI en Linux y Windows |
+| 0.5 | Spike de validación: pager y B+Tree mínimos medidos contra SQLite | Hecho: [dentro del criterio](docs/benchmarks/fase-0.5.md), se sigue |
 | 1 – 1.5 | Capa de E/S, pager y modo en memoria | Pendiente |
 | 2 | Cifrado por página y derivación de clave | Pendiente |
 | 3 | B+Tree copy-on-write | Pendiente |
@@ -184,6 +186,7 @@ tests/
   Tekium.Embedded.Core.Tests/    Pruebas unitarias
   Tekium.Embedded.Benchmarks/    Benchmarks con BenchmarkDotNet
   Tekium.Embedded.AotSmoke/      Consumidor mínimo publicado con Native AOT
+docs/benchmarks/                 Resultados de benchmarks publicados por fase
 .github/workflows/ci.yml         Build, pruebas y AOT en Linux, Windows y macOS
 BannedSymbols.txt                APIs prohibidas en todo el repositorio
 src/BannedSymbols.Engine.txt     APIs prohibidas dentro del motor
