@@ -56,7 +56,8 @@ Varias las impone el build (`BannedSymbols.txt`, `src/BannedSymbols.Engine.txt`,
 - Little-endian explícito con `BinaryPrimitives`. Nunca `MemoryMarshal.Read<T>` sobre structs.
 - `Guid.CreateVersion7()` y `ToByteArray(bigEndian: true)` / `TryWriteBytes(..., bigEndian: true, ...)`. Nunca la sobrecarga sin `bigEndian`.
 - Nada de `object`, `dynamic`, reflexión en runtime ni `Expression.Compile()` en el núcleo.
-- Criptografía sólo del BCL (`AesGcm`); la construcción del nonce (`página || txid`) no se toca sin revisión.
+- Criptografía sólo del BCL (`AesGcm`, `HKDF`, `HMACSHA256`), salvo Argon2id y BLAKE2b, que .NET no trae y viven en `Security/`; se validan contra vectores de referencia y no se tocan sin ellos.
+- La construcción del nonce (`página || txid`) no se toca sin revisión, ni tampoco lo que la hace única: la reserva de ids en `Pager.BeginWriteAsync`. Un id de transacción nunca se emite dos veces.
 
 ### Compilación
 

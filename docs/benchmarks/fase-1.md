@@ -21,6 +21,8 @@ En CI corre la misma lógica con 20 000 páginas sobre memoria y una caché de 1
 
 ## Qué costó el pager real
 
+> **Corrección posterior.** La corrida de la [Fase 2](fase-2.md), con el mismo código de lectura, midió 397 ns en la lectura puntual. El +45 % de la tabla de abajo fue en su mayor parte ruido de la máquina, no costo del pager. Los números se dejan como se midieron.
+
 El spike de la Fase 0.5 no verificaba checksums, no desalojaba la caché y no reutilizaba espacio. Estas son las mismas cargas con el pager de la Fase 1:
 
 | Carga | SQLite | TekiumDB Fase 0.5 | TekiumDB Fase 1 | Cambio | Relación con SQLite |
