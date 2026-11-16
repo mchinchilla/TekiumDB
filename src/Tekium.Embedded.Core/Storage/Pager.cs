@@ -42,6 +42,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     private ulong _reservedThrough;
     private int _reservationCopy;
     private bool _sessionReserved;
+    private Exception? _commitInDoubt;
 
     private Pager(
         IStorageDevice device, PageSize pageSize, PagerOptions options, IPageProtector protector, Snapshot current, int slot)
@@ -131,6 +132,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         await _writerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfCommitInDoubt();
             var state = _current;
 
             // An id is never issued twice, not even after a commit that failed halfway: its pages may
@@ -218,9 +220,15 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     }
 
     /// <summary>
-    /// The commit: new pages, flush, root slot, flush. The second flush is the durability point;
-    /// a failure anywhere before it leaves the previous state intact on disk and in memory.
+    /// The commit: new pages, flush, root slot, flush. The second flush is the durability point.
     /// </summary>
+    /// <remarks>
+    /// A failure or a cancellation before the root slot is touched leaves the previous state intact on
+    /// disk and in memory, and the writer goes on. Once the root slot write starts there is no way back
+    /// and no cancelling: if it or its flush fails, nobody knows which state the disk holds. The new one
+    /// may be there, reaching pages the next transaction would be free to overwrite, so the writer stops
+    /// for good and the database has to be reopened. Readers keep the previous state, which is intact.
+    /// </remarks>
     internal async ValueTask CommitAsync(WriteTransaction transaction, CancellationToken cancellationToken)
     {
         var state = _current;
@@ -244,13 +252,27 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
             await _device.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        // Last point where giving up costs nothing.
+        cancellationToken.ThrowIfCancellationRequested();
+
         // The slot that does not hold the current state, whatever the transaction id is.
         var slot = (_currentSlot + 1) % FileHeader.SlotCount;
         FileHeader.EncodeSlot(_recordBuffer, next, _protector);
-        await _device.WriteAsync(
-            FileHeader.SlotOffset(slot, PageSize), _recordBuffer.AsMemory(0, FileHeader.SlotSize), cancellationToken)
-            .ConfigureAwait(false);
-        await _device.FlushAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _device.WriteAsync(
+                FileHeader.SlotOffset(slot, PageSize), _recordBuffer.AsMemory(0, FileHeader.SlotSize), CancellationToken.None)
+                .ConfigureAwait(false);
+            await _device.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception failure)
+        {
+            _commitInDoubt = failure;
+            throw new IOException(
+                "The commit failed while its root slot was being made durable, so it may or may not have happened. " +
+                "The database accepts no more writes: reopen it to find out which state survived.",
+                failure);
+        }
 
         // Durable. From here on nothing can fail: publish to readers.
         _currentSlot = slot;
@@ -430,6 +452,17 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         }
     }
 
+    private void ThrowIfCommitInDoubt()
+    {
+        if (_commitInDoubt is not null)
+        {
+            throw new IOException(
+                "An earlier commit failed while its root slot was being made durable. " +
+                "The database accepts no more writes: reopen it to find out which state survived.",
+                _commitInDoubt);
+        }
+    }
+
     private static long GrowTo(long length, long required)
     {
         length = Math.Max(length, 1);
@@ -486,6 +519,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
             await _writerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                ThrowIfCommitInDoubt();
                 var sealedHeader = new byte[FileHeader.FixedSize];
                 var copy = new byte[FileHeader.FixedSize];
                 await _device.ReadAsync(0, sealedHeader, cancellationToken).ConfigureAwait(false);

@@ -237,7 +237,8 @@ public abstract class PagerTests : DeviceBackedTests
             tx.Root = number;
             if (i % 3 == 0)
             {
-                device.FailOnWriteNumber = device.WriteCount + 2;
+                // Falla la escritura de las páginas: el slot de raíz no se toca y el escritor sigue.
+                device.FailOnWriteNumber = device.WriteCount + 1;
                 await Assert.ThrowsAsync<IOException>(async () => await tx.CommitAsync(Ct));
             }
             else if (i % 3 == 1)

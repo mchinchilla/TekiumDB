@@ -5,6 +5,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Tekium.Embedded.AotSmoke/Tekium.Embedded.AotSmoke.csproj" />
     <Project Path="tests/Tekium.Embedded.Benchmarks/Tekium.Embedded.Benchmarks.csproj" />
+    <Project Path="tests/Tekium.Embedded.CrashChild/Tekium.Embedded.CrashChild.csproj" />
     <Project Path="tests/Tekium.Embedded.Core.Tests/Tekium.Embedded.Core.Tests.csproj" />
   </Folder>
 </Solution>

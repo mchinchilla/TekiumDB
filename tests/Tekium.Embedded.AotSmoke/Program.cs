@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using Tekium.Embedded.Indexing;
 using Tekium.Embedded.Security;
 using Tekium.Embedded.Storage;
+using Tekium.Embedded.Transactions;
 
 // Ejercita el núcleo bajo Native AOT. Devuelve 0 si todo va bien; CI ejecuta el binario publicado.
 // Cada fase agrega aquí su camino feliz mínimo.
@@ -111,13 +112,28 @@ static async Task<int> RoundTripAsync(string name, Func<IStorageDevice> open, bo
             tree = new BTree(pager);
         }
 
+        // Una transacción de lectura sigue viendo su estado aunque el escritor borre todo después.
         var scanned = 0;
-        await foreach (var entry in tree.RangeAsync(default, default, CancellationToken.None))
+        await using (var read = ReadTransaction.Begin(pager))
         {
-            scanned += entry.Key.Span.SequenceEqual(entry.Value.Span) ? 1 : 0;
+            await using (var transaction = await pager.BeginWriteAsync(CancellationToken.None))
+            {
+                for (var i = 0; i < Rows; i += 2)
+                {
+                    BinaryPrimitives.WriteInt64BigEndian(key, i);
+                    await tree.DeleteAsync(transaction, key, CancellationToken.None);
+                }
+
+                await transaction.CommitAsync(CancellationToken.None);
+            }
+
+            await foreach (var entry in BTree.RangeAsync(read, read.Root, default, default, CancellationToken.None))
+            {
+                scanned += entry.Key.Span.SequenceEqual(entry.Value.Span) ? 1 : 0;
+            }
         }
 
-        BinaryPrimitives.WriteInt64BigEndian(key, Rows / 2);
+        BinaryPrimitives.WriteInt64BigEndian(key, (Rows / 2) + 1);
         var found = await tree.GetAsync(key, new byte[8], CancellationToken.None);
         if (scanned == Rows && found == 8)
         {

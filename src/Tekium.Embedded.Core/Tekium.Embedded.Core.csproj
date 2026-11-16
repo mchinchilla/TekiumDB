@@ -12,6 +12,7 @@
     <InternalsVisibleTo Include="Tekium.Embedded.Core.Tests" />
     <InternalsVisibleTo Include="Tekium.Embedded.Benchmarks" />
     <InternalsVisibleTo Include="Tekium.Embedded.AotSmoke" />
+    <InternalsVisibleTo Include="Tekium.Embedded.CrashChild" />
   </ItemGroup>
 
   <ItemGroup>

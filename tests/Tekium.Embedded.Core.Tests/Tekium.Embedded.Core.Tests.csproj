@@ -14,6 +14,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Tekium.Embedded.Core\Tekium.Embedded.Core.csproj" />
+    <!-- Las pruebas de crash lanzan este ejecutable y comparten con él la carga de trabajo. -->
+    <ProjectReference Include="..\Tekium.Embedded.CrashChild\Tekium.Embedded.CrashChild.csproj" />
   </ItemGroup>
 
   <ItemGroup>

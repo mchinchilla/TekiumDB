@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 3 de la hoja de ruta).** Hoy existen el pager (caché acotada, free-list, commit atómico), el cifrado AES-256-GCM por página con Argon2id, y el B+Tree copy-on-write con inserción, borrado, split y merge, medidos contra SQLite. No hay API pública, índices secundarios ni paquete publicado. La API y las características descritas aquí son el diseño objetivo, no funcionalidad disponible. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 4 de la hoja de ruta).** Hoy existen el pager (caché acotada, free-list, commit atómico), el cifrado AES-256-GCM por página con Argon2id, el B+Tree copy-on-write con inserción, borrado, split y merge, y las transacciones con aislamiento por snapshot, probadas matando el proceso en cada punto del commit. No hay API pública, índices secundarios ni paquete publicado. La API y las características descritas aquí son el diseño objetivo, no funcionalidad disponible. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -143,7 +143,7 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 1.5 | Modo en memoria | Hecho en macOS: las pruebas del pager corren sobre archivo y sobre memoria; pendiente confirmar CI en Linux y Windows |
 | 2 | Cifrado por página y derivación de clave | Hecho en macOS: [criterio cumplido](docs/benchmarks/fase-2.md); pendiente confirmar CI en Linux y Windows |
 | 3 | B+Tree copy-on-write: insert, lookup, delete, split, merge | Hecho en macOS: un millón de operaciones aleatorias contra un modelo; pendiente confirmar CI en Linux y Windows |
-| 4 | MVCC, transacciones y commit atómico | Pendiente |
+| 4 | MVCC, transacciones y commit atómico | Hecho en macOS: [criterio cumplido](docs/benchmarks/fase-4.md); pendiente confirmar CI en Linux y Windows |
 | 5 – 5.5 | Catálogo, filas tipadas, generador de código y compresión | Pendiente |
 | 6 – 6.8 | Índices secundarios, restricciones, change feed y carga masiva | Pendiente |
 | 7 – 9 | Índices temporal, UUID v7 y vectorial HNSW | Pendiente |
@@ -185,6 +185,7 @@ src/
   Tekium.Embedded.Core/          Núcleo del motor
 tests/
   Tekium.Embedded.Core.Tests/    Pruebas unitarias
+  Tekium.Embedded.CrashChild/    Proceso que las pruebas de crash lanzan y matan a mitad de un commit
   Tekium.Embedded.Benchmarks/    Benchmarks con BenchmarkDotNet
   Tekium.Embedded.AotSmoke/      Consumidor mínimo publicado con Native AOT
 docs/benchmarks/                 Resultados de benchmarks publicados por fase

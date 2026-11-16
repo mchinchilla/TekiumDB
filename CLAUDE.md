@@ -15,6 +15,8 @@ Base de datos embebida de archivo único (`.tkdb`), cifrada, async-first, B+Tree
 - **Layout:** `/src` código de producto, `/tests` pruebas unitarias, benchmarks y el smoke de AOT. El núcleo no referencia a `.Sql`, `.Linq` ni `.Vectors`, y no lleva dependencias NuGet en runtime.
 - **Pruebas sobre los dos dispositivos.** Lo que toque el pager se prueba heredando de `DeviceBackedTests`, que lo corre sobre archivo y sobre memoria. Un dispositivo nuevo hereda `StorageDeviceContractTests`. Las pruebas usan `TestDevice` (envuelve el dispositivo real, inyecta fallos y daña bytes), nunca un doble escrito aparte.
 - **El B+Tree se prueba contra un modelo.** Todo cambio en `Indexing/` debe pasar `BTreePropertyTests` (secuencias aleatorias con CsCheck y un millón de operaciones contra un `SortedDictionary`), que además verifican la estructura con `BTreeVerifier` y que no se pierda ninguna página. Si CsCheck falla imprime la semilla: se reproduce con `CsCheck_Seed=<semilla>`.
+- **El commit se prueba matándolo.** Todo cambio en `Pager.CommitAsync`, en la free-list o en el orden de escrituras y flushes debe pasar `PowerLossTests` (corte de energía simulado antes de cada operación, con lo no vaciado perdido a pedazos) y `ProcessCrashTests` (un proceso hijo, `tests/Tekium.Embedded.CrashChild`, que se mata en cada punto). Las dos usan la misma carga (`CrashWorkload`) y la misma exigencia (`CrashRecovery`). Lo que toque lectores concurrentes debe pasar `ConcurrencyTests`.
+- **Un commit de resultado incierto detiene al escritor.** Si falla la escritura del slot de raíz o su flush, el pager no acepta más escrituras hasta reabrir: no se "arregla" para que siga. Pasado ese punto el commit tampoco observa la cancelación.
 - Código, identificadores y XML docs en inglés. Cada `.cs` lleva la cabecera de licencia (la exige `IDE0073`). Toda dependencia debe ser compatible con MIT.
 
 ## Comandos
@@ -24,6 +26,8 @@ dotnet build -c Release
 dotnet test
 dotnet test --filter-class "*PageSizeTests"
 dotnet test -c Release --filter-method "*One_million*" --explicit only   # prueba de 4 GiB, no corre en CI
+dotnet test -c Release --filter-method "*for_several_minutes*" --explicit only   # concurrencia larga, no corre en CI
+dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- space        # amplificación de espacio
 dotnet publish tests/Tekium.Embedded.AotSmoke -c Release -o artifacts/aot && ./artifacts/aot/Tekium.Embedded.AotSmoke
 dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'
 ```
