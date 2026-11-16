@@ -841,6 +841,40 @@ public sealed class Table<T> : TekiumDb.ITable
         await transaction.SetConstraintsAsync(state, _constraints.Encoded, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// What one commit did to the rows of the table: the difference between the table in the catalog
+    /// before it and in the catalog after it. The caller keeps both states readable.
+    /// </summary>
+    internal async ValueTask CollectChangesAsync(
+        PageNumber catalogBefore, PageNumber catalogAfter, ulong transaction, List<TkChange<T>> changes, CancellationToken cancellationToken)
+    {
+        var pager = _database.Pager;
+        var before = (await CatalogStore.FindTableAsync(pager, catalogBefore, TableKey, cancellationToken).ConfigureAwait(false))?.Root
+            ?? PageNumber.None;
+        var after = (await CatalogStore.FindTableAsync(pager, catalogAfter, TableKey, cancellationToken).ConfigureAwait(false))?.Root
+            ?? PageNumber.None;
+        await foreach (var change in BTree.DiffAsync(pager, before, after, cancellationToken).ConfigureAwait(false))
+        {
+            // Schemas are only ever added, so the later catalog knows how to read the rows of both states.
+            T? old = null;
+            T? current = null;
+            if (change.HasBefore)
+            {
+                var plan = await PlanAsync(change.Before, pager, catalogAfter, null, cancellationToken).ConfigureAwait(false);
+                old = Decode(change.Before.Span, plan);
+            }
+
+            if (change.HasAfter)
+            {
+                var plan = await PlanAsync(change.After, pager, catalogAfter, null, cancellationToken).ConfigureAwait(false);
+                current = Decode(change.After.Span, plan);
+            }
+
+            var kind = old is null ? TkChangeKind.Insert : current is null ? TkChangeKind.Delete : TkChangeKind.Update;
+            changes.Add(new TkChange<T>(kind, old, current, transaction));
+        }
+    }
+
     /// <summary>Fills an index that did not exist with the rows the table already has.</summary>
     internal async ValueTask BuildIndexAsync(
         TkWriteTransaction transaction,

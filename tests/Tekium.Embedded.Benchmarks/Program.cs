@@ -6,6 +6,7 @@ using Tekium.Embedded.Benchmarks;
 // Uso: dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'
 //      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- space
 //      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- ratio
+//      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- feed
 if (args is ["space"])
 {
     await SpaceAmplification.RunAsync();
@@ -15,6 +16,13 @@ if (args is ["space"])
 if (args is ["ratio"])
 {
     await CompressionRatio.RunAsync();
+    return;
+}
+
+if (args is ["feed"])
+{
+    await ChangeFeedBenchmarks.ReportConsumerAsync();
+    await ChangeFeedBenchmarks.ReportSpaceAsync();
     return;
 }
 

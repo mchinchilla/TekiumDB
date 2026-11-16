@@ -36,6 +36,12 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     private readonly Dictionary<uint, byte[]> _dirty = [];
     private readonly List<uint> _freed = [];
     private readonly List<SnapshotState> _retained = [];
+
+    // States kept readable without a reader on them: every state from the floor on, and those pinned one by one.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, long> _pins = new();
+    private long _retentionFloor = long.MaxValue;
+    private long _pinCount;
+    private long _lastPin;
     private SnapshotState _current;
     private int _currentSlot;
     private ulong _lastIssued;
@@ -130,6 +136,42 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Keeps every state from this transaction on readable: no page they reach is reused, whether or not
+    /// anybody is reading them. <see langword="null"/> keeps none. Called by the writer, or before the first one.
+    /// </summary>
+    public void SetRetentionFloor(ulong? transaction) =>
+        Volatile.Write(ref _retentionFloor, transaction is { } floor ? checked((long)floor) : long.MaxValue);
+
+    /// <summary>
+    /// Keeps the state of a transaction readable until <see cref="Release"/>, however far the floor
+    /// moves meanwhile. Fails if the state is already below the floor: its pages may be gone.
+    /// </summary>
+    public bool TryRetain(ulong transaction, out long pin)
+    {
+        pin = Interlocked.Increment(ref _lastPin);
+        _pins[pin] = checked((long)transaction);
+        Interlocked.Increment(ref _pinCount);
+
+        // Pinned before checking: a writer that moves the floor past this state afterwards will see the pin.
+        if ((long)transaction >= Volatile.Read(ref _retentionFloor))
+        {
+            return true;
+        }
+
+        Release(pin);
+        return false;
+    }
+
+    /// <summary>Lets go of a state kept with <see cref="TryRetain"/>.</summary>
+    public void Release(long pin)
+    {
+        if (_pins.TryRemove(pin, out _))
+        {
+            Interlocked.Decrement(ref _pinCount);
+        }
+    }
+
     public bool TryPin(PageNumber number, out PageLease lease) => _cache.TryPin(number, out lease);
 
     public ValueTask<PageLease> PinAsync(PageNumber number, CancellationToken cancellationToken) =>
@@ -170,6 +212,16 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
                 else
                 {
                     horizon = Math.Min(horizon, (long)_retained[i].Snapshot.TransactionId.Value);
+                }
+            }
+
+            // The floor is read before the pins: whoever pins checks the floor afterwards, so one of the two sees the other.
+            horizon = Math.Min(horizon, Volatile.Read(ref _retentionFloor));
+            if (Interlocked.Read(ref _pinCount) > 0)
+            {
+                foreach (var pinned in _pins.Values)
+                {
+                    horizon = Math.Min(horizon, pinned);
                 }
             }
 

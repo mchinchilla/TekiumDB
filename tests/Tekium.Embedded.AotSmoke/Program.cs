@@ -54,7 +54,7 @@ static async Task<int> TypedRoundTripAsync()
 {
     var file = Path.Combine(Path.GetTempPath(), $"tekium-aot-typed-{Guid.NewGuid():N}.tkdb");
     // Cifrada y comprimida: Zstandard viene de la biblioteca nativa del propio runtime, que AOT enlaza dentro del binario.
-    var options = new DbOptions { Path = file, Password = "aot typed password".AsMemory(), CacheSizeMb = 8, Compression = true };
+    var options = new DbOptions { Path = file, Password = "aot typed password".AsMemory(), CacheSizeMb = 8, Compression = true, ChangeRetention = 16 };
     // Con su marca de tiempo explícita: dos UUID v7 del mismo milisegundo no tienen orden garantizado.
     var at = new DateTimeOffset(2026, 11, 16, 9, 30, 0, TimeSpan.FromHours(-6));
     var first = Guid.CreateVersion7(at);
@@ -150,6 +150,23 @@ static async Task<int> TypedRoundTripAsync()
                 || await events.ExplainAsync(EventV2.Fields.Title.EqualTo("written as version 2")) is not { Access: TkAccess.UniqueLookup, Index: "Title" })
             {
                 await Console.Error.WriteLineAsync($"Constraint round-trip failed: {string.Join(", ", violated)}.");
+                return 1;
+            }
+
+            // Change feed: desde el principio, con lo que escribió la sesión anterior con el otro tipo.
+            var kinds = new List<TkChangeKind>();
+            await foreach (var change in database.WatchAsync<EventV2>(0))
+            {
+                kinds.Add(change.Kind);
+                if (change.TransactionId == database.LastTransactionId)
+                {
+                    break;
+                }
+            }
+
+            if (kinds is not [TkChangeKind.Insert, TkChangeKind.Insert])
+            {
+                await Console.Error.WriteLineAsync($"Change feed failed: {string.Join(", ", kinds)}.");
                 return 1;
             }
 

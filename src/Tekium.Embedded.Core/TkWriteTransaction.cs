@@ -19,6 +19,12 @@ public sealed class TkWriteTransaction : TkTransaction
     internal TkWriteTransaction(TekiumDb database, WriteTransaction inner)
         : base(database) => _inner = inner;
 
+    /// <summary>
+    /// Gets the id of this transaction: the one its changes carry in <see cref="TekiumDb.WatchAsync{T}"/>,
+    /// and the one <see cref="TekiumDb.LastTransactionId"/> gives once it has committed something.
+    /// </summary>
+    public ulong TransactionId => _inner.Id.Value;
+
     internal WriteTransaction Inner => _inner;
 
     internal override IPageSource Source => _inner;
@@ -78,7 +84,9 @@ public sealed class TkWriteTransaction : TkTransaction
             ArrayPool<byte>.Shared.Return(entry);
         }
 
+        var history = await Database.RecordHistoryAsync(_inner, cancellationToken).ConfigureAwait(false);
         await _inner.CommitAsync(cancellationToken).ConfigureAwait(false);
+        Database.Committed(history);
     }
 
     /// <summary>Ends the transaction. Without a commit, everything it did is discarded.</summary>

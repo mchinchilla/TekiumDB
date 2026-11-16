@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 6.5 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices especializados ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 6.7 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices especializados ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -69,7 +69,7 @@ Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy
 
 - Núcleo tipado, sin reflexión en runtime: un generador de código fuente emite los serializadores.
 - Capas opcionales en paquetes separados: SQL con proveedor ADO.NET, LINQ y vectores.
-- Restricciones declarativas (`CHECK`, `UNIQUE`, `FOREIGN KEY`; ya existen: ver [Restricciones](#restricciones)) y change feed post-commit.
+- Restricciones declarativas (`CHECK`, `UNIQUE`, `FOREIGN KEY`; ya existen: ver [Restricciones](#restricciones)) y change feed post-commit (ver [Change feed](#change-feed)).
 - Backup en caliente, verificación de integridad y viaje en el tiempo sobre snapshots.
 
 ## Vistazo a la API
@@ -214,6 +214,34 @@ catch (TkConstraintException violation)
 | Añadirlas después | La primera escritura con el tipo que las declara las comprueba contra las filas que ya hay, y si alguna no cumple, la rechaza nombrándola |
 | Momento de la comprobación | En cada operación, no al confirmar: dos filas que se refieren una a otra se insertan con la referencia vacía y se completan después |
 
+### Change feed
+
+Lo que cada commit le hizo a las filas de una tabla, leído después del commit y fuera del escritor. Reemplaza a los triggers para auditoría, invalidar cachés o replicar.
+
+```csharp
+await using var db = await TekiumDb.OpenAsync(new DbOptions
+{
+    Path = "app.tkdb",
+    ChangeRetention = 1000,                    // cuántos commits pasados se conservan; 0 lo apaga
+});
+
+await foreach (var change in db.WatchAsync<Order>(lastSeen, ct))
+{
+    // change.Kind: Insert | Update | Delete
+    // change.Before, change.After, change.TransactionId
+    await HandleAsync(change);
+    lastSeen = change.TransactionId;           // guardar al terminar cada transacción para reanudar
+}
+```
+
+| Qué | Cómo |
+| --- | --- |
+| Qué informa | Un cambio por fila y commit, con la fila antes y después: el efecto neto de la transacción, no cada paso. En orden de commit y, dentro de un commit, de clave |
+| Desde dónde | Desde el id de la última transacción vista. `0` es la creación de la base; `db.LastTransactionId` es "desde ahora". Vale también tras cerrar y reabrir |
+| Cuándo termina | Al cancelar. Cuando alcanza al escritor, espera el siguiente commit |
+| Lo que cuesta | Los commits conservados no liberan sus páginas: el archivo es más grande, en proporción a `ChangeRetention`. El escritor no espera al consumidor |
+| Si el consumidor se atrasa | Pasados `ChangeRetention` commits recibe `TkChangeFeedException` en vez de saltarse cambios: debe volver a leer la tabla y seguir desde ahí |
+
 Lo que sigue es diseño objetivo y todavía no existe:
 
 ```csharp
@@ -269,7 +297,8 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 5.5 | Compresión Zstandard por página | Hecho y [medido](docs/benchmarks/fase-5.5.md): comprime 3,3× los bytes escritos pero no ahorra disco y cuesta latencia; queda apagada por defecto |
 | 6 | Índices secundarios, codificación ordenada de claves, índices sobre expresiones y parciales | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.md); Windows sin verificar |
 | 6.5 | Restricciones declarativas: `CHECK`, `UNIQUE`, `FOREIGN KEY` | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.5.md); Windows sin verificar |
-| 6.7 – 6.8 | Change feed y carga masiva | Pendiente |
+| 6.7 | Change feed post-commit | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.7.md); Windows sin verificar |
+| 6.8 | Carga masiva | Pendiente |
 | 7 – 9 | Índices temporal, UUID v7 y vectorial HNSW | Pendiente |
 | 10 – 10.6 | Herramientas, backup en caliente, verificación y viaje en el tiempo | Pendiente |
 | 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |

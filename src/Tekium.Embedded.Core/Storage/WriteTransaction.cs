@@ -25,7 +25,11 @@ internal sealed class WriteTransaction : IPageSource, IAsyncDisposable
         PageCount = basis.PageCount;
         Root = basis.Root;
         Id = id;
+        Basis = basis;
     }
+
+    /// <summary>Gets the committed state the transaction started from.</summary>
+    public Snapshot Basis { get; }
 
     public TransactionId Id { get; }
 

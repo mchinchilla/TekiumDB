@@ -143,3 +143,30 @@ public sealed class TkConstraintException : Exception
     /// <summary>Gets the key of the row that violated it, as text.</summary>
     public string? Key { get; }
 }
+
+/// <summary>
+/// The changes asked for are no longer retained: the consumer fell further behind than
+/// <see cref="DbOptions.ChangeRetention"/> allows, or asked for changes from before the database kept them.
+/// </summary>
+public sealed class TkChangeFeedException : Exception
+{
+    /// <summary>Initializes a new instance of the <see cref="TkChangeFeedException"/> class.</summary>
+    public TkChangeFeedException()
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="TkChangeFeedException"/> class.</summary>
+    /// <param name="message">What is missing.</param>
+    public TkChangeFeedException(string message)
+        : base(message)
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="TkChangeFeedException"/> class.</summary>
+    /// <param name="message">What is missing.</param>
+    /// <param name="innerException">The cause.</param>
+    public TkChangeFeedException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}

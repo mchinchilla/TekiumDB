@@ -165,6 +165,103 @@ internal sealed class BTree
         CancellationToken cancellationToken) =>
         RangeCoreAsync(source, root, null, from, to, cancellationToken);
 
+    /// <summary>
+    /// The keys whose value differs between two states of a tree, in key order. A page both states
+    /// share holds the same entries in both, because committed pages are never overwritten: the
+    /// comparison steps over it without reading it, so its cost follows what changed, not the size of
+    /// the tree.
+    /// </summary>
+    /// <remarks>
+    /// The caller keeps both states reachable for as long as it enumerates: it holds a read snapshot no
+    /// newer than the older one, or is the writer.
+    /// </remarks>
+    public static async IAsyncEnumerable<BTreeChange> DiffAsync(
+        IPageSource source,
+        PageNumber before,
+        PageNumber after,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        if (before == after)
+        {
+            yield break;
+        }
+
+        var old = new DiffCursor(source, before, await HeightAsync(source, before, cancellationToken).ConfigureAwait(false));
+        var current = new DiffCursor(source, after, await HeightAsync(source, after, cancellationToken).ConfigureAwait(false));
+        try
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var left = old.Peek();
+                var right = current.Peek();
+                if (left == DiffItem.End && right == DiffItem.End)
+                {
+                    yield break;
+                }
+
+                if (left == DiffItem.Subtree || right == DiffItem.Subtree)
+                {
+                    if (left == right && old.Subtree == current.Subtree)
+                    {
+                        // Both are about to enter the same page, having passed the same keys: nothing in it differs.
+                        old.Skip();
+                        current.Skip();
+                        continue;
+                    }
+
+                    // Go down on the side that is higher up, so that shared pages meet at the same level.
+                    var leftLevel = left == DiffItem.Subtree ? old.Level : -1;
+                    var rightLevel = right == DiffItem.Subtree ? current.Level : -1;
+                    if (leftLevel >= rightLevel)
+                    {
+                        await old.ExpandAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    if (rightLevel >= leftLevel)
+                    {
+                        await current.ExpandAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    continue;
+                }
+
+                var order = left == DiffItem.End ? 1 : right == DiffItem.End ? -1 : old.Key.Span.SequenceCompareTo(current.Key.Span);
+                if (order < 0)
+                {
+                    yield return new BTreeChange(old.Key, true, await old.ValueAsync(cancellationToken).ConfigureAwait(false), false, default);
+                    old.Skip();
+                }
+                else if (order > 0)
+                {
+                    yield return new BTreeChange(current.Key, false, default, true, await current.ValueAsync(cancellationToken).ConfigureAwait(false));
+                    current.Skip();
+                }
+                else
+                {
+                    // The same bytes in the leaf are the same value: a large one is never changed in place.
+                    if (old.IsLarge != current.IsLarge || !old.Stored.Span.SequenceEqual(current.Stored.Span))
+                    {
+                        var oldValue = await old.ValueAsync(cancellationToken).ConfigureAwait(false);
+                        var newValue = await current.ValueAsync(cancellationToken).ConfigureAwait(false);
+                        if (!oldValue.Span.SequenceEqual(newValue.Span))
+                        {
+                            yield return new BTreeChange(current.Key, true, oldValue, true, newValue);
+                        }
+                    }
+
+                    old.Skip();
+                    current.Skip();
+                }
+            }
+        }
+        finally
+        {
+            old.Dispose();
+            current.Dispose();
+        }
+    }
+
     /// <summary>Copies the value of <paramref name="key"/> in the latest committed state.</summary>
     /// <returns>The value length, or <see cref="NotFound"/>.</returns>
     public ValueTask<int> GetAsync(
@@ -765,6 +862,26 @@ internal sealed class BTree
         return first;
     }
 
+    /// <summary>How many levels a tree has: 0 if it is empty, 1 if its root is a leaf.</summary>
+    private static async ValueTask<int> HeightAsync(IPageSource source, PageNumber root, CancellationToken cancellationToken)
+    {
+        var height = 0;
+        for (var number = root; !number.IsNone; height++)
+        {
+            if (!source.TryPin(number, out var page))
+            {
+                page = await source.PinAsync(number, cancellationToken).ConfigureAwait(false);
+            }
+
+            using (page)
+            {
+                number = BTreeNode.IsLeaf(page.Span) ? PageNumber.None : BTreeNode.Child(page.Span, 0);
+            }
+        }
+
+        return height;
+    }
+
     /// <summary>Frees the overflow pages of a value that the tree no longer reaches.</summary>
     private static async ValueTask FreeChainAsync(
         WriteTransaction transaction, PageNumber first, int length, CancellationToken cancellationToken)
@@ -1028,6 +1145,123 @@ internal sealed class BTree
             {
                 throw new InvalidDataException("A B+Tree node has no room for a separator after being split.");
             }
+        }
+    }
+
+    private enum DiffItem
+    {
+        End,
+        Subtree,
+        Entry,
+    }
+
+    /// <summary>
+    /// One state of a tree being compared, as a sequence in key order of entries and of subtrees not yet
+    /// opened. A subtree can be stepped over whole, or opened to go on with what it holds.
+    /// </summary>
+    private sealed class DiffCursor(IPageSource source, PageNumber root, int height) : IDisposable
+    {
+        private readonly List<(PageLease Page, int Index)> _path = [];
+        private PageNumber _root = root;
+
+        /// <summary>Gets the subtree that comes next. Meaningful after <see cref="Peek"/> says there is one.</summary>
+        public PageNumber Subtree => _path.Count == 0 ? _root : BTreeNode.Child(_path[^1].Page.Span, _path[^1].Index);
+
+        /// <summary>Gets how many levels the subtree that comes next has.</summary>
+        public int Level => height - _path.Count;
+
+        public ReadOnlyMemory<byte> Key
+        {
+            get
+            {
+                var (page, index) = _path[^1];
+                BTreeNode.LeafKeyRange(page.Span, index, out var offset, out var length);
+                return page.Payload.Slice(offset, length);
+            }
+        }
+
+        /// <summary>Gets what the leaf holds for the entry: its value, or the reference to a large one.</summary>
+        public ReadOnlyMemory<byte> Stored
+        {
+            get
+            {
+                var (page, index) = _path[^1];
+                BTreeNode.LeafValueRange(page.Span, index, out var offset, out var length);
+                return page.Payload.Slice(offset, length);
+            }
+        }
+
+        public bool IsLarge => BTreeNode.IsOverflow(_path[^1].Page.Span, _path[^1].Index);
+
+        public DiffItem Peek()
+        {
+            while (_path.Count > 0)
+            {
+                var (page, index) = _path[^1];
+                var node = page.Span;
+                var isLeaf = BTreeNode.IsLeaf(node);
+
+                // An internal node has one child more than keys.
+                if (index < BTreeNode.Count(node) + (isLeaf ? 0 : 1))
+                {
+                    return isLeaf ? DiffItem.Entry : DiffItem.Subtree;
+                }
+
+                page.Dispose();
+                _path.RemoveAt(_path.Count - 1);
+            }
+
+            return _root.IsNone ? DiffItem.End : DiffItem.Subtree;
+        }
+
+        /// <summary>Steps over the entry or the subtree that comes next.</summary>
+        public void Skip()
+        {
+            if (_path.Count == 0)
+            {
+                _root = PageNumber.None;
+            }
+            else
+            {
+                _path[^1] = (_path[^1].Page, _path[^1].Index + 1);
+            }
+        }
+
+        /// <summary>Opens the subtree that comes next: what follows is what it holds.</summary>
+        public async ValueTask ExpandAsync(CancellationToken cancellationToken)
+        {
+            var number = Subtree;
+            Skip();
+            if (!source.TryPin(number, out var page))
+            {
+                page = await source.PinAsync(number, cancellationToken).ConfigureAwait(false);
+            }
+
+            _path.Add((page, 0));
+        }
+
+        /// <summary>The value of the entry that comes next, read from its own pages if it is a large one.</summary>
+        public async ValueTask<ReadOnlyMemory<byte>> ValueAsync(CancellationToken cancellationToken)
+        {
+            if (!IsLarge)
+            {
+                return Stored;
+            }
+
+            BTreeNode.ReadOverflowReference(Stored.Span, out var length, out var first);
+            var value = new byte[length];
+            await ReadChainAsync(source, first, value, cancellationToken).ConfigureAwait(false);
+            return value;
+        }
+
+        public void Dispose()
+        {
+            foreach (var (page, _) in _path)
+            {
+                page.Dispose();
+            }
+
+            _path.Clear();
         }
     }
 }

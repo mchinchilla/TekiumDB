@@ -35,6 +35,13 @@ public sealed class DbOptions
     /// <summary>Gets the Zstandard level pages are compressed with: higher is smaller and slower.</summary>
     public int CompressionLevel { get; init; } = 3;
 
+    /// <summary>
+    /// Gets how many past commits stay readable so that their changes can be watched with
+    /// <see cref="TekiumDb.WatchAsync{T}"/>, also after reopening. Zero, the default, keeps none and
+    /// turns the change feed off. The pages of those commits are not reused meanwhile: the file is larger.
+    /// </summary>
+    public int ChangeRetention { get; init; }
+
     /// <summary>Gets how much memory the page cache may use, in mebibytes.</summary>
     public int CacheSizeMb { get; init; } = 256;
 

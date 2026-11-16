@@ -1,6 +1,8 @@
 // Copyright (c) Tekium. Licensed under the MIT License.
 
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
+using Tekium.Embedded.Catalog;
 using Tekium.Embedded.Indexing;
 using Tekium.Embedded.Storage;
 using Tekium.Embedded.Transactions;
@@ -17,10 +19,24 @@ public sealed class TekiumDb : IAsyncDisposable
 
     private readonly ConcurrentDictionary<Type, ITable> _tables = new();
 
-    private TekiumDb(Pager pager)
+    // The retained commits, oldest first. Only the writer touches it, and only after its commit is durable.
+    private readonly Queue<ulong> _history = new();
+    private readonly int _retention;
+
+    // Whether the catalog says the history does not go back to the creation of the database.
+    private bool _historyIncomplete;
+
+    // Whether the catalog holds a history nobody keeps any more, to be removed by the next commit.
+    private bool _historyAbandoned;
+
+    private TaskCompletionSource _committed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _watchers;
+
+    private TekiumDb(Pager pager, int retention)
     {
         Pager = pager;
         Tree = new BTree(pager);
+        _retention = retention;
     }
 
     /// <summary>Marks a <see cref="Table{T}"/> so that tables of every row type fit in one dictionary.</summary>
@@ -31,6 +47,12 @@ public sealed class TekiumDb : IAsyncDisposable
 
     /// <summary>Gets a value indicating whether the pages of the database are compressed.</summary>
     public bool IsCompressed => Pager.IsCompressed;
+
+    /// <summary>
+    /// Gets the id of the latest transaction that committed a change. A consumer that passes it to
+    /// <see cref="WatchAsync{T}"/> gets the changes made from now on.
+    /// </summary>
+    public ulong LastTransactionId => Pager.Current.TransactionId.Value;
 
     internal Pager Pager { get; }
 
@@ -72,6 +94,7 @@ public sealed class TekiumDb : IAsyncDisposable
             }
 
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.CacheSizeMb, nameof(options));
+            ArgumentOutOfRangeException.ThrowIfNegative(options.ChangeRetention, nameof(options));
             var pagerOptions = new PagerOptions
             {
                 PageSize = pageSize,
@@ -85,7 +108,18 @@ public sealed class TekiumDb : IAsyncDisposable
                 ? await Pager.CreateAsync(owned, pagerOptions, options.Password.Span, cancellationToken).ConfigureAwait(false)
                 : await Pager.OpenAsync(owned, pagerOptions, options.Password.Span, cancellationToken).ConfigureAwait(false);
             owned = null;
-            return new TekiumDb(pager);
+            var database = new TekiumDb(pager, options.ChangeRetention);
+            try
+            {
+                await database.LoadHistoryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                await pager.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
+
+            return database;
         }
         finally
         {
@@ -102,6 +136,40 @@ public sealed class TekiumDb : IAsyncDisposable
     public Table<T> Table<T>()
         where T : class, ITkRow<T> =>
         (Table<T>)_tables.GetOrAdd(typeof(T), static (_, database) => new Table<T>(database), this);
+
+    /// <summary>
+    /// Reports what every commit after a transaction did to the rows of a table: one change per row
+    /// and commit, in commit order and, within a commit, in key order. Once it has caught up it waits
+    /// for the next commit; it ends only by cancellation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It runs after the commit and outside the writer: a slow consumer does not slow writes down. A
+    /// consumer that records the <see cref="TkChange{T}.TransactionId"/> of the last commit it fully
+    /// handled can resume from there, also after the database was closed and reopened.
+    /// </para>
+    /// <para>
+    /// Only the last <see cref="DbOptions.ChangeRetention"/> commits are kept. A consumer further
+    /// behind is cut off with <see cref="TkChangeFeedException"/>. The changes of one commit are read
+    /// into memory before the first is handed over.
+    /// </para>
+    /// </remarks>
+    /// <typeparam name="T">The row type of the table.</typeparam>
+    /// <param name="sinceTransaction">The last transaction already seen. Zero is the creation of the database.</param>
+    /// <param name="cancellationToken">Ends the feed.</param>
+    /// <returns>The changes.</returns>
+    /// <exception cref="InvalidOperationException">The database was opened without <see cref="DbOptions.ChangeRetention"/>.</exception>
+    public IAsyncEnumerable<TkChange<T>> WatchAsync<T>(ulong sinceTransaction, CancellationToken cancellationToken = default)
+        where T : class, ITkRow<T>
+    {
+        if (_retention == 0)
+        {
+            throw new InvalidOperationException(
+                "The change feed is off: open the database with DbOptions.ChangeRetention set to the number of commits to keep.");
+        }
+
+        return WatchCoreAsync(Table<T>(), sinceTransaction, cancellationToken);
+    }
 
     /// <summary>Starts the write transaction, waiting for the current one to finish if there is one.</summary>
     /// <param name="cancellationToken">Cancels the wait.</param>
@@ -123,4 +191,200 @@ public sealed class TekiumDb : IAsyncDisposable
     /// <summary>Closes the database.</summary>
     /// <returns>A task that completes when the file is closed.</returns>
     public ValueTask DisposeAsync() => Pager.DisposeAsync();
+
+    /// <summary>
+    /// Writes into the catalog of a transaction about to commit where the state before it was, and
+    /// drops the entries that fall out of the retention. Nothing is remembered here until the commit
+    /// is durable: see <see cref="Committed"/>.
+    /// </summary>
+    internal async ValueTask<HistoryChange> RecordHistoryAsync(WriteTransaction transaction, CancellationToken cancellationToken)
+    {
+        var basis = transaction.Basis;
+        if (transaction.Root == basis.Root && transaction.Dirty.Count == 0)
+        {
+            // Nothing changed: there will be no commit, and no state to remember.
+            return default;
+        }
+
+        if (_retention == 0)
+        {
+            if (_historyAbandoned)
+            {
+                // A history with a gap would report changes that never happened as one: better none.
+                var (stale, _) = await HistoryStore.LoadAsync(transaction, transaction.Root, cancellationToken).ConfigureAwait(false);
+                foreach (var old in stale)
+                {
+                    await Tree.DeleteAsync(transaction, HistoryStore.Key(old), cancellationToken).ConfigureAwait(false);
+                }
+
+                await Tree.DeleteAsync(transaction, HistoryStore.Marker, cancellationToken).ConfigureAwait(false);
+            }
+
+            return new HistoryChange(true, null, 0, false);
+        }
+
+        var id = basis.TransactionId.Value;
+        await Tree.PutAsync(transaction, HistoryStore.Key(id), HistoryStore.Value(basis.Root), cancellationToken).ConfigureAwait(false);
+        var trimmed = Math.Max(0, _history.Count + 1 - _retention);
+        var position = 0;
+        foreach (var old in _history)
+        {
+            if (position++ == trimmed)
+            {
+                break;
+            }
+
+            await Tree.DeleteAsync(transaction, HistoryStore.Key(old), cancellationToken).ConfigureAwait(false);
+        }
+
+        // From here on the history no longer starts at the creation of the database.
+        var incomplete = !_historyIncomplete && (trimmed > 0 || (_history.Count == 0 && !basis.Root.IsNone));
+        if (incomplete)
+        {
+            await Tree.PutAsync(transaction, HistoryStore.Marker, new byte[1], cancellationToken).ConfigureAwait(false);
+        }
+
+        return new HistoryChange(true, id, trimmed, incomplete);
+    }
+
+    /// <summary>After a commit is durable: remembers its history, lets go of what fell out, and wakes the watchers.</summary>
+    internal void Committed(HistoryChange change)
+    {
+        if (!change.Happened)
+        {
+            return;
+        }
+
+        _historyAbandoned = false;
+        if (change.Added is { } added)
+        {
+            _history.Enqueue(added);
+            for (var i = 0; i < change.Trimmed; i++)
+            {
+                _history.Dequeue();
+            }
+
+            _historyIncomplete |= change.Incomplete;
+            Pager.SetRetentionFloor(_history.Peek());
+        }
+
+        // Swapped only if somebody is waiting. A watcher counts itself before looking at the state, so
+        // either it is counted here or it sees this commit.
+        if (Volatile.Read(ref _watchers) > 0)
+        {
+            Interlocked.Exchange(ref _committed, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously))
+                .TrySetResult();
+        }
+    }
+
+    private async ValueTask LoadHistoryAsync(CancellationToken cancellationToken)
+    {
+        using var read = Pager.BeginRead();
+        var (transactions, incomplete) = await HistoryStore.LoadAsync(Pager, read.Root, cancellationToken).ConfigureAwait(false);
+        if (_retention == 0)
+        {
+            _historyAbandoned = transactions.Count > 0 || incomplete;
+            return;
+        }
+
+        // Before the first write: the states the history names stay readable in this session too.
+        _historyIncomplete = incomplete;
+        foreach (var transaction in transactions)
+        {
+            _history.Enqueue(transaction);
+        }
+
+        if (transactions.Count > 0)
+        {
+            Pager.SetRetentionFloor(transactions[0]);
+        }
+    }
+
+    private async IAsyncEnumerable<TkChange<T>> WatchCoreAsync<T>(
+        Table<T> table, ulong position, [EnumeratorCancellation] CancellationToken cancellationToken)
+        where T : class, ITkRow<T>
+    {
+        var changes = new List<TkChange<T>>();
+        Interlocked.Increment(ref _watchers);
+        try
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Taken before looking: a commit that lands in between completes this one.
+                var committed = Volatile.Read(ref _committed).Task;
+                changes.Clear();
+                var next = await NextCommitAsync(table, position, changes, cancellationToken).ConfigureAwait(false);
+                if (next is null)
+                {
+                    await committed.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                position = next.Value;
+                foreach (var change in changes)
+                {
+                    yield return change;
+                }
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _watchers);
+        }
+    }
+
+    /// <summary>
+    /// Reads what the commit after <paramref name="position"/> did to a table. Returns that commit, or
+    /// <see langword="null"/> if there is none yet.
+    /// </summary>
+    private async ValueTask<ulong?> NextCommitAsync<T>(
+        Table<T> table, ulong position, List<TkChange<T>> changes, CancellationToken cancellationToken)
+        where T : class, ITkRow<T>
+    {
+        ulong next;
+        PageNumber basis;
+        PageNumber nextRoot;
+        long pin;
+        using (var read = Pager.BeginRead())
+        {
+            var current = read.Snapshot.TransactionId.Value;
+            if (position >= current)
+            {
+                return null;
+            }
+
+            var found = await HistoryStore.FindAsync(Pager, read.Root, position, cancellationToken).ConfigureAwait(false);
+            (basis, next, nextRoot) = found.HasNext ? (found.Basis, found.Next, found.NextRoot) : (found.Basis, current, read.Root);
+
+            // The two states are compared after letting go of the latest one. The older of them is held by
+            // itself, so that the writer may move on meanwhile without taking its pages; if it is the
+            // empty database from before the first commit, there is nothing of it to hold.
+            if (found.Lost || !Pager.TryRetain(found.HasBasis ? found.BasisTransaction : next, out pin))
+            {
+                throw new TkChangeFeedException(
+                    $"The changes after transaction {position} are no longer retained: the database keeps the last {_retention} commits. " +
+                    "Start again from the current state of the table.");
+            }
+        }
+
+        try
+        {
+            await table.CollectChangesAsync(basis, nextRoot, next, changes, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            Pager.Release(pin);
+        }
+
+        return next;
+    }
+
+    /// <summary>What a commit does to the history, to apply once it is durable.</summary>
+    /// <param name="Happened">Whether there is a commit at all.</param>
+    /// <param name="Added">The transaction whose state the commit recorded, if the history is kept.</param>
+    /// <param name="Trimmed">How many of the oldest retained transactions it dropped.</param>
+    /// <param name="Incomplete">Whether it marked the history as not going back to the creation.</param>
+    internal readonly record struct HistoryChange(bool Happened, ulong? Added, int Trimmed, bool Incomplete);
 }

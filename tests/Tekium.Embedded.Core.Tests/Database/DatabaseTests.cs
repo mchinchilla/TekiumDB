@@ -24,7 +24,7 @@ public abstract class DatabaseTests : DeviceBackedTests
     private protected static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>Abre (o crea) una base sobre un dispositivo de prueba, que sobrevive al cierre para poder reabrirla.</summary>
-    private protected static ValueTask<TekiumDb> OpenAsync(TestDevice device, string? password = null) =>
+    private protected static ValueTask<TekiumDb> OpenAsync(TestDevice device, string? password = null, int changeRetention = 0) =>
         TekiumDb.OpenAsync(
             _ => device,
             new DbOptions
@@ -34,6 +34,7 @@ public abstract class DatabaseTests : DeviceBackedTests
                 CacheSizeMb = Options.CacheSizeMb,
                 KeyDerivation = Options.KeyDerivation,
                 Password = password.AsMemory(),
+                ChangeRetention = changeRetention,
             },
             Ct);
 
