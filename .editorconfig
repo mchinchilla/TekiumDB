@@ -1,0 +1,47 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{csproj,props,targets,slnx,json,yml,yaml}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.cs]
+# Cabecera de licencia desde el primer commit (plan: "Licencia y repositorio").
+file_header_template = Copyright (c) Tekium. Licensed under the MIT License.
+dotnet_diagnostic.IDE0073.severity = error
+
+csharp_style_namespace_declarations = file_scoped:error
+dotnet_diagnostic.IDE0161.severity = error
+csharp_using_directive_placement = outside_namespace:error
+dotnet_sort_system_directives_first = true
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = true:suggestion
+
+# Reglas duras de asincronía (ver CLAUDE.md).
+# CA2007: ConfigureAwait(false) en toda la librería. Sin excepciones.
+[src/**.cs]
+dotnet_diagnostic.CA2007.severity = error
+# CA2000/CA2016: disposables y propagación de CancellationToken.
+dotnet_diagnostic.CA2016.severity = error
+# CA1848/CA1873 etc. se evalúan cuando exista logging; no hay logging en el núcleo.
+
+# Código generado por herramientas (p. ej. el entry point de xUnit): no es nuestro, no se le aplican las prohibiciones.
+[**/obj/**.cs]
+generated_code = true
+dotnet_diagnostic.RS0030.severity = none
+
+[tests/**.cs]
+# Nombres de prueba con guiones bajos.
+dotnet_diagnostic.CA1707.severity = none
+# xUnit captura el contexto de sincronización: ConfigureAwait(false) no aplica en pruebas.
+dotnet_diagnostic.CA2007.severity = none

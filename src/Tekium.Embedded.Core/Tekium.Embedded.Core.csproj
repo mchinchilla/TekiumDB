@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Tekium.Embedded</RootNamespace>
+    <PackageId>Tekium.Embedded.Core</PackageId>
+    <Description>TekiumDB: base de datos embebida de archivo único (.tkdb), async-first, sin dependencias nativas.</Description>
+    <!-- unsafe se justifica caso por caso en comentario. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Tekium.Embedded.Core.Tests" />
+    <InternalsVisibleTo Include="Tekium.Embedded.Benchmarks" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,16 @@
+M:System.Threading.Tasks.Task.Wait;Sync-over-async prohibido: usar await.
+M:System.Threading.Tasks.Task.Wait(System.Int32);Sync-over-async prohibido: usar await.
+M:System.Threading.Tasks.Task.Wait(System.TimeSpan);Sync-over-async prohibido: usar await.
+M:System.Threading.Tasks.Task.Wait(System.Threading.CancellationToken);Sync-over-async prohibido: usar await.
+M:System.Threading.Tasks.Task.WaitAll(System.Threading.Tasks.Task[]);Sync-over-async prohibido: usar await Task.WhenAll.
+M:System.Threading.Tasks.Task.WaitAny(System.Threading.Tasks.Task[]);Sync-over-async prohibido: usar await Task.WhenAny.
+P:System.Threading.Tasks.Task`1.Result;Sync-over-async prohibido: usar await.
+P:System.Threading.Tasks.ValueTask`1.Result;Sync-over-async prohibido: usar await.
+M:System.Runtime.CompilerServices.TaskAwaiter.GetResult;Sync-over-async prohibido: usar await.
+M:System.Runtime.CompilerServices.TaskAwaiter`1.GetResult;Sync-over-async prohibido: usar await.
+M:System.Runtime.CompilerServices.ValueTaskAwaiter.GetResult;Sync-over-async prohibido: usar await.
+M:System.Runtime.CompilerServices.ValueTaskAwaiter`1.GetResult;Sync-over-async prohibido: usar await.
+M:System.Runtime.CompilerServices.ConfiguredTaskAwaitable.ConfiguredTaskAwaiter.GetResult;Sync-over-async prohibido: usar await.
+M:System.Runtime.CompilerServices.ConfiguredTaskAwaitable`1.ConfiguredTaskAwaiter.GetResult;Sync-over-async prohibido: usar await.
+M:System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable.ConfiguredValueTaskAwaiter.GetResult;Sync-over-async prohibido: usar await.
+M:System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable`1.ConfiguredValueTaskAwaiter.GetResult;Sync-over-async prohibido: usar await.

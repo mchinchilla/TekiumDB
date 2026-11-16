@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Tekium.Embedded.Core/Tekium.Embedded.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Tekium.Embedded.AotSmoke/Tekium.Embedded.AotSmoke.csproj" />
+    <Project Path="tests/Tekium.Embedded.Benchmarks/Tekium.Embedded.Benchmarks.csproj" />
+    <Project Path="tests/Tekium.Embedded.Core.Tests/Tekium.Embedded.Core.Tests.csproj" />
+  </Folder>
+</Solution>

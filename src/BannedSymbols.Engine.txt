@@ -1,0 +1,8 @@
+T:System.IO.FileStream;El motor hace E/S con RandomAccess sobre SafeFileHandle, no con FileStream.
+M:System.Guid.ToByteArray;Rompe el orden de UUID v7: usar ToByteArray(bigEndian: true) o TryWriteBytes(span, bigEndian: true, out _).
+M:System.Guid.TryWriteBytes(System.Span{System.Byte});Rompe el orden de UUID v7: usar la sobrecarga con bigEndian: true.
+M:System.Runtime.InteropServices.MemoryMarshal.Read``1(System.ReadOnlySpan{System.Byte});El formato es little-endian explícito: usar BinaryPrimitives.
+M:System.Runtime.InteropServices.MemoryMarshal.Write``1(System.Span{System.Byte},``0@);El formato es little-endian explícito: usar BinaryPrimitives.
+M:System.Linq.Expressions.LambdaExpression.Compile;Rompe Native AOT: nada de Expression.Compile en el núcleo.
+M:System.Threading.Monitor.Enter(System.Object);Serializar con SemaphoreSlim, no con Monitor.
+M:System.Threading.Monitor.Enter(System.Object,System.Boolean@);Serializar con SemaphoreSlim, no con Monitor.
