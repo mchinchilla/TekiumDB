@@ -10,7 +10,7 @@ namespace Tekium.Embedded.Indexing;
 /// it copies the path from the root to the leaf, so every older root keeps describing a complete tree.
 /// </summary>
 /// <remarks>
-/// Put, point lookup and range scan. Not yet: delete, merge, overflow pages.
+/// Put, delete, point lookup and range scan. Not yet: overflow pages for large values.
 /// Writes go through one <see cref="WriteTransaction"/> at a time; reads are safe from any thread.
 /// </remarks>
 internal sealed class BTree
@@ -27,6 +27,7 @@ internal sealed class BTree
     private readonly Memory<byte>[] _pathPages = new Memory<byte>[MaxDepth];
     private readonly PageNumber[] _pathNumbers = new PageNumber[MaxDepth];
     private readonly int[] _pathIndexes = new int[MaxDepth];
+    private readonly byte[] _mergeScratch;
     private byte[] _separator;
     private byte[] _nextSeparator;
 
@@ -37,6 +38,7 @@ internal sealed class BTree
         _maxEntrySize = (pager.PageSize.Bytes / 4) - 8;
         _separator = new byte[_maxKeySize];
         _nextSeparator = new byte[_maxKeySize];
+        _mergeScratch = new byte[PageLayout.PayloadSize(pager.PageSize)];
     }
 
     /// <summary>Copies the value of <paramref name="key"/> in the tree rooted at <paramref name="root"/>.</summary>
@@ -204,6 +206,115 @@ internal sealed class BTree
         InsertIntoLeaf(transaction, depth, key.Span, value.Span, rightmostPath);
     }
 
+    /// <summary>Removes the entry with this key.</summary>
+    /// <returns><see langword="true"/> if the key existed.</returns>
+    public async ValueTask<bool> DeleteAsync(
+        WriteTransaction transaction, ReadOnlyMemory<byte> key, CancellationToken cancellationToken)
+    {
+        // First find the key without touching anything: a delete that finds nothing must not copy the path.
+        var depth = 0;
+        var number = transaction.Root;
+        while (true)
+        {
+            if (number.IsNone)
+            {
+                return false;
+            }
+
+            if (depth == MaxDepth)
+            {
+                throw new InvalidDataException("The B+Tree is deeper than any valid tree can be.");
+            }
+
+            if (!transaction.TryPin(number, out var page))
+            {
+                page = await transaction.PinAsync(number, cancellationToken).ConfigureAwait(false);
+            }
+
+            using (page)
+            {
+                var node = page.Span;
+                _pathNumbers[depth] = number;
+                if (BTreeNode.IsLeaf(node))
+                {
+                    BTreeNode.LowerBound(node, key.Span, out var found);
+                    if (!found)
+                    {
+                        return false;
+                    }
+
+                    break;
+                }
+
+                _pathIndexes[depth] = BTreeNode.FindChildIndex(node, key.Span);
+                number = BTreeNode.Child(node, _pathIndexes[depth]);
+            }
+
+            depth++;
+        }
+
+        // Now copy the path, top down, so that every page on it may be modified.
+        for (var level = 0; level <= depth; level++)
+        {
+            var current = _pathNumbers[level];
+            if (!transaction.TryGetWritable(current, out var writable))
+            {
+                if (!transaction.TryPin(current, out var committed))
+                {
+                    committed = await transaction.PinAsync(current, cancellationToken).ConfigureAwait(false);
+                }
+
+                using (committed)
+                {
+                    writable = transaction.CopyForWrite(committed, current, out current);
+                }
+
+                _pathNumbers[level] = current;
+                if (level == 0)
+                {
+                    transaction.Root = current;
+                }
+                else
+                {
+                    BTreeNode.SetChild(_pathPages[level - 1].Span, _pathIndexes[level - 1], current);
+                }
+            }
+
+            _pathPages[level] = writable;
+        }
+
+        var leaf = _pathPages[depth].Span;
+        BTreeNode.RemoveSlot(leaf, BTreeNode.LowerBound(leaf, key.Span, out _));
+
+        // A node left under a quarter full joins a sibling if both fit in one page. That removes an entry
+        // from the parent, which may then need the same, up to the root.
+        for (var level = depth; level > 0; level--)
+        {
+            var node = _pathPages[level].Span;
+            if (BTreeNode.UsedSpace(node) >= BTreeNode.Capacity(node) / 4)
+            {
+                return true;
+            }
+
+            var index = _pathIndexes[level - 1];
+            var lastChild = BTreeNode.Count(_pathPages[level - 1].Span);
+            var merged = index > 0
+                && await TryMergeAsync(transaction, level, index - 1, cancellationToken).ConfigureAwait(false);
+            if (!merged && index < lastChild)
+            {
+                merged = await TryMergeAsync(transaction, level, index, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!merged)
+            {
+                return true;
+            }
+        }
+
+        CollapseRoot(transaction);
+        return true;
+    }
+
     private static async IAsyncEnumerable<BTreeEntry> RangeCoreAsync(
         IPageSource source,
         PageNumber root,
@@ -366,14 +477,76 @@ internal sealed class BTree
     /// </summary>
     private static bool TryInsertSeparator(Span<byte> node, int index, ReadOnlySpan<byte> separator, PageNumber right)
     {
-        if (!BTreeNode.TryInsertInternal(node, index, BTreeNode.Child(node, index), separator))
+        var left = BTreeNode.Child(node, index);
+        if (!BTreeNode.TryInsertInternal(node, index, left, separator))
         {
-            return false;
+            // Deletes leave dead cells behind; reclaim them before deciding the node is full.
+            if (BTreeNode.Garbage(node) == 0)
+            {
+                return false;
+            }
+
+            BTreeNode.Compact(node);
+            if (!BTreeNode.TryInsertInternal(node, index, left, separator))
+            {
+                return false;
+            }
         }
 
         // The slot that pointed to the split child moved one place right and now covers the new sibling.
         BTreeNode.SetChild(node, index + 1, right);
         return true;
+    }
+
+    /// <summary>
+    /// Joins the node at <paramref name="level"/> of the path with a sibling: the children at
+    /// <paramref name="leftIndex"/> and the next one of their parent. The result stays in the node's own
+    /// page, which is already writable, so the sibling is read but never copied.
+    /// </summary>
+    private async ValueTask<bool> TryMergeAsync(
+        WriteTransaction transaction, int level, int leftIndex, CancellationToken cancellationToken)
+    {
+        var nodeNumber = _pathNumbers[level];
+        var nodeIsLeft = BTreeNode.Child(_pathPages[level - 1].Span, leftIndex) == nodeNumber;
+        var siblingNumber = BTreeNode.Child(_pathPages[level - 1].Span, nodeIsLeft ? leftIndex + 1 : leftIndex);
+        if (!transaction.TryPin(siblingNumber, out var sibling))
+        {
+            sibling = await transaction.PinAsync(siblingNumber, cancellationToken).ConfigureAwait(false);
+        }
+
+        using (sibling)
+        {
+            var node = _pathPages[level].Span;
+            var parent = _pathPages[level - 1].Span;
+            ReadOnlySpan<byte> left = nodeIsLeft ? node : sibling.Span;
+            ReadOnlySpan<byte> right = nodeIsLeft ? sibling.Span : node;
+            if (!BTreeNode.TryMerge(_mergeScratch, left, right, BTreeNode.Key(parent, leftIndex)))
+            {
+                return false;
+            }
+
+            _mergeScratch.CopyTo(node);
+
+            // The parent loses the key between the two and keeps one pointer, to the node.
+            BTreeNode.RemoveSlot(parent, leftIndex);
+            BTreeNode.SetChild(parent, leftIndex, nodeNumber);
+        }
+
+        transaction.Free(siblingNumber);
+        return true;
+    }
+
+    /// <summary>After a delete reached the root: an empty leaf root is an empty tree, and an internal root with one child is that child.</summary>
+    private void CollapseRoot(WriteTransaction transaction)
+    {
+        var root = _pathPages[0].Span;
+        if (BTreeNode.Count(root) > 0)
+        {
+            return;
+        }
+
+        transaction.Root = BTreeNode.IsLeaf(root) ? PageNumber.None : BTreeNode.Child(root, 0);
+        transaction.Free(_pathNumbers[0]);
     }
 
     private void InsertIntoLeaf(

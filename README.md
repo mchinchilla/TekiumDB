@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 2 de la hoja de ruta).** Hoy existen el pager (caché acotada, free-list, commit atómico), el cifrado AES-256-GCM por página con Argon2id, y un B+Tree copy-on-write mínimo, medidos contra SQLite. No hay API pública, índices secundarios ni paquete publicado. La API y las características descritas aquí son el diseño objetivo, no funcionalidad disponible. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 3 de la hoja de ruta).** Hoy existen el pager (caché acotada, free-list, commit atómico), el cifrado AES-256-GCM por página con Argon2id, y el B+Tree copy-on-write con inserción, borrado, split y merge, medidos contra SQLite. No hay API pública, índices secundarios ni paquete publicado. La API y las características descritas aquí son el diseño objetivo, no funcionalidad disponible. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -43,7 +43,7 @@ Antes de invertir en el resto, la Fase 0.5 midió un motor mínimo contra `Micro
 
 ## Características
 
-Todas forman parte del diseño. Hoy existen el pager, el cifrado y, en versión mínima, el B+Tree copy-on-write con commit atómico.
+Todas forman parte del diseño. Hoy existen el pager, el cifrado y el B+Tree copy-on-write con commit atómico; faltan en el árbol los valores grandes (páginas de overflow) y la compresión de prefijos.
 
 **Almacenamiento**
 
@@ -142,7 +142,7 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 1 | Capa de E/S y pager: caché de páginas, checksums, free-list | Hecho en macOS: [criterio cumplido](docs/benchmarks/fase-1.md); pendiente confirmar CI en Linux y Windows |
 | 1.5 | Modo en memoria | Hecho en macOS: las pruebas del pager corren sobre archivo y sobre memoria; pendiente confirmar CI en Linux y Windows |
 | 2 | Cifrado por página y derivación de clave | Hecho en macOS: [criterio cumplido](docs/benchmarks/fase-2.md); pendiente confirmar CI en Linux y Windows |
-| 3 | B+Tree copy-on-write | Pendiente |
+| 3 | B+Tree copy-on-write: insert, lookup, delete, split, merge | Hecho en macOS: un millón de operaciones aleatorias contra un modelo; pendiente confirmar CI en Linux y Windows |
 | 4 | MVCC, transacciones y commit atómico | Pendiente |
 | 5 – 5.5 | Catálogo, filas tipadas, generador de código y compresión | Pendiente |
 | 6 – 6.8 | Índices secundarios, restricciones, change feed y carga masiva | Pendiente |

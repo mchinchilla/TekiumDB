@@ -71,6 +71,9 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     /// <summary>Gets the number of free pages in the file, reusable or not yet.</summary>
     public int FreePageCount => FreeList.Count;
 
+    /// <summary>Gets the number of pages the free-list itself occupies.</summary>
+    public int FreeListPageCount => FreeList.MetadataPageCount;
+
     internal FreeList FreeList { get; private set; }
 
     /// <summary>Creates an unencrypted database.</summary>

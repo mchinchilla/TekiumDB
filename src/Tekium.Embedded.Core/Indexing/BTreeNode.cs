@@ -57,6 +57,12 @@ internal static class BTreeNode
     public static int FreeSpace(ReadOnlySpan<byte> page) =>
         CellStart(page) - HeaderSize - (Count(page) * SlotSize);
 
+    /// <summary>Bytes available for entries in a node of this size.</summary>
+    public static int Capacity(ReadOnlySpan<byte> page) => page.Length - HeaderSize;
+
+    /// <summary>Bytes taken by live entries, slots included. Garbage does not count: compaction reclaims it.</summary>
+    public static int UsedSpace(ReadOnlySpan<byte> page) => Capacity(page) - FreeSpace(page) - Garbage(page);
+
     public static int LeafEntrySize(int keyLength, int valueLength) =>
         LeafCellHeader + keyLength + valueLength + SlotSize;
 
@@ -270,6 +276,58 @@ internal static class BTreeNode
         SetChild(left, index, middleChild);
         Compact(left);
         return length;
+    }
+
+    /// <summary>
+    /// Writes into <paramref name="target"/> the node that results from joining two siblings, if it fits
+    /// in one page. For internal nodes <paramref name="separator"/> is the parent key between them, which
+    /// comes down to sit between the last child of the left node and the first of the right one.
+    /// </summary>
+    /// <remarks><paramref name="target"/> must not overlap either input.</remarks>
+    public static bool TryMerge(
+        Span<byte> target, ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, ReadOnlySpan<byte> separator)
+    {
+        var leaf = IsLeaf(left);
+        var needed = UsedSpace(left) + UsedSpace(right)
+            + (leaf ? 0 : InternalCellHeader + separator.Length + SlotSize);
+        if (needed > Capacity(left))
+        {
+            return false;
+        }
+
+        Initialize(target, leaf);
+        var leftCount = Count(left);
+        var rightCount = Count(right);
+        var fits = true;
+        if (leaf)
+        {
+            for (var i = 0; i < leftCount; i++)
+            {
+                fits &= TryInsertLeaf(target, i, Key(left, i), LeafValue(left, i));
+            }
+
+            for (var i = 0; i < rightCount; i++)
+            {
+                fits &= TryInsertLeaf(target, leftCount + i, Key(right, i), LeafValue(right, i));
+            }
+        }
+        else
+        {
+            for (var i = 0; i < leftCount; i++)
+            {
+                fits &= TryInsertInternal(target, i, Child(left, i), Key(left, i));
+            }
+
+            fits &= TryInsertInternal(target, leftCount, Child(left, leftCount), separator);
+            for (var i = 0; i < rightCount; i++)
+            {
+                fits &= TryInsertInternal(target, leftCount + 1 + i, Child(right, i), Key(right, i));
+            }
+
+            SetChild(target, Count(target), Child(right, rightCount));
+        }
+
+        return fits ? true : throw new InvalidDataException("A B+Tree node reports less used space than it holds.");
     }
 
     private static int CellStart(ReadOnlySpan<byte> page) => ReadU16(page, CellStartOffset);

@@ -53,6 +53,9 @@ internal sealed class FreeList
         }
     }
 
+    /// <summary>Gets the number of pages the list itself occupies: trunks and directory.</summary>
+    public int MetadataPageCount => _batches.Count + _directory.Count;
+
     public static FreeList Empty(PageSize pageSize) => new(pageSize, [], []);
 
     public static async ValueTask<FreeList> LoadAsync(

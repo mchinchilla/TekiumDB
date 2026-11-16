@@ -5,6 +5,7 @@
   <!-- Toda dependencia debe ser compatible con MIT. El núcleo (src/Tekium.Embedded.Core) no lleva ninguna en runtime. -->
   <ItemGroup>
     <PackageVersion Include="BenchmarkDotNet" Version="0.16.0-preview.2" />
+    <PackageVersion Include="CsCheck" Version="5.0.1" />
     <PackageVersion Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" Version="5.6.0" />
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="11.0.0" />
     <PackageVersion Include="System.IO.Hashing" Version="11.0.0" />
