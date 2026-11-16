@@ -59,6 +59,7 @@ internal static class FileHeader
     private const int CheckSize = 16;
     private const int SlotCheckOffset = SlotSize - CheckSize;
     private const uint EncryptedFlag = 1;
+    private const uint CompressedFlag = 2;
 
     private static ReadOnlySpan<byte> Magic => "TekiumDB"u8;
 
@@ -73,7 +74,7 @@ internal static class FileHeader
         (copy * (long)pageSize.Bytes) + ReservationOffset;
 
     /// <summary>Writes the fields that never change into both meta pages of a new database.</summary>
-    public static void WriteFixed(Span<byte> metaPages, PageSize pageSize, bool encrypted)
+    public static void WriteFixed(Span<byte> metaPages, PageSize pageSize, bool encrypted, bool compressed)
     {
         metaPages.Clear();
         for (var page = 0; page < MetaPages; page++)
@@ -82,7 +83,8 @@ internal static class FileHeader
             Magic.CopyTo(header);
             BinaryPrimitives.WriteUInt16LittleEndian(header[VersionOffset..], FormatVersion);
             BinaryPrimitives.WriteUInt16LittleEndian(header[PageSizeOffset..], (ushort)pageSize.Bytes);
-            BinaryPrimitives.WriteUInt32LittleEndian(header[FlagsOffset..], encrypted ? EncryptedFlag : 0);
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                header[FlagsOffset..], (encrypted ? EncryptedFlag : 0) | (compressed ? CompressedFlag : 0));
             BinaryPrimitives.WriteUInt16LittleEndian(header[SlotCountOffset..], SlotCount);
         }
     }
@@ -107,11 +109,20 @@ internal static class FileHeader
             throw new InvalidDataException("The database header is corrupt.");
         }
 
+        // A flag this build does not know changes how the file is read: better to refuse than to guess.
+        if ((BinaryPrimitives.ReadUInt32LittleEndian(header[FlagsOffset..]) & ~(EncryptedFlag | CompressedFlag)) != 0)
+        {
+            throw new InvalidDataException("The file uses features this build does not know.");
+        }
+
         return size;
     }
 
     public static bool IsEncrypted(ReadOnlySpan<byte> header) =>
         (BinaryPrimitives.ReadUInt32LittleEndian(header[FlagsOffset..]) & EncryptedFlag) != 0;
+
+    public static bool IsCompressed(ReadOnlySpan<byte> header) =>
+        (BinaryPrimitives.ReadUInt32LittleEndian(header[FlagsOffset..]) & CompressedFlag) != 0;
 
     /// <summary>Copies the salt, derivation parameters and wrapped key from one header copy to another.</summary>
     public static void CopyKeyEnvelope(ReadOnlySpan<byte> from, Span<byte> to)

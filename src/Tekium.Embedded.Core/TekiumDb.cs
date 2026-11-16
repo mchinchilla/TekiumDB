@@ -29,6 +29,9 @@ public sealed class TekiumDb : IAsyncDisposable
     /// <summary>Gets a value indicating whether the database is encrypted.</summary>
     public bool IsEncrypted => Pager.IsEncrypted;
 
+    /// <summary>Gets a value indicating whether the pages of the database are compressed.</summary>
+    public bool IsCompressed => Pager.IsCompressed;
+
     internal Pager Pager { get; }
 
     /// <summary>Gets the tree operations of the single writer. Only whoever holds the write transaction may use it.</summary>
@@ -74,6 +77,8 @@ public sealed class TekiumDb : IAsyncDisposable
                 PageSize = pageSize,
                 CachePages = (int)Math.Clamp(options.CacheSizeMb * 1048576L / pageSize.Bytes, MinimumCachePages, int.MaxValue),
                 KeyDerivation = options.KeyDerivation,
+                Compression = options.Compression,
+                CompressionLevel = options.CompressionLevel,
             };
 
             var pager = owned.Length == 0

@@ -55,7 +55,7 @@ internal sealed class AesGcmPageProtector : IPageProtector
 
     public bool Encrypts => true;
 
-    public void Protect(ReadOnlySpan<byte> page, Span<byte> stored)
+    public int Protect(ReadOnlySpan<byte> page, Span<byte> stored)
     {
         var header = stored[..PageLayout.HeaderSize];
         page[..PageLayout.HeaderSize].CopyTo(header);
@@ -73,6 +73,8 @@ internal sealed class AesGcmPageProtector : IPageProtector
         {
             Return(cipher);
         }
+
+        return page.Length;
     }
 
     public void Unprotect(Span<byte> page, PageNumber expected)

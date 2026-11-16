@@ -23,11 +23,18 @@ internal sealed class CrashWorkload
     private readonly string? _password;
     private readonly List<SortedDictionary<byte[], byte[]>> _states = [];
 
-    public CrashWorkload(int seed, int transactions, string? password)
+    public CrashWorkload(int seed, int transactions, string? password, bool compress = false)
     {
         _seed = seed;
         _password = password;
         Transactions = transactions;
+        Options = new PagerOptions
+        {
+            PageSize = PageSize.FromBytes(4096),
+            CachePages = 64,
+            KeyDerivation = new Argon2Parameters(MemoryKiB: 64, Iterations: 1, Parallelism: 1),
+            Compression = compress,
+        };
 
         var model = new SortedDictionary<byte[], byte[]>(ByteOrder);
         _states.Add(new SortedDictionary<byte[], byte[]>(ByteOrder));
@@ -53,12 +60,7 @@ internal sealed class CrashWorkload
 
     // Páginas chicas y caché chica: el árbol toma varios niveles y la free-list entra en juego pronto.
     // Argon2id al mínimo: aquí no se prueba el costo de derivar la clave.
-    public PagerOptions Options { get; } = new()
-    {
-        PageSize = PageSize.FromBytes(4096),
-        CachePages = 64,
-        KeyDerivation = new Argon2Parameters(MemoryKiB: 64, Iterations: 1, Parallelism: 1),
-    };
+    public PagerOptions Options { get; }
 
     public ValueTask<Pager> CreateAsync(IStorageDevice device, CancellationToken cancellationToken) =>
         Pager.CreateAsync(device, Options, _password, cancellationToken);

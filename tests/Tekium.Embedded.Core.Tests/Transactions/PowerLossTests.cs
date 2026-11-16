@@ -16,11 +16,15 @@ public abstract class PowerLossTests : DeviceBackedTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [Theory]
-    [InlineData(null)]
-    [InlineData("power loss")]
-    public async Task Losing_power_at_any_operation_leaves_the_last_acknowledged_state_or_the_one_in_flight(string? password)
+    [InlineData(null, false)]
+    [InlineData("power loss", false)]
+    [InlineData(null, true)]
+    [InlineData("power loss", true)]
+    public async Task Losing_power_at_any_operation_leaves_the_last_acknowledged_state_or_the_one_in_flight(string? password, bool compress)
     {
-        var workload = new CrashWorkload(seed: 11, transactions: 8, password);
+        // Con compresión cada página es una escritura aparte: el triple de puntos donde cortar. Una carga
+        // más corta recorre los mismos caminos sin triplicar lo que tarda la prueba.
+        var workload = new CrashWorkload(seed: 11, transactions: compress ? 4 : 8, password, compress);
         var random = new Random(4);
 
         var complete = NewDevice();

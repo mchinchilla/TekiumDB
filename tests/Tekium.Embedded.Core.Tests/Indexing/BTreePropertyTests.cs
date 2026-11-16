@@ -43,13 +43,15 @@ public sealed class BTreePropertyTests
     /// Secuencias aleatorias cortas. Si una falla, CsCheck la reduce a la secuencia mínima que
     /// reproduce el error y la imprime con su semilla.
     /// </summary>
-    [Fact]
-    public async Task Any_sequence_of_operations_matches_the_model()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Any_sequence_of_operations_matches_the_model(bool compress)
     {
         await AnyOperation.Array[1, 300].SampleAsync(
             async operations =>
             {
-                var harness = await Harness.CreateAsync();
+                var harness = await Harness.CreateAsync(compress);
                 await using (harness)
                 {
                     foreach (var operation in operations)
@@ -60,7 +62,7 @@ public sealed class BTreePropertyTests
                     await harness.AssertEverythingAsync();
                 }
             },
-            iter: 400,
+            iter: compress ? 200 : 400,
             threads: 1);
     }
 
@@ -144,10 +146,10 @@ public sealed class BTreePropertyTests
 
         public int Deletes { get; private set; }
 
-        public static async Task<Harness> CreateAsync()
+        public static async Task<Harness> CreateAsync(bool compress = false)
         {
             var harness = new Harness();
-            harness._pager = await Pager.CreateAsync(harness._device, Options, Ct);
+            harness._pager = await Pager.CreateAsync(harness._device, Options with { Compression = compress }, Ct);
             harness._tree = new BTree(harness._pager);
             return harness;
         }

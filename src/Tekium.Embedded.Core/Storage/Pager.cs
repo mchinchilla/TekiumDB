@@ -45,10 +45,18 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     private Exception? _commitInDoubt;
 
     private Pager(
-        IStorageDevice device, PageSize pageSize, PagerOptions options, IPageProtector protector, Snapshot current, int slot)
+        IStorageDevice device,
+        PageSize pageSize,
+        PagerOptions options,
+        IPageProtector protector,
+        bool compressed,
+        Snapshot current,
+        int slot)
     {
         _device = device;
-        _protector = protector;
+
+        // Compression goes in front of the checksum or the encryption: a page is compressed, then protected.
+        _protector = compressed ? new CompressedPageProtector(protector, options.CompressionLevel, pageSize) : protector;
         _options = options;
         _cache = new PageCache(options.CachePages);
         _current = new SnapshotState(current);
@@ -62,6 +70,9 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
 
     /// <summary>Gets a value indicating whether pages are encrypted on disk.</summary>
     public bool IsEncrypted => _protector.Encrypts;
+
+    /// <summary>Gets a value indicating whether pages are compressed on disk.</summary>
+    public bool IsCompressed => _protector is CompressedPageProtector;
 
     /// <summary>Gets the latest committed state. To read from it safely, hold a <see cref="BeginRead"/>.</summary>
     public Snapshot Current => Volatile.Read(ref _current).Snapshot;
@@ -177,7 +188,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     /// </summary>
     public ValueTask ChangePasswordAsync(ReadOnlySpan<char> newPassword, CancellationToken cancellationToken)
     {
-        if (_protector is not AesGcmPageProtector protector)
+        if (((_protector as CompressedPageProtector)?.Inner ?? _protector) is not AesGcmPageProtector protector)
         {
             return ValueTask.FromException(
                 new InvalidOperationException("The database is not encrypted: there is no password to change."));
@@ -318,7 +329,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
 
             var pageBytes = options.PageSize.Bytes;
             var meta = new byte[pageBytes * (int)FileHeader.MetaPages];
-            FileHeader.WriteFixed(meta, options.PageSize, encrypted: password is not null);
+            FileHeader.WriteFixed(meta, options.PageSize, encrypted: password is not null, options.Compression);
 
             IPageProtector protector = ChecksumPageProtector.Instance;
             if (password is not null)
@@ -354,7 +365,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
                 FileHeader.EncodeSlot(meta.AsSpan((int)FileHeader.SlotOffset(0, options.PageSize)), initial, protector);
                 await device.WriteAsync(0, meta, cancellationToken).ConfigureAwait(false);
                 await device.FlushAsync(cancellationToken).ConfigureAwait(false);
-                return new Pager(device, options.PageSize, options, protector, initial, slot: 0);
+                return new Pager(device, options.PageSize, options, protector, options.Compression, initial, slot: 0);
             }
             catch
             {
@@ -410,7 +421,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
                     throw new InvalidDataException("The database header points past the end of the file.");
                 }
 
-                pager = new Pager(device, pageSize, options, protector, current, slot);
+                pager = new Pager(device, pageSize, options, protector, FileHeader.IsCompressed(first), current, slot);
 
                 // Take the larger copy as the truth and overwrite the other one first.
                 var reservedFirst = FileHeader.ReadReservation(first, protector);
@@ -566,17 +577,21 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
             var perWrite = buffer.Length / pageBytes;
             for (var i = 0; i < count;)
             {
+                // A run of consecutive pages goes out in one write. A page stored shorter than its slot,
+                // because it was compressed, ends the run: what follows it in the file is not ours to write.
                 var first = numbers[i];
                 var filled = 0;
+                int stored;
                 do
                 {
-                    _protector.Protect(pages[numbers[i]], buffer.AsSpan(filled * pageBytes, pageBytes));
+                    stored = _protector.Protect(pages[numbers[i]], buffer.AsSpan(filled * pageBytes, pageBytes));
                     filled++;
                     i++;
                 }
-                while (i < count && filled < perWrite && numbers[i] == numbers[i - 1] + 1);
+                while (stored == pageBytes && i < count && filled < perWrite && numbers[i] == numbers[i - 1] + 1);
 
-                await _device.WriteAsync(first * (long)pageBytes, buffer.AsMemory(0, filled * pageBytes), cancellationToken)
+                await _device.WriteAsync(
+                    first * (long)pageBytes, buffer.AsMemory(0, ((filled - 1) * pageBytes) + stored), cancellationToken)
                     .ConfigureAwait(false);
             }
         }

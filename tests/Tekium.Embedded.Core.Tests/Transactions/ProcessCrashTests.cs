@@ -14,24 +14,28 @@ namespace Tekium.Embedded.Tests.Transactions;
 public sealed class ProcessCrashTests
 {
     private const int Seed = 23;
-    private const int Transactions = 8;
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [Theory]
-    [InlineData(null)]
-    [InlineData("crash test")]
-    public async Task Killing_the_process_at_any_point_of_a_commit_leaves_a_consistent_database(string? password)
+    [InlineData(null, false)]
+    [InlineData("crash test", false)]
+    [InlineData(null, true)]
+    [InlineData("crash test", true)]
+    public async Task Killing_the_process_at_any_point_of_a_commit_leaves_a_consistent_database(string? password, bool compress)
     {
-        var workload = new CrashWorkload(Seed, Transactions, password);
+        // Con compresión cada página es una escritura aparte y hay el triple de puntos donde morir: una
+        // carga más corta recorre los mismos caminos.
+        var transactions = compress ? 4 : 8;
+        var workload = new CrashWorkload(Seed, transactions, password, compress);
         var directory = Path.Combine(Path.GetTempPath(), $"tekium-crash-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
         try
         {
             // Una corrida completa dice qué operaciones hace la carga, y que el hijo sano la termina.
-            var complete = await RunChildAsync(Path.Combine(directory, "complete.tkdb"), 0, "before", password);
+            var complete = await RunChildAsync(Path.Combine(directory, "complete.tkdb"), 0, "before", password, compress, transactions);
             Assert.Equal(0, complete.ExitCode);
-            Assert.Equal(Transactions, complete.Acknowledged);
+            Assert.Equal(transactions, complete.Acknowledged);
             var operations = complete.Operations!;
             Assert.True(operations.Contains('L', StringComparison.Ordinal), "The workload never grows the file.");
             Assert.True(operations.Length > 30, "The workload is too small to say anything about the commit.");
@@ -53,7 +57,7 @@ public sealed class ProcessCrashTests
                 async (crash, cancellationToken) =>
                 {
                     var path = Path.Combine(directory, $"{crash.At}-{crash.Mode}.tkdb");
-                    var child = await RunChildAsync(path, crash.At, crash.Mode, password);
+                    var child = await RunChildAsync(path, crash.At, crash.Mode, password, compress, transactions);
                     var context = $"Killed {crash.Mode} operation {crash.At} of {operations.Length} ({operations[crash.At - 1]})";
                     Assert.True(child.ExitCode != 0 && child.Operations is null, $"{context}: the child was supposed to die.");
 
@@ -68,7 +72,7 @@ public sealed class ProcessCrashTests
     }
 
     private static async Task<(int ExitCode, int Acknowledged, string? Operations)> RunChildAsync(
-        string path, int crashAt, string mode, string? password)
+        string path, int crashAt, string mode, string? password, bool compress, int transactions)
     {
         var start = new ProcessStartInfo { RedirectStandardOutput = true, UseShellExecute = false };
 
@@ -87,9 +91,10 @@ public sealed class ProcessCrashTests
 
         start.ArgumentList.Add(path);
         start.ArgumentList.Add(Seed.ToString(CultureInfo.InvariantCulture));
-        start.ArgumentList.Add(Transactions.ToString(CultureInfo.InvariantCulture));
+        start.ArgumentList.Add(transactions.ToString(CultureInfo.InvariantCulture));
         start.ArgumentList.Add(crashAt.ToString(CultureInfo.InvariantCulture));
         start.ArgumentList.Add(mode);
+        start.ArgumentList.Add(compress ? "compressed" : "plain");
         if (password is not null)
         {
             start.ArgumentList.Add(password);

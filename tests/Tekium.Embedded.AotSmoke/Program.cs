@@ -53,7 +53,8 @@ return failures;
 static async Task<int> TypedRoundTripAsync()
 {
     var file = Path.Combine(Path.GetTempPath(), $"tekium-aot-typed-{Guid.NewGuid():N}.tkdb");
-    var options = new DbOptions { Path = file, Password = "aot typed password".AsMemory(), CacheSizeMb = 8 };
+    // Cifrada y comprimida: Zstandard viene de la biblioteca nativa del propio runtime, que AOT enlaza dentro del binario.
+    var options = new DbOptions { Path = file, Password = "aot typed password".AsMemory(), CacheSizeMb = 8, Compression = true };
     // Con su marca de tiempo explícita: dos UUID v7 del mismo milisegundo no tienen orden garantizado.
     var at = new DateTimeOffset(2026, 11, 16, 9, 30, 0, TimeSpan.FromHours(-6));
     var first = Guid.CreateVersion7(at);
@@ -96,7 +97,8 @@ static async Task<int> TypedRoundTripAsync()
                 && recent is { Place: "here", Cost: 12.50m, Mood: Mood.Busy, Weight: 0.5 }
                 && recent.Attachment.AsSpan().SequenceEqual(large)
                 && titles is ["written as version 1", "written as version 2"]
-                && database.IsEncrypted)
+                && database.IsEncrypted
+                && database.IsCompressed)
             {
                 return 0;
             }

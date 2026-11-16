@@ -50,7 +50,7 @@ Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy
 - Archivo único `.tkdb` con páginas de tamaño fijo (8 KiB por defecto; 4, 16 o 32 KiB configurables).
 - B+Tree copy-on-write con MVCC: un escritor, lectores ilimitados sin bloqueo, cada uno sobre su snapshot inmutable.
 - Commit atómico por slots de raíz alternados. Si el proceso muere a mitad de un commit, la base abre en el estado anterior, sin recuperación.
-- Compresión Zstandard por página, opcional.
+- Compresión Zstandard por página, opcional (`Compression = true`). Reduce los bytes que se escriben, no el tamaño del archivo: ver [las mediciones](docs/benchmarks/fase-5.5.md).
 - Modo en memoria para pruebas: `new DbOptions { InMemory = true }`.
 
 **Seguridad**
@@ -182,7 +182,7 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 3 | B+Tree copy-on-write: insert, lookup, delete, split, merge | Hecho en macOS y Linux: un millón de operaciones aleatorias contra un modelo; Windows sin verificar |
 | 4 | MVCC, transacciones y commit atómico | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-4.md); Windows sin verificar |
 | 5 | Catálogo, filas tipadas y generador de código | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-5.md); Windows sin verificar |
-| 5.5 | Compresión Zstandard por página | Pendiente |
+| 5.5 | Compresión Zstandard por página | Hecho y [medido](docs/benchmarks/fase-5.5.md): comprime 3,3× los bytes escritos pero no ahorra disco y cuesta latencia; queda apagada por defecto |
 | 6 – 6.8 | Índices secundarios, restricciones, change feed y carga masiva | Pendiente |
 | 7 – 9 | Índices temporal, UUID v7 y vectorial HNSW | Pendiente |
 | 10 – 10.6 | Herramientas, backup en caliente, verificación y viaje en el tiempo | Pendiente |

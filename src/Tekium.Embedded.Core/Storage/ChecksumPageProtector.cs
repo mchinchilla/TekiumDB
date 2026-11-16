@@ -16,10 +16,11 @@ internal sealed class ChecksumPageProtector : IPageProtector
 
     public bool Encrypts => false;
 
-    public void Protect(ReadOnlySpan<byte> page, Span<byte> stored)
+    public int Protect(ReadOnlySpan<byte> page, Span<byte> stored)
     {
         page.CopyTo(stored);
         PageLayout.Seal(stored[..page.Length]);
+        return page.Length;
     }
 
     public void Unprotect(Span<byte> page, PageNumber expected) => PageLayout.Verify(page, expected);

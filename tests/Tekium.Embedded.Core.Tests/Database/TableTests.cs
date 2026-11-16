@@ -379,6 +379,48 @@ public sealed class DatabaseOpenTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_compressed_database_is_used_exactly_like_any_other(bool encrypted)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"tekium-compressed-{Guid.NewGuid():N}.tkdb");
+        var password = (encrypted ? "compressed password" : string.Empty).AsMemory();
+        var body = string.Concat(Enumerable.Repeat("the same sentence again and again. ", 400));
+        try
+        {
+            await using (var database = await TekiumDb.OpenAsync(
+                new DbOptions { Path = path, Compression = true, CompressionLevel = 9, Password = password, KeyDerivation = new(64, 1, 1) }, Ct))
+            {
+                Assert.True(database.IsCompressed);
+                await using var writer = await database.BeginWriteAsync(Ct);
+                for (var i = 0; i < 300; i++)
+                {
+                    await database.Table<Note>().InsertAsync(writer, new Note { Slug = $"note-{i:D4}", Body = body[..(i * 40)] }, Ct);
+                }
+
+                await writer.CommitAsync(Ct);
+            }
+
+            // Al reabrir no se pide compresión: el archivo ya dice que la usa.
+            await using var reopened = await TekiumDb.OpenAsync(new DbOptions { Path = path, Password = password }, Ct);
+            Assert.True(reopened.IsCompressed);
+            Assert.Equal(encrypted, reopened.IsEncrypted);
+            var count = 0;
+            await foreach (var note in reopened.Table<Note>().ScanAsync(Ct))
+            {
+                Assert.Equal(body[..(count * 40)], note.Body);
+                count++;
+            }
+
+            Assert.Equal(300, count);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Fact]
     public async Task A_database_in_memory_works_like_one_in_a_file_and_is_gone_when_disposed()
     {

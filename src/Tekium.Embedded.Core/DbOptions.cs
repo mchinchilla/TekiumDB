@@ -25,6 +25,16 @@ public sealed class DbOptions
     /// <summary>Gets the page size of a new database: 4096, 8192, 16384 or 32768. An existing file keeps its own.</summary>
     public int PageSize { get; init; } = 8192;
 
+    /// <summary>
+    /// Gets a value indicating whether a new database compresses its pages with Zstandard. An existing
+    /// file keeps whatever it was created with. It reduces the bytes written and encrypted, not the size
+    /// of the file: every page keeps its place.
+    /// </summary>
+    public bool Compression { get; init; }
+
+    /// <summary>Gets the Zstandard level pages are compressed with: higher is smaller and slower.</summary>
+    public int CompressionLevel { get; init; } = 3;
+
     /// <summary>Gets how much memory the page cache may use, in mebibytes.</summary>
     public int CacheSizeMb { get; init; } = 256;
 
