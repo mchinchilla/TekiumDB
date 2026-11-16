@@ -22,8 +22,12 @@ internal sealed partial class EventV1
     public int Obsolete { get; set; }
 }
 
-/// <summary>La misma tabla después de cambiar: una columna menos y varias más, de tipos distintos.</summary>
+/// <summary>
+/// La misma tabla después de cambiar: una columna menos y varias más, de tipos distintos, y con índices
+/// de cada clase: de columna, sobre una expresión y parcial.
+/// </summary>
 [TkTable("events")]
+[TkIndex(nameof(Cost), Name = "busy", Where = nameof(IsBusy))]
 internal sealed partial class EventV2
 {
     [TkKey]
@@ -31,7 +35,13 @@ internal sealed partial class EventV2
 
     public string Title { get; set; } = string.Empty;
 
+    [TkIndex]
     public DateTimeOffset At { get; set; }
+
+    [TkIndex]
+    public int TitleLength => Title.Length;
+
+    public bool IsBusy => Mood == Mood.Busy;
 
     public string? Place { get; set; }
 

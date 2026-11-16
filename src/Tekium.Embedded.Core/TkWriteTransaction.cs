@@ -14,6 +14,7 @@ public sealed class TkWriteTransaction : TkTransaction
 {
     private readonly WriteTransaction _inner;
     private readonly Dictionary<string, TableState> _tables = new(StringComparer.Ordinal);
+    private bool _failed;
 
     internal TkWriteTransaction(TekiumDb database, WriteTransaction inner)
         : base(database) => _inner = inner;
@@ -27,14 +28,41 @@ public sealed class TkWriteTransaction : TkTransaction
     /// <summary>Makes every change of the transaction durable, atomically. The transaction is over afterwards.</summary>
     /// <param name="cancellationToken">Cancels the commit while that still leaves the database untouched.</param>
     /// <returns>A task that completes when the changes are on stable storage.</returns>
+    /// <exception cref="InvalidOperationException">An operation of the transaction failed halfway: it can only be rolled back.</exception>
     public async ValueTask CommitAsync(CancellationToken cancellationToken = default)
     {
-        // Where each changed table now is goes into the catalog, and the catalog root into the root slot.
+        if (_failed)
+        {
+            throw new InvalidOperationException(
+                "An operation of this transaction failed halfway, so what it holds is not consistent: it can only be rolled back.");
+        }
+
+        // Where each changed table and index now is goes into the catalog, and the catalog root into the root slot.
         var entry = ArrayPool<byte>.Shared.Rent(TableInfo.EncodedSize);
         try
         {
             foreach (var state in _tables.Values)
             {
+                foreach (var dropped in state.DroppedIndexes)
+                {
+                    await Database.Tree.DeleteAsync(_inner, dropped, cancellationToken).ConfigureAwait(false);
+                }
+
+                state.DroppedIndexes.Clear();
+                if (state.Indexes is { } indexes)
+                {
+                    foreach (var index in indexes.Values)
+                    {
+                        if (index.Dirty)
+                        {
+                            await Database.Tree.PutAsync(
+                                _inner, index.CatalogKey, CatalogStore.EncodeIndex(index.Root, index.Definition), cancellationToken)
+                                .ConfigureAwait(false);
+                            index.Dirty = false;
+                        }
+                    }
+                }
+
                 if (state.Changed)
                 {
                     new TableInfo(state.Root, state.Schema!.Version).Encode(entry);
@@ -85,6 +113,88 @@ public sealed class TkWriteTransaction : TkTransaction
     }
 
     /// <summary>
+    /// Records that an operation failed after it had begun to change the trees. A row and its index
+    /// entries live in several trees, so what the transaction holds may no longer agree with itself.
+    /// </summary>
+    internal void Fail() => _failed = true;
+
+    /// <summary>The indexes of a table as this transaction sees them, by name: loaded from the catalog on first use.</summary>
+    internal async ValueTask<Dictionary<string, IndexEntry>> IndexesAsync(TableState state, CancellationToken cancellationToken)
+    {
+        if (state.Indexes is { } known)
+        {
+            return known;
+        }
+
+        known = new Dictionary<string, IndexEntry>(StringComparer.Ordinal);
+        var from = CatalogStore.IndexKeyPrefix(state.TableKey);
+        var to = (byte[])from.Clone();
+        to[^1] = 1;
+        var entries = Indexing.BTree.RangeAsync(_inner, _inner.Root, from, to, cancellationToken);
+        await foreach (var entry in entries.ConfigureAwait(false))
+        {
+            var name = System.Text.Encoding.UTF8.GetString(entry.Key.Span[from.Length..]);
+            known.Add(name, new IndexEntry(entry.Key.ToArray(), CatalogStore.IndexDefinition(entry.Value.Span).ToArray())
+            {
+                Root = CatalogStore.IndexRoot(entry.Value.Span),
+            });
+        }
+
+        state.Indexes = known;
+        return known;
+    }
+
+    /// <summary>
+    /// Makes the indexes of the table those the type declares, so that a write can keep them: drops the
+    /// ones it does not declare, or declares differently, and builds the ones that are missing.
+    /// </summary>
+    internal async ValueTask BindIndexesAsync<T>(Table<T> table, TableState state, CancellationToken cancellationToken)
+        where T : class, ITkRow<T>
+    {
+        if (state.IndexedAs == typeof(T))
+        {
+            return;
+        }
+
+        var known = await IndexesAsync(state, cancellationToken).ConfigureAwait(false);
+        var declared = table.Indexes;
+        var bound = new IndexEntry[declared.Length];
+        try
+        {
+            foreach (var (name, entry) in known.ToArray())
+            {
+                var same = Array.Find(declared, index => string.Equals(index.Name, name, StringComparison.Ordinal));
+                if (same is null || !same.Encoded.AsSpan().SequenceEqual(entry.Definition))
+                {
+                    known.Remove(name);
+                    state.DroppedIndexes.Add(entry.CatalogKey);
+                    await Indexing.BTree.DropAsync(_inner, entry.Root, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            for (var i = 0; i < declared.Length; i++)
+            {
+                if (!known.TryGetValue(declared[i].Name, out var entry))
+                {
+                    entry = new IndexEntry(declared[i].CatalogKey, declared[i].Encoded) { Dirty = true };
+                    known.Add(declared[i].Name, entry);
+                    await table.BuildIndexAsync(this, state, declared[i], entry, cancellationToken).ConfigureAwait(false);
+                }
+
+                bound[i] = entry;
+            }
+        }
+        catch
+        {
+            Fail();
+            throw;
+        }
+
+        state.Bound = bound;
+        state.IndexedAs = typeof(T);
+    }
+
+    /// <summary>
     /// Makes the table writable with the columns of a type: creates it if it does not exist, and
     /// registers a new schema version if the type no longer matches the latest one.
     /// </summary>
@@ -94,6 +204,7 @@ public sealed class TkWriteTransaction : TkTransaction
         var state = await TableAsync(table.Name, table.TableKey, cancellationToken).ConfigureAwait(false);
         if (state.Schema is { } current && state.WritesAs == typeof(T))
         {
+            await BindIndexesAsync(table, state, cancellationToken).ConfigureAwait(false);
             return state;
         }
 
@@ -133,7 +244,23 @@ public sealed class TkWriteTransaction : TkTransaction
         }
 
         state.WritesAs = typeof(T);
+        await BindIndexesAsync(table, state, cancellationToken).ConfigureAwait(false);
         return state;
+    }
+
+    /// <summary>An index as this transaction sees it.</summary>
+    internal sealed class IndexEntry(byte[] catalogKey, byte[] definition)
+    {
+        public byte[] CatalogKey { get; } = catalogKey;
+
+        /// <summary>Gets what the index indexes, as the catalog stores it.</summary>
+        public byte[] Definition { get; } = definition;
+
+        /// <summary>Gets or sets the root of its tree. <see cref="PageNumber.None"/> while it is empty.</summary>
+        public PageNumber Root { get; set; }
+
+        /// <summary>Gets or sets a value indicating whether the catalog entry must be written at commit.</summary>
+        public bool Dirty { get; set; }
     }
 
     /// <summary>A table as this transaction sees it.</summary>
@@ -155,5 +282,17 @@ public sealed class TkWriteTransaction : TkTransaction
 
         /// <summary>Gets or sets a value indicating whether the catalog entry must be rewritten at commit.</summary>
         public bool Changed { get; set; }
+
+        /// <summary>Gets or sets the indexes of the table by name. <see langword="null"/> until something asks for them.</summary>
+        public Dictionary<string, IndexEntry>? Indexes { get; set; }
+
+        /// <summary>Gets the catalog keys of the indexes this transaction dropped, to remove at commit.</summary>
+        public List<byte[]> DroppedIndexes { get; } = [];
+
+        /// <summary>Gets or sets the type whose declared indexes <see cref="Bound"/> are.</summary>
+        public Type? IndexedAs { get; set; }
+
+        /// <summary>Gets or sets the indexes a write must keep, in the order <see cref="IndexedAs"/> declares them.</summary>
+        public IndexEntry[] Bound { get; set; } = [];
     }
 }

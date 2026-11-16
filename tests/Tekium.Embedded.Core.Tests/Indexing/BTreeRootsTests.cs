@@ -54,6 +54,42 @@ public abstract class BTreeRootsTests : DeviceBackedTests
         await BTreeVerifier.AssertNoLeaksAsync(pager, Ct);
     }
 
+    /// <summary>Tirar un índice es liberar su árbol entero: nodos, hojas y las cadenas de los valores grandes.</summary>
+    [Fact]
+    public async Task Dropping_a_tree_frees_every_page_of_it_and_leaves_the_others_alone()
+    {
+        await using var pager = await Pager.CreateAsync(NewDevice(), Options, Ct);
+        var tree = new BTree(pager);
+        var kept = PageNumber.None;
+        var dropped = PageNumber.None;
+        await using (var writer = await pager.BeginWriteAsync(Ct))
+        {
+            for (var i = 0; i < 3000; i++)
+            {
+                kept = await tree.PutAsync(writer, kept, Key(i), Key(i), Ct);
+                dropped = await tree.PutAsync(writer, dropped, Key(i), i % 100 == 0 ? new byte[9000] : Key(i), Ct);
+            }
+
+            writer.Root = kept;
+            await writer.CommitAsync(Ct);
+        }
+
+        await using (var writer = await pager.BeginWriteAsync(Ct))
+        {
+            await BTree.DropAsync(writer, dropped, Ct);
+            await BTree.DropAsync(writer, PageNumber.None, Ct);
+            await writer.CommitAsync(Ct);
+        }
+
+        await using (var writer = await pager.BeginWriteAsync(Ct))
+        {
+            await BTreeVerifier.VerifyAsync(writer, writer.Root, Ct);
+            Assert.Equal(3000, await BTreeVerifier.CountAsync(writer, writer.Root, Ct));
+        }
+
+        await BTreeVerifier.AssertNoLeaksAsync(pager, Ct);
+    }
+
     private static byte[] Key(int value)
     {
         var key = new byte[4];

@@ -1,0 +1,34 @@
+// Copyright (c) Tekium. Licensed under the MIT License.
+
+namespace Tekium.Embedded;
+
+/// <summary>
+/// A secondary index of a row type, as the generator declares it from <see cref="TkIndexAttribute"/>.
+/// </summary>
+/// <typeparam name="TRow">The row type.</typeparam>
+public sealed class TkIndex<TRow>
+    where TRow : class, ITkRow<TRow>
+{
+    private readonly int[] _fields;
+
+    /// <summary>Initializes a new instance of the <see cref="TkIndex{TRow}"/> class.</summary>
+    /// <param name="name">The name of the index, unique in its table.</param>
+    /// <param name="fields">The indexed fields, most significant first: columns, or past the columns, expressions.</param>
+    /// <param name="where">The rows that are in the index, or <see langword="null"/> for all of them.</param>
+    public TkIndex(string name, ReadOnlySpan<int> fields, TkFilter<TRow>? where = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        Name = name;
+        _fields = fields.ToArray();
+        Where = where;
+    }
+
+    /// <summary>Gets the name of the index.</summary>
+    public string Name { get; }
+
+    /// <summary>Gets the indexed fields, most significant first.</summary>
+    public ReadOnlySpan<int> Fields => _fields;
+
+    /// <summary>Gets the condition a row must meet to be in the index, if it is a partial index.</summary>
+    public TkFilter<TRow>? Where { get; }
+}

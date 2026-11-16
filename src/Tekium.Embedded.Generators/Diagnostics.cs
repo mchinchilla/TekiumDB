@@ -53,6 +53,31 @@ internal static class Diagnostics
         "A table needs columns",
         "'{0}' has no property that can be stored: a column is a public instance property with a getter and a setter");
 
+    public static readonly DiagnosticDescriptor NotIndexable = Error(
+        "TK0010",
+        "An index names a property that cannot be indexed",
+        "Index '{0}' cannot use '{1}': an indexed property is a column, or a public property with a getter body and no setter whose type could be stored");
+
+    public static readonly DiagnosticDescriptor DuplicateIndex = Error(
+        "TK0011",
+        "Two indexes have the same name",
+        "'{0}' declares more than one index named '{1}'; give one of them another Name");
+
+    public static readonly DiagnosticDescriptor UnsupportedCondition = Error(
+        "TK0012",
+        "The condition of a partial index cannot be understood",
+        "Index '{0}' cannot use '{1}' as its condition: it must be a bool property of the table whose body compares columns with constants (==, <, <=, >, >=, is null, is not null), joined by &&");
+
+    public static readonly DiagnosticDescriptor IndexWithoutColumns = Error(
+        "TK0013",
+        "An index declared on the class must name its properties",
+        "'{0}' has a [TkIndex] with no properties: name them, or put the attribute on the property to index");
+
+    public static readonly DiagnosticDescriptor FieldsTaken = Error(
+        "TK0014",
+        "A table type cannot have a member named Fields",
+        "'{0}' has a member named 'Fields', the name of the class generated to write conditions with; rename it");
+
     public static DiagnosticDescriptor? Find(string id) => id switch
     {
         "TK0001" => NotPartial,
@@ -64,6 +89,11 @@ internal static class Diagnostics
         "TK0007" => UnsupportedType,
         "TK0008" => DuplicateColumn,
         "TK0009" => NoColumns,
+        "TK0010" => NotIndexable,
+        "TK0011" => DuplicateIndex,
+        "TK0012" => UnsupportedCondition,
+        "TK0013" => IndexWithoutColumns,
+        "TK0014" => FieldsTaken,
         _ => null,
     };
 

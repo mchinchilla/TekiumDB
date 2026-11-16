@@ -1,6 +1,7 @@
 // Copyright (c) Tekium. Licensed under the MIT License.
 
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Text;
 using Tekium.Embedded.Indexing;
 using Tekium.Embedded.Storage;
@@ -8,8 +9,8 @@ using Tekium.Embedded.Storage;
 namespace Tekium.Embedded.Catalog;
 
 /// <summary>
-/// The catalog is the tree the root slot points to. It maps a table name to where its rows are, and a
-/// table name and version to the columns of that version. Being a tree like any other, it is versioned
+/// The catalog is the tree the root slot points to. It maps a table name to where its rows are, a
+/// table name and version to the columns of that version, and a table and index name to that index. Being a tree like any other, it is versioned
 /// by copy-on-write with everything else: a snapshot sees the tables and schemas of its own commit.
 /// </summary>
 internal static class CatalogStore
@@ -17,8 +18,14 @@ internal static class CatalogStore
     /// <summary>The longest table name, in UTF-8 bytes. Bounded by the smallest key a tree accepts.</summary>
     public const int MaxNameBytes = 128;
 
+    /// <summary>The longest index name, in UTF-8 bytes: with the table name before it, it must fit in the smallest key.</summary>
+    public const int MaxIndexNameBytes = 96;
+
     private const byte TablePrefix = 1;
     private const byte SchemaPrefix = 2;
+    private const byte IndexPrefix = 3;
+    private const byte IndexFormat = 1;
+    private const int IndexHeaderSize = 5;
     private const int ExpectedSchemaSize = 1024;
 
     /// <summary>The key of the entry that says where the rows of a table are.</summary>
@@ -41,8 +48,93 @@ internal static class CatalogStore
         return key;
     }
 
-    /// <summary>Whether a catalog key is a table entry, as opposed to a schema.</summary>
+    /// <summary>Whether a catalog key is a table entry.</summary>
     public static bool IsTableKey(ReadOnlySpan<byte> key) => key.Length > 1 && key[0] == TablePrefix;
+
+    /// <summary>Whether a catalog key is the schema of one version of a table.</summary>
+    public static bool IsSchemaKey(ReadOnlySpan<byte> key) => key.Length > 1 && key[0] == SchemaPrefix;
+
+    /// <summary>Whether a catalog key is an index entry.</summary>
+    public static bool IsIndexKey(ReadOnlySpan<byte> key) => key.Length > 1 && key[0] == IndexPrefix;
+
+    /// <summary>What the key of every index of a table starts with: the table key and a zero.</summary>
+    public static byte[] IndexKeyPrefix(ReadOnlySpan<byte> tableKey)
+    {
+        var key = new byte[tableKey.Length + 1];
+        tableKey.CopyTo(key);
+        key[0] = IndexPrefix;
+        return key;
+    }
+
+    /// <summary>The key of the entry of an index: the table key, a zero, and the name of the index.</summary>
+    public static byte[] IndexKey(ReadOnlySpan<byte> tableKey, string indexName)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(indexName);
+        var length = Encoding.UTF8.GetByteCount(indexName);
+        if (length > MaxIndexNameBytes || indexName.Contains('\0', StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"An index name must not exceed {MaxIndexNameBytes} UTF-8 bytes nor contain a null character.", nameof(indexName));
+        }
+
+        var key = new byte[tableKey.Length + 1 + length];
+        tableKey.CopyTo(key);
+        key[0] = IndexPrefix;
+        Encoding.UTF8.GetBytes(indexName, key.AsSpan(tableKey.Length + 1));
+        return key;
+    }
+
+    /// <summary>An index entry: where its tree is, and after that, what it indexes.</summary>
+    public static byte[] EncodeIndex(PageNumber root, ReadOnlySpan<byte> definition)
+    {
+        var entry = new byte[IndexHeaderSize + definition.Length];
+        entry[0] = IndexFormat;
+        BinaryPrimitives.WriteUInt32LittleEndian(entry.AsSpan(1), root.Value);
+        definition.CopyTo(entry.AsSpan(IndexHeaderSize));
+        return entry;
+    }
+
+    /// <summary>The root of the tree of an index, from its entry.</summary>
+    public static PageNumber IndexRoot(ReadOnlySpan<byte> entry) =>
+        entry.Length > IndexHeaderSize && entry[0] == IndexFormat
+            ? new PageNumber(BinaryPrimitives.ReadUInt32LittleEndian(entry[1..]))
+            : throw new InvalidDataException("An index entry in the catalog is damaged.");
+
+    /// <summary>What an index indexes, from its entry: the bytes two definitions are compared by.</summary>
+    public static ReadOnlySpan<byte> IndexDefinition(ReadOnlySpan<byte> entry) =>
+        entry.Length > IndexHeaderSize && entry[0] == IndexFormat
+            ? entry[IndexHeaderSize..]
+            : throw new InvalidDataException("An index entry in the catalog is damaged.");
+
+    /// <summary>
+    /// Looks for an index with exactly this definition. One with the same name that indexes something
+    /// else is not found: its entries would not be the ones the caller expects.
+    /// </summary>
+    public static async ValueTask<(bool Found, PageNumber Root)> FindIndexAsync(
+        IPageSource source,
+        PageNumber catalogRoot,
+        ReadOnlyMemory<byte> indexKey,
+        ReadOnlyMemory<byte> definition,
+        CancellationToken cancellationToken)
+    {
+        var (buffer, length) = await BTree.GetRentedAsync(
+            source, catalogRoot, indexKey, IndexHeaderSize + definition.Length, cancellationToken)
+            .ConfigureAwait(false);
+        if (buffer is null)
+        {
+            return (false, PageNumber.None);
+        }
+
+        try
+        {
+            var entry = buffer.AsSpan(0, length);
+            return IndexDefinition(entry).SequenceEqual(definition.Span) ? (true, IndexRoot(entry)) : (false, PageNumber.None);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
 
     public static async ValueTask<TableInfo?> FindTableAsync(
         IPageSource source, PageNumber catalogRoot, ReadOnlyMemory<byte> tableKey, CancellationToken cancellationToken)

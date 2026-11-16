@@ -73,3 +73,29 @@ public sealed class TkDuplicateKeyException : Exception
     {
     }
 }
+
+/// <summary>
+/// A row cannot be written because the key one of its indexes would give it is longer than a key may be.
+/// </summary>
+public sealed class TkIndexKeyTooLargeException : Exception
+{
+    /// <summary>Initializes a new instance of the <see cref="TkIndexKeyTooLargeException"/> class.</summary>
+    public TkIndexKeyTooLargeException()
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="TkIndexKeyTooLargeException"/> class.</summary>
+    /// <param name="message">What was too large.</param>
+    public TkIndexKeyTooLargeException(string message)
+        : base(message)
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="TkIndexKeyTooLargeException"/> class.</summary>
+    /// <param name="message">What was too large.</param>
+    /// <param name="innerException">The cause.</param>
+    public TkIndexKeyTooLargeException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}

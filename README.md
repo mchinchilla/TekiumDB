@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 5 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices secundarios, consultas por rango ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 6 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay restricciones, índices especializados ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -43,7 +43,7 @@ Antes de invertir en el resto, la Fase 0.5 midió un motor mínimo contra `Micro
 
 ## Características
 
-Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy-on-write con commit atómico, el catálogo y las tablas tipadas, con filas de cualquier tamaño (páginas de overflow); falta en el árbol la compresión de prefijos.
+Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy-on-write con commit atómico, el catálogo, las tablas tipadas con filas de cualquier tamaño (páginas de overflow) y los índices secundarios genéricos; falta en el árbol la compresión de prefijos.
 
 **Almacenamiento**
 
@@ -63,7 +63,7 @@ Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy
 - Temporal: zone maps por hoja y split 100/0 para series de tiempo.
 - UUID v7: localidad temporal aprovechada, hojas llenas en inserción secuencial.
 - Vectorial: HNSW persistido, con métricas coseno, L2 y producto interno, y cuantización `int8` opcional.
-- Secundarios genéricos, sobre expresiones y parciales.
+- Secundarios genéricos, sobre expresiones y parciales (ya existen: ver [Índices y consultas](#índices-y-consultas)).
 
 **API y ecosistema**
 
@@ -123,16 +123,57 @@ El generador de código escribe el serializador de `Document` al compilar: no ha
 | --- | --- |
 | Tipos de columna | `bool`, enteros de 8 a 64 bits con y sin signo, `float`, `double`, `decimal`, `char`, `string`, `byte[]`, `Guid`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `DateOnly`, `TimeOnly`, enums, y la forma anulable de todos |
 | Clave | Una propiedad con `[TkKey]`: `Guid`, `int`, `long`, `uint`, `ulong` o `string` |
-| Operaciones | `InsertAsync`, `UpdateAsync`, `UpsertAsync`, `DeleteAsync`, `GetAsync`, `ScanAsync` |
+| Operaciones | `InsertAsync`, `UpdateAsync`, `UpsertAsync`, `DeleteAsync`, `GetAsync`, `ScanAsync`, `QueryAsync`, `ExplainAsync` |
 | Otros atributos | `[TkColumn("nombre")]` guarda la propiedad con otro nombre; `[TkIgnore]` la deja fuera |
 | Tamaño de fila | Hasta 256 MiB. Una fila que no cabe en un cuarto de página se guarda en páginas de overflow, sin que quien la usa lo note |
+
+### Índices y consultas
+
+Un índice se declara con `[TkIndex]` y el motor lo mantiene en cada escritura, dentro de la misma transacción:
+
+```csharp
+[TkTable("orders")]
+[TkIndex(nameof(Customer), nameof(CreatedAt))]                 // de varias columnas
+[TkIndex(nameof(CreatedAt), Name = "open", Where = nameof(IsOpen))]   // parcial: sólo las filas abiertas
+public sealed partial class Order
+{
+    [TkKey] public Guid Id { get; set; }
+
+    [TkIndex] public string Customer { get; set; } = "";       // de una columna
+
+    public DateTimeOffset CreatedAt { get; set; }
+    public decimal Total { get; set; }
+    public bool Deleted { get; set; }
+
+    [TkIndex] public int Month => (CreatedAt.Year * 12) + CreatedAt.Month;   // sobre una expresión
+
+    public bool IsOpen => !Deleted && Total > 0;               // la condición del índice parcial
+}
+
+var orders = db.Table<Order>();
+
+// El generador declara un campo por columna en Order.Fields; las condiciones se unen con And.
+var recent = Order.Fields.Customer.EqualTo("ana")
+    .And(Order.Fields.CreatedAt.Between(from, to));
+
+await foreach (var order in orders.QueryAsync(recent))         // usa el índice Customer_CreatedAt
+    Process(order);
+
+var plan = await orders.ExplainAsync(recent);                  // IndexScan, "Customer_CreatedAt"
+```
+
+| Qué | Cómo |
+| --- | --- |
+| Condiciones | `EqualTo`, `LessThan`, `AtMost`, `GreaterThan`, `AtLeast`, `Between`, `IsNull`, `IsNotNull`, unidas con `And`. Se puede filtrar por cualquier columna; si ningún índice sirve, se recorre la tabla |
+| Orden de los valores | El de `CompareTo`, con dos salvedades: el texto compara por punto de código Unicode (sin cultura), y una fila sin valor no cumple ninguna comparación salvo `IsNull` |
+| Índice sobre expresión | `[TkIndex]` sobre una propiedad calculada (sin `set`). Debe ser determinista y depender sólo de las columnas de su fila. Si su código cambia, el índice se reconstruye solo |
+| Índice parcial | `Where` nombra una propiedad `bool` cuyo cuerpo compara columnas con constantes unidas por `&&`. Sólo se usa cuando la consulta implica esa condición; si el motor no puede probarlo, lo ignora |
+| Cambios de índices | Declarar uno nuevo, cambiarlo o quitarlo no requiere migración: la primera escritura con el tipo nuevo lo construye, reconstruye o elimina. Hasta entonces las consultas recorren la tabla |
+| Límite | Los valores indexados de una fila más su clave no pueden pasar de 1/16 de página (512 bytes con páginas de 8 KiB): una fila que lo exceda se rechaza con `TkIndexKeyTooLargeException` |
 
 Lo que sigue es diseño objetivo y todavía no existe:
 
 ```csharp
-await foreach (var d in docs.RangeAsync(x => x.CreatedAt, from, to))
-    Process(d);
-
 var hits = await docs.SearchVectorAsync(
     x => x.Embedding, queryVector, topK: 10, efSearch: 64);
 ```
@@ -183,7 +224,8 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 4 | MVCC, transacciones y commit atómico | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-4.md); Windows sin verificar |
 | 5 | Catálogo, filas tipadas y generador de código | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-5.md); Windows sin verificar |
 | 5.5 | Compresión Zstandard por página | Hecho y [medido](docs/benchmarks/fase-5.5.md): comprime 3,3× los bytes escritos pero no ahorra disco y cuesta latencia; queda apagada por defecto |
-| 6 – 6.8 | Índices secundarios, restricciones, change feed y carga masiva | Pendiente |
+| 6 | Índices secundarios, codificación ordenada de claves, índices sobre expresiones y parciales | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.md); Windows sin verificar |
+| 6.5 – 6.8 | Restricciones declarativas, change feed y carga masiva | Pendiente |
 | 7 – 9 | Índices temporal, UUID v7 y vectorial HNSW | Pendiente |
 | 10 – 10.6 | Herramientas, backup en caliente, verificación y viaje en el tiempo | Pendiente |
 | 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |
@@ -224,7 +266,7 @@ Las pruebas usan xUnit v3 sobre Microsoft.Testing.Platform, por eso los filtros 
 ```
 src/
   Tekium.Embedded.Core/          Núcleo del motor y API pública
-  Tekium.Embedded.Generators/    Generador de código fuente: el serializador de cada [TkTable]
+  Tekium.Embedded.Generators/    Generador de código fuente: el serializador, los campos y los índices de cada [TkTable]
 tests/
   Tekium.Embedded.Core.Tests/    Pruebas unitarias
   Tekium.Embedded.CrashChild/    Proceso que las pruebas de crash lanzan y matan a mitad de un commit

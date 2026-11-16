@@ -37,6 +37,11 @@ internal sealed class TestDevice : IStorageDevice
 
     public int FlushCount { get; private set; }
 
+    public int ReadCount { get; private set; }
+
+    /// <summary>Si se fija, la lectura con ese número de orden falla sin leer nada.</summary>
+    public int? FailOnReadNumber { get; set; }
+
     /// <summary>Gets or sets the ordinal of the write (1-based, counted from creation) that throws.</summary>
     public int? FailOnWriteNumber { get; set; }
 
@@ -81,10 +86,18 @@ internal sealed class TestDevice : IStorageDevice
             () => FileStorageDevice.Open(path, FileMode.OpenOrCreate), closeOnDispose: true, flushToDisk, path);
     }
 
-    public ValueTask ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken) =>
-        PowerLost
-            ? ValueTask.FromException(new IOException("Simulated power loss."))
+    public ValueTask ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken)
+    {
+        if (PowerLost)
+        {
+            return ValueTask.FromException(new IOException("Simulated power loss."));
+        }
+
+        ReadCount++;
+        return ReadCount == FailOnReadNumber
+            ? ValueTask.FromException(new IOException("Injected read failure."))
             : Inner.ReadAsync(offset, destination, cancellationToken);
+    }
 
     public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> source, CancellationToken cancellationToken)
     {

@@ -38,7 +38,7 @@ public abstract class DatabaseTests : DeviceBackedTests
             Ct);
 
     /// <summary>
-    /// Ninguna página se pierde: toda página es de cabecera, del catálogo, de alguna tabla, o está en la
+    /// Ninguna página se pierde: toda página es de cabecera, del catálogo, de alguna tabla o índice, o está en la
     /// free-list. De paso verifica la estructura de cada árbol.
     /// </summary>
     private protected static async Task AssertNoLeaksAsync(TekiumDb database)
@@ -52,6 +52,10 @@ public abstract class DatabaseTests : DeviceBackedTests
             if (CatalogStore.IsTableKey(entry.Key.Span))
             {
                 roots.Add(TableInfo.Decode(entry.Value.Span).Root);
+            }
+            else if (CatalogStore.IsIndexKey(entry.Key.Span))
+            {
+                roots.Add(CatalogStore.IndexRoot(entry.Value.Span));
             }
         }
 
@@ -72,7 +76,7 @@ public abstract class DatabaseTests : DeviceBackedTests
         var count = 0;
         await foreach (var entry in BTree.RangeAsync(database.Pager, read.Root, default, default, Ct))
         {
-            count += CatalogStore.IsTableKey(entry.Key.Span) ? 0 : 1;
+            count += CatalogStore.IsSchemaKey(entry.Key.Span) ? 1 : 0;
         }
 
         return count;

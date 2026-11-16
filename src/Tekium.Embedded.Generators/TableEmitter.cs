@@ -56,6 +56,8 @@ internal static class TableEmitter
         var key = table.Columns[table.KeyColumn];
         source.AppendLine($"    static int {row}.WriteKey({table.Name} row, global::System.Span<byte> destination) =>");
         source.AppendLine($"        {Root}TkKey.Write({NotNull(key, "row." + key.Property)}, destination);");
+        source.AppendLine();
+        EmitFields(source, table, row);
         source.AppendLine("}");
 
         foreach (var unused in table.ContainingTypes)
@@ -152,6 +154,96 @@ internal static class TableEmitter
         source.AppendLine("        };");
         source.AppendLine("    }");
         source.AppendLine();
+    }
+
+    private static void EmitFields(StringBuilder source, TableModel table, string row)
+    {
+        var fields = table.Columns.Concat(table.Computed).ToList();
+
+        source.AppendLine("    /// <summary>The columns and indexed expressions of the table, to write conditions with.</summary>");
+        source.AppendLine("#pragma warning disable CS0108 // A property may be named like a member of object.");
+        source.AppendLine("    public static class Fields");
+        source.AppendLine("    {");
+        for (var i = 0; i < fields.Count; i++)
+        {
+            var field = fields[i];
+            source.AppendLine($"        /// <summary>The field of <see cref=\"{table.Name}.{field.Property}\"/>.</summary>");
+            source.AppendLine(
+                $"        public static readonly {Root}TkField<{table.Name}, {field.PropertyType}> {field.Property} = new {Root}TkField<{table.Name}, {field.PropertyType}>({i.ToString(CultureInfo.InvariantCulture)}, {Root}TkColumnType.{field.StoreType}, {(field.IsNullable ? "true" : "false")});");
+        }
+
+        source.AppendLine("    }");
+        source.AppendLine("#pragma warning restore CS0108");
+        source.AppendLine();
+
+        if (table.Computed.Count > 0)
+        {
+            source.AppendLine($"    private static readonly {Root}TkExpression[] __tkExpressions = new {Root}TkExpression[]");
+            source.AppendLine("    {");
+            foreach (var computed in table.Computed)
+            {
+                source.AppendLine(
+                    $"        new {Root}TkExpression({Literal(computed.ColumnName)}, {Root}TkColumnType.{computed.StoreType}, {(computed.IsNullable ? "true" : "false")}, {Literal(computed.Expression)}),");
+            }
+
+            source.AppendLine("    };");
+            source.AppendLine();
+            source.AppendLine($"    static global::System.ReadOnlySpan<{Root}TkExpression> {row}.Expressions => __tkExpressions;");
+            source.AppendLine();
+        }
+
+        if (table.Indexes.Count > 0)
+        {
+            source.AppendLine($"    private static readonly {Root}TkIndex<{table.Name}>[] __tkIndexes = new {Root}TkIndex<{table.Name}>[]");
+            source.AppendLine("    {");
+            foreach (var index in table.Indexes)
+            {
+                var ordinals = string.Join(", ", index.Fields.Select(static field => field.ToString(CultureInfo.InvariantCulture)));
+                source.AppendLine(
+                    $"        new {Root}TkIndex<{table.Name}>({Literal(index.Name)}, new int[] {{ {ordinals} }}, {index.Where ?? "null"}),");
+            }
+
+            source.AppendLine("    };");
+            source.AppendLine();
+            source.AppendLine($"    static global::System.ReadOnlySpan<{Root}TkIndex<{table.Name}>> {row}.Indexes => __tkIndexes;");
+            source.AppendLine();
+        }
+
+        source.AppendLine($"    static void {row}.WriteField(ref {Root}TkKeyWriter writer, {table.Name} row, int field)");
+        source.AppendLine("    {");
+        source.AppendLine("        switch (field)");
+        source.AppendLine("        {");
+        for (var i = 0; i < fields.Count; i++)
+        {
+            var field = fields[i];
+            var access = "row." + field.Property;
+            source.AppendLine($"            case {i.ToString(CultureInfo.InvariantCulture)}:");
+            if (field.IsNullable)
+            {
+                var local = "__f" + i.ToString(CultureInfo.InvariantCulture);
+                source.AppendLine($"                if ({access} is {{ }} {local})");
+                source.AppendLine("                {");
+                source.AppendLine("                    writer.WritePresent();");
+                source.AppendLine($"                    writer.Write({Stored(field, local)});");
+                source.AppendLine("                }");
+                source.AppendLine("                else");
+                source.AppendLine("                {");
+                source.AppendLine("                    writer.WriteNull();");
+                source.AppendLine("                }");
+                source.AppendLine();
+            }
+            else
+            {
+                source.AppendLine($"                writer.Write({Stored(field, NotNull(field, access))});");
+            }
+
+            source.AppendLine("                break;");
+        }
+
+        source.AppendLine("            default:");
+        source.AppendLine("                throw new global::System.ArgumentOutOfRangeException(nameof(field));");
+        source.AppendLine("        }");
+        source.AppendLine("    }");
     }
 
     /// <summary>A reference that must not be null says which property it was when it is.</summary>

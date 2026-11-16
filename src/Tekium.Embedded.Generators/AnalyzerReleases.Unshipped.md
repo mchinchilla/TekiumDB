@@ -11,3 +11,8 @@ TK0006 | TekiumDB | Error | A table type needs a parameterless constructor
 TK0007 | TekiumDB | Error | This kind of type cannot be a table
 TK0008 | TekiumDB | Error | Two properties are stored under the same name
 TK0009 | TekiumDB | Error | A table needs columns
+TK0010 | TekiumDB | Error | An index names a property that cannot be indexed
+TK0011 | TekiumDB | Error | Two indexes have the same name
+TK0012 | TekiumDB | Error | The condition of a partial index cannot be understood
+TK0013 | TekiumDB | Error | An index declared on the class must name its properties
+TK0014 | TekiumDB | Error | A table type cannot have a member named Fields

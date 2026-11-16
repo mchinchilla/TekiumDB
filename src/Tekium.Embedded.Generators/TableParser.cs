@@ -14,6 +14,7 @@ internal static class TableParser
     private const string KeyAttribute = "Tekium.Embedded.TkKeyAttribute";
     private const string ColumnAttribute = "Tekium.Embedded.TkColumnAttribute";
     private const string IgnoreAttribute = "Tekium.Embedded.TkIgnoreAttribute";
+    private const string IndexAttribute = "Tekium.Embedded.TkIndexAttribute";
 
     private static readonly SymbolDisplayFormat FullyQualified =
         SymbolDisplayFormat.FullyQualifiedFormat.WithMiscellaneousOptions(
@@ -97,6 +98,13 @@ internal static class TableParser
             diagnostics.Add(DiagnosticModel.Create("TK0002", location, type.Name));
         }
 
+        if (AllMembers(type).Any(static member => member.Name == "Fields"))
+        {
+            diagnostics.Add(DiagnosticModel.Create("TK0014", location, type.Name));
+        }
+
+        var indexes = IndexParser.Parse(type, columns, location, diagnostics, context.SemanticModel.Compilation, cancellationToken, out var computed);
+
         var tableName = context.Attributes[0].ConstructorArguments is { Length: 1 } arguments && arguments[0].Value is string name
             ? name
             : type.Name;
@@ -111,6 +119,8 @@ internal static class TableParser
             tableName,
             new EquatableArray<ColumnModel>(columns.ToImmutable()),
             keyColumn,
+            new EquatableArray<ColumnModel>(computed),
+            new EquatableArray<IndexModel>(indexes),
             new EquatableArray<DiagnosticModel>(diagnostics.ToImmutable()));
     }
 
@@ -153,13 +163,28 @@ internal static class TableParser
         }
     }
 
+    /// <summary>Every member of the type and of its base classes.</summary>
+    internal static IEnumerable<ISymbol> AllMembers(INamedTypeSymbol type)
+    {
+        for (var current = type; current is not null && current.SpecialType != SpecialType.System_Object; current = current.BaseType)
+        {
+            foreach (var member in current.GetMembers())
+            {
+                yield return member;
+            }
+        }
+    }
+
+    internal static IEnumerable<AttributeData> IndexAttributes(ISymbol symbol) =>
+        symbol.GetAttributes().Where(static data => data.AttributeClass?.ToDisplayString() == IndexAttribute);
+
     private static bool Has(ISymbol symbol, string attribute) =>
         symbol.GetAttributes().Any(data => data.AttributeClass?.ToDisplayString() == attribute);
 
     private static bool IsKeyType(string storeType) =>
         storeType is "Uuid" or "I32" or "I64" or "U32" or "U64" or "Text";
 
-    private static ColumnModel? ToColumn(IPropertySymbol property)
+    internal static ColumnModel? ToColumn(IPropertySymbol property, string expression = "")
     {
         var type = property.Type;
         var nullable = false;
@@ -215,7 +240,8 @@ internal static class TableParser
             type.WithNullableAnnotation(NullableAnnotation.NotAnnotated).ToDisplayString(FullyQualified),
             nullable,
             type.IsValueType,
-            isEnum);
+            isEnum,
+            expression);
     }
 
     private static (string StoreType, string Method)? Map(ITypeSymbol type)

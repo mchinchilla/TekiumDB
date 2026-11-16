@@ -134,6 +134,148 @@ public sealed class TableGeneratorTests
     }
 
     [Fact]
+    public void Indexes_generate_fields_expressions_and_conditions_that_compile_without_warnings()
+    {
+        var (diagnostics, generated) = Run("""
+            #nullable enable
+            using System;
+            using Tekium.Embedded;
+
+            public enum Status : short { New, Paid = 7 }
+
+            [TkTable("orders")]
+            [TkIndex(nameof(Customer), nameof(CreatedAt))]
+            [TkIndex(nameof(Month), nameof(@class), Name = "by month", Where = nameof(Open))]
+            public sealed partial class Order
+            {
+                [TkKey] public Guid Id { get; set; }
+                [TkIndex] public string Customer { get; set; } = "";
+                [TkIndex(Name = "recent", Where = nameof(Recent))] public DateTimeOffset CreatedAt { get; set; }
+                public decimal Total { get; set; }
+                public int? Discount { get; set; }
+                public bool Deleted { get; set; }
+                public Status Status { get; set; }
+                public string? Note { get; set; }
+                public string @class { get; set; } = "";
+
+                [TkIndex] public int Month => (CreatedAt.Year * 12) + CreatedAt.Month;
+
+                [TkIndex]
+                public string? Initial
+                {
+                    get
+                    {
+                        return Customer.Length == 0 ? null : Customer.Substring(0, 1);
+                    }
+                }
+
+                public bool Open => !Deleted && Status == Status.Paid && (100 <= Total) && this.Discount is not null;
+
+                public bool Recent => Deleted == false && Note is null && Discount != null && Month > 24000 && Total < 9.5m;
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+        var order = generated.Single();
+
+        // Un campo por columna y por propiedad calculada que algún índice usa; las calculadas van después.
+        Assert.Contains("TkField<Order, global::System.DateTimeOffset> CreatedAt = new global::Tekium.Embedded.TkField<Order, global::System.DateTimeOffset>(2, global::Tekium.Embedded.TkColumnType.DateTimeOffset, false)", order, StringComparison.Ordinal);
+        Assert.Contains("TkField<Order, int> Month = new global::Tekium.Embedded.TkField<Order, int>(9, global::Tekium.Embedded.TkColumnType.I32, false)", order, StringComparison.Ordinal);
+        Assert.Contains("TkField<Order, string> Initial = new global::Tekium.Embedded.TkField<Order, string>(10, global::Tekium.Embedded.TkColumnType.Text, true)", order, StringComparison.Ordinal);
+        Assert.DoesNotContain("> Open =", order, StringComparison.Ordinal);
+
+        // El texto de la expresión viaja al catálogo: cambiarlo reconstruye el índice.
+        Assert.Contains("new global::Tekium.Embedded.TkExpression(\"Month\", global::Tekium.Embedded.TkColumnType.I32, false, \"(CreatedAt.Year * 12) + CreatedAt.Month\")", order, StringComparison.Ordinal);
+        Assert.Contains("return Customer.Length == 0 ? null : Customer.Substring(0, 1);", order, StringComparison.Ordinal);
+
+        // Los de la clase primero. El nombre por defecto son las propiedades unidas.
+        Assert.Contains("TkIndex<Order>(\"Customer_CreatedAt\", new int[] { 1, 2 }, null)", order, StringComparison.Ordinal);
+        Assert.Contains(
+            "TkIndex<Order>(\"by month\", new int[] { 9, 8 }, Fields.Deleted.EqualTo((bool)(false))"
+            + ".And(Fields.Status.EqualTo((global::Status)(short)(7L)))"
+            + ".And(Fields.Total.AtLeast((decimal)(100L)))"
+            + ".And(Fields.Discount.IsNotNull()))",
+            order,
+            StringComparison.Ordinal);
+        Assert.Contains("TkIndex<Order>(\"Customer\", new int[] { 1 }, null)", order, StringComparison.Ordinal);
+        Assert.Contains(
+            "TkIndex<Order>(\"recent\", new int[] { 2 }, Fields.Deleted.EqualTo((bool)(false))"
+            + ".And(Fields.Note.IsNull())"
+            + ".And(Fields.Discount.IsNotNull())"
+            + ".And(Fields.Month.GreaterThan((int)(24000L)))"
+            + ".And(Fields.Total.LessThan((decimal)(9.5M))))",
+            order,
+            StringComparison.Ordinal);
+        Assert.Contains("TkIndex<Order>(\"Month\", new int[] { 9 }, null)", order, StringComparison.Ordinal);
+        Assert.Contains("TkIndex<Order>(\"Initial\", new int[] { 10 }, null)", order, StringComparison.Ordinal);
+    }
+
+    /// <summary>El ejemplo de índices del README, tal cual: si deja de compilar, el README miente.</summary>
+    [Fact]
+    public void The_index_example_of_the_readme_compiles()
+    {
+        var (diagnostics, generated) = Run("""
+            #nullable enable
+            using System;
+            using Tekium.Embedded;
+
+            [TkTable("orders")]
+            [TkIndex(nameof(Customer), nameof(CreatedAt))]
+            [TkIndex(nameof(CreatedAt), Name = "open", Where = nameof(IsOpen))]
+            public sealed partial class Order
+            {
+                [TkKey] public Guid Id { get; set; }
+
+                [TkIndex] public string Customer { get; set; } = "";
+
+                public DateTimeOffset CreatedAt { get; set; }
+                public decimal Total { get; set; }
+                public bool Deleted { get; set; }
+
+                [TkIndex] public int Month => (CreatedAt.Year * 12) + CreatedAt.Month;
+
+                public bool IsOpen => !Deleted && Total > 0;
+            }
+
+            public static class Usage
+            {
+                public static TkFilter<Order> Recent(DateTimeOffset from, DateTimeOffset to) =>
+                    Order.Fields.Customer.EqualTo("ana").And(Order.Fields.CreatedAt.Between(from, to));
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+        Assert.Contains("TkIndex<Order>(\"open\", new int[] { 2 }, Fields.Deleted.EqualTo((bool)(false)).And(Fields.Total.GreaterThan((decimal)(0L))))", generated.Single(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("TK0010", "[TkIndex(\"Missing\")] [TkTable] public partial class T { [TkKey] public int Id { get; set; } }", "'Missing'")]
+    [InlineData("TK0010", "[TkIndex(\"Id\", \"Id\")] [TkTable] public partial class T { [TkKey] public int Id { get; set; } }", "'Id'")]
+    [InlineData("TK0010", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkIndex] public System.Uri? Link => null; }", "'Link'")]
+    [InlineData("TK0010", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkIndex] public int Fixed { get; } }", "'Fixed'")]
+    [InlineData("TK0010", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkIndex] [TkIgnore] public int Loose { get; set; } }", "'Loose'")]
+    [InlineData("TK0011", "[TkIndex(\"Id\")] [TkTable] public partial class T { [TkKey] [TkIndex] public int Id { get; set; } }", "more than one index named 'Id'")]
+    [InlineData("TK0012", "[TkTable] public partial class T { [TkKey] [TkIndex(Where = \"Nope\")] public int Id { get; set; } }", "'Nope'")]
+    [InlineData("TK0012", "[TkTable] public partial class T { [TkKey] [TkIndex(Where = nameof(Odd))] public int Id { get; set; } public bool Odd => Id % 2 == 1; }", "'Odd'")]
+    [InlineData("TK0012", "[TkTable] public partial class T { [TkKey] [TkIndex(Where = nameof(Either))] public int Id { get; set; } public bool Either => Id == 1 || Id == 2; }", "'Either'")]
+    [InlineData("TK0012", "[TkTable] public partial class T { [TkKey] [TkIndex(Where = nameof(Not))] public int Id { get; set; } public bool Not => Id != 1; }", "'Not'")]
+    [InlineData("TK0012", "[TkTable] public partial class T { [TkKey] [TkIndex(Where = nameof(Now))] public int Id { get; set; } public bool Now => Id > System.Environment.TickCount; }", "'Now'")]
+    [InlineData("TK0012", "[TkTable] public partial class T { [TkKey] [TkIndex(Where = nameof(Count))] public int Id { get; set; } public int Count => Id; }", "'Count'")]
+    [InlineData("TK0012", "[TkTable] public partial class T { [TkKey] [TkIndex(Where = nameof(Plain))] public int Id { get; set; } public bool Plain => Id; }", "'Plain'")]
+    [InlineData("TK0013", "[TkIndex] [TkTable] public partial class T { [TkKey] public int Id { get; set; } }", "no properties")]
+    [InlineData("TK0014", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } public int Fields { get; set; } }", "'Fields'")]
+    public void An_index_that_cannot_be_kept_is_reported_as_an_error_and_generates_nothing(string id, string source, string says)
+    {
+        var (diagnostics, generated) = Run("#nullable enable\nusing Tekium.Embedded;\n" + source, mustCompile: false);
+
+        var diagnostic = Assert.Single(diagnostics, found => found.Id == id);
+        Assert.Equal(DiagnosticSeverity.Error, diagnostic.Severity);
+        Assert.Contains(says, diagnostic.GetMessage(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
+        Assert.Equal("Tables.cs", diagnostic.Location.GetLineSpan().Path);
+        Assert.Empty(generated);
+    }
+
+    [Fact]
     public void Editing_something_else_in_the_file_does_not_run_the_generator_again()
     {
         const string Table = "using Tekium.Embedded;\n[TkTable] public partial class T { [TkKey] public int Id { get; set; } }\n";

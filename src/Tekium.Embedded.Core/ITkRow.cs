@@ -34,4 +34,17 @@ public interface ITkRow<TSelf>
     /// <param name="destination">Where the key goes.</param>
     /// <returns>The number of bytes written.</returns>
     static abstract int WriteKey(TSelf row, Span<byte> destination);
+
+    /// <summary>Gets the values computed from the columns that can be indexed. Their fields follow those of the columns.</summary>
+    static virtual ReadOnlySpan<TkExpression> Expressions => default;
+
+    /// <summary>Gets the secondary indexes declared on the type.</summary>
+    static virtual ReadOnlySpan<TkIndex<TSelf>> Indexes => default;
+
+    /// <summary>Writes one field of <paramref name="row"/> so that the order of the bytes is the order of the values.</summary>
+    /// <param name="writer">Where the value goes.</param>
+    /// <param name="row">The row.</param>
+    /// <param name="field">The field: the position of a column, or past the columns, of an expression.</param>
+    static virtual void WriteField(ref TkKeyWriter writer, TSelf row, int field) =>
+        throw new NotSupportedException("This row type declares no fields to index or filter by.");
 }

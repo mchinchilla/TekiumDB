@@ -90,6 +90,37 @@ static async Task<int> TypedRoundTripAsync()
                 titles.Add(row.Title);
             }
 
+            // Índices: el de fecha se construyó con la fila vieja dentro, y el parcial sólo se usa si la consulta lo implica.
+            var byDate = new List<string>();
+            await foreach (var row in events.QueryAsync(EventV2.Fields.At.Between(at.AddMinutes(-1), at.ToOffset(TimeSpan.Zero))))
+            {
+                byDate.Add(row.Title);
+            }
+
+            var busy = EventV2.Fields.Mood.EqualTo(Mood.Busy).And(EventV2.Fields.Cost.AtLeast(10m));
+            var byCost = new List<string>();
+            await foreach (var row in events.QueryAsync(busy))
+            {
+                byCost.Add(row.Title);
+            }
+
+            var byLength = new List<string>();
+            await foreach (var row in events.QueryAsync(EventV2.Fields.TitleLength.EqualTo("written as version 2".Length).And(EventV2.Fields.Place.IsNotNull())))
+            {
+                byLength.Add(row.Title);
+            }
+
+            if (byDate.Count != 2
+                || byCost is not ["written as version 2"]
+                || byLength is not ["written as version 2"]
+                || await events.ExplainAsync(busy) is not { Access: TkAccess.IndexScan, Index: "busy" }
+                || await events.ExplainAsync(EventV2.Fields.Cost.AtLeast(10m)) is not { Access: TkAccess.TableScan }
+                || await events.ExplainAsync(EventV2.Fields.TitleLength.EqualTo(3)) is not { Access: TkAccess.IndexScan, Index: "TitleLength" })
+            {
+                await Console.Error.WriteLineAsync($"Index round-trip failed: {byDate.Count} by date, {byCost.Count} by cost, {byLength.Count} by length.");
+                return 1;
+            }
+
             var recent = await events.GetAsync(second);
             if (old is { Title: "written as version 1", Place: null, Cost: null, Mood: Mood.Calm, Weight: 0 }
                 && old.At == at

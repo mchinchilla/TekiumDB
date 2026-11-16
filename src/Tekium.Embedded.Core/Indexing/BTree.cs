@@ -319,6 +319,66 @@ internal sealed class BTree
         return _root;
     }
 
+    /// <summary>
+    /// Frees every page of the tree rooted at <paramref name="root"/>: nodes, leaves and the overflow
+    /// pages of large values. Nothing may reach the tree afterwards.
+    /// </summary>
+    public static async ValueTask DropAsync(WriteTransaction transaction, PageNumber root, CancellationToken cancellationToken)
+    {
+        if (root.IsNone)
+        {
+            return;
+        }
+
+        // What hangs from the page is noted down while it is pinned, and followed once it no longer is.
+        PageNumber[] children = [];
+        List<(PageNumber First, int Length)>? chains = null;
+        if (!transaction.TryPin(root, out var page))
+        {
+            page = await transaction.PinAsync(root, cancellationToken).ConfigureAwait(false);
+        }
+
+        using (page)
+        {
+            var node = page.Span;
+            var count = BTreeNode.Count(node);
+            if (BTreeNode.IsLeaf(node))
+            {
+                for (var i = 0; i < count; i++)
+                {
+                    if (BTreeNode.IsOverflow(node, i))
+                    {
+                        BTreeNode.ReadOverflowReference(BTreeNode.LeafValue(node, i), out var length, out var first);
+                        (chains ??= []).Add((first, length));
+                    }
+                }
+            }
+            else
+            {
+                children = new PageNumber[count + 1];
+                for (var i = 0; i <= count; i++)
+                {
+                    children[i] = BTreeNode.Child(node, i);
+                }
+            }
+        }
+
+        foreach (var child in children)
+        {
+            await DropAsync(transaction, child, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (chains is not null)
+        {
+            foreach (var (first, length) in chains)
+            {
+                await FreeChainAsync(transaction, first, length, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        transaction.Free(root);
+    }
+
     /// <summary>Removes the entry with this key from the main tree of the transaction.</summary>
     /// <returns><see langword="true"/> if the key existed.</returns>
     public async ValueTask<bool> DeleteAsync(
