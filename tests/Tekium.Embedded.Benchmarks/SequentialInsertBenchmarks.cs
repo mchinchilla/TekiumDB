@@ -66,7 +66,7 @@ public class SequentialInsertBenchmarks
     public async Task SetupTekiumAsync()
     {
         var device = FileStorageDevice.Open(Path.Combine(_directory, $"insert-{_run++}.tkdb"), FileMode.CreateNew);
-        _pager = await Pager.CreateAsync(device, PageSize.Default, default);
+        _pager = await Pager.CreateAsync(device, Workload.Options, default);
         _tree = new BTree(_pager);
     }
 

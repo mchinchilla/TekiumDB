@@ -24,14 +24,14 @@ if (PageSize.TryFromBytes(12288, out _))
     failures++;
 }
 
-// Fase 0.5: escribir en un archivo real, cerrar, reabrir y leer, todo por el camino asíncrono.
+// Motor: escribir en un archivo real, cerrar, reabrir y leer, todo por el camino asíncrono.
 var path = Path.Combine(Path.GetTempPath(), $"tekium-aot-{Guid.NewGuid():N}.tkdb");
 try
 {
     const int Rows = 5000;
     var key = new byte[8];
     await using (var pager = await Pager.CreateAsync(
-        FileStorageDevice.Open(path, FileMode.CreateNew), PageSize.Default, CancellationToken.None))
+        FileStorageDevice.Open(path, FileMode.CreateNew), new PagerOptions(), CancellationToken.None))
     {
         var tree = new BTree(pager);
         await using var transaction = await pager.BeginWriteAsync(CancellationToken.None);
@@ -45,7 +45,7 @@ try
     }
 
     await using var reopened = await Pager.OpenAsync(
-        FileStorageDevice.Open(path, FileMode.Open), CancellationToken.None);
+        FileStorageDevice.Open(path, FileMode.Open), new PagerOptions(), CancellationToken.None);
     var reader = new BTree(reopened);
     var scanned = 0;
     await foreach (var entry in reader.RangeAsync(default, default, CancellationToken.None))

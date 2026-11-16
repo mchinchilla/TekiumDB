@@ -12,6 +12,9 @@ internal static class Workload
 {
     public const int PayloadSize = 100;
 
+    /// <summary>Página de 8 KiB y 256 MiB de caché, igual que el <c>cache_size</c> que se le da a SQLite.</summary>
+    public static readonly PagerOptions Options = new() { PageSize = PageSize.Default, CachePages = 32_768 };
+
     private static readonly DateTimeOffset Epoch = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
     public static string NewDirectory()
@@ -69,7 +72,7 @@ internal static class Workload
 
     public static async Task FillTekiumAsync(string path, byte[][] keys, byte[] payload, int batchSize)
     {
-        var pager = await Pager.CreateAsync(FileStorageDevice.Open(path, FileMode.CreateNew), PageSize.Default, default);
+        var pager = await Pager.CreateAsync(FileStorageDevice.Open(path, FileMode.CreateNew), Options, default);
         await using (pager)
         {
             await InsertTekiumAsync(pager, new BTree(pager), keys, payload, batchSize);
@@ -94,7 +97,7 @@ internal static class Workload
     /// <summary>Abre la base y recorre todo el árbol para dejar la caché caliente.</summary>
     public static async Task<(Pager Pager, BTree Tree)> OpenTekiumWarmAsync(string path)
     {
-        var pager = await Pager.OpenAsync(FileStorageDevice.Open(path, FileMode.Open), default);
+        var pager = await Pager.OpenAsync(FileStorageDevice.Open(path, FileMode.Open), Options, default);
         var tree = new BTree(pager);
         long bytes = 0;
         await foreach (var entry in tree.RangeAsync(default, default, default))

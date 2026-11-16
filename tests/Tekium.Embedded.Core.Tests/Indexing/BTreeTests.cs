@@ -12,6 +12,9 @@ public sealed class BTreeTests
     private static readonly Comparer<byte[]> ByteOrder =
         Comparer<byte[]>.Create(static (a, b) => a.AsSpan().SequenceCompareTo(b));
 
+    // Caché de 64 páginas: los árboles de estas pruebas no caben, así que el desalojo participa en todas.
+    private static readonly PagerOptions SmallPages = new() { PageSize = PageSize.FromBytes(4096), CachePages = 64 };
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [Fact]
@@ -123,7 +126,7 @@ public sealed class BTreeTests
         var device = new InMemoryStorageDevice();
         var buffer = new byte[1024];
 
-        await using (var pager = await Pager.CreateAsync(device, PageSize.FromBytes(4096), Ct))
+        await using (var pager = await Pager.CreateAsync(device, SmallPages, Ct))
         {
             var tree = new BTree(pager);
             for (var batch = 0; batch < 40; batch++)
@@ -158,7 +161,7 @@ public sealed class BTreeTests
             await AssertMatchesModelAsync(pager, pager.Current.Root, model, buffer);
         }
 
-        await using var reopened = await Pager.OpenAsync(device, Ct);
+        await using var reopened = await Pager.OpenAsync(device, SmallPages, Ct);
         await AssertMatchesModelAsync(reopened, reopened.Current.Root, model, buffer);
     }
 
@@ -209,12 +212,14 @@ public sealed class BTreeTests
             await tx.CommitAsync(Ct);
         }
 
-        var old = pager.Current;
-        await using (var tx = await pager.BeginWriteAsync(Ct))
+        // El lector retiene su snapshot: las páginas que éste alcanza no se pueden reutilizar mientras viva.
+        using var old = pager.BeginRead();
+        for (var round = 0; round < 6; round++)
         {
+            await using var tx = await pager.BeginWriteAsync(Ct);
             for (var i = 0; i < 3000; i++)
             {
-                await tree.PutAsync(tx, Key(i), new byte[] { 2, 2 }, Ct);
+                await tree.PutAsync(tx, Key(i), new byte[] { 2, (byte)round }, Ct);
             }
 
             await tx.CommitAsync(Ct);
@@ -262,7 +267,7 @@ public sealed class BTreeTests
         // Split 100/0: 20 000 filas de 122 bytes (con su slot) caben en ~304 hojas de 8 KiB.
         // Con splits 50/50 serían cerca de 600.
         var device = new InMemoryStorageDevice();
-        await using var pager = await Pager.CreateAsync(device, PageSize.Default, Ct);
+        await using var pager = await Pager.CreateAsync(device, new PagerOptions { CachePages = 64 }, Ct);
         var tree = new BTree(pager);
         var key = new byte[16];
         var value = new byte[100];
@@ -278,7 +283,7 @@ public sealed class BTreeTests
             await tx.CommitAsync(Ct);
         }
 
-        Assert.InRange(pager.Current.PageCount, 304u, 340u);
+        Assert.InRange(pager.Current.PageCount, 304u, 345u);
         Assert.Equal(20_000, (await ToListAsync(tree.RangeAsync(default, default, Ct))).Count);
     }
 
@@ -320,7 +325,7 @@ public sealed class BTreeTests
         try
         {
             await using (var pager = await Pager.CreateAsync(
-                FileStorageDevice.Open(path, FileMode.CreateNew), PageSize.Default, Ct))
+                FileStorageDevice.Open(path, FileMode.CreateNew), new PagerOptions { CachePages = 64 }, Ct))
             {
                 var tree = new BTree(pager);
                 for (var batch = 0; batch < 5; batch++)
@@ -336,7 +341,8 @@ public sealed class BTreeTests
             }
 
             // Reabrir con la caché vacía obliga a leer cada página desde el archivo (camino asíncrono lento).
-            await using var reopened = await Pager.OpenAsync(FileStorageDevice.Open(path, FileMode.Open), Ct);
+            await using var reopened = await Pager.OpenAsync(
+                FileStorageDevice.Open(path, FileMode.Open), new PagerOptions { CachePages = 64 }, Ct);
             var reader = new BTree(reopened);
             var buffer = new byte[4];
 
@@ -383,7 +389,7 @@ public sealed class BTreeTests
     }
 
     private static async Task<Pager> NewPagerAsync() =>
-        await Pager.CreateAsync(new InMemoryStorageDevice(), PageSize.FromBytes(4096), Ct);
+        await Pager.CreateAsync(new InMemoryStorageDevice(), SmallPages, Ct);
 
     // Entero con signo codificado de forma que el orden de bytes sea el orden numérico.
     private static byte[] Key(int value)

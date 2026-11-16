@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 0.5 de la hoja de ruta).** Hoy existe un motor mínimo de validación: pager y B+Tree copy-on-write con commit atómico, medido contra SQLite. No hay API pública, cifrado, índices secundarios ni paquete publicado. La API y las características descritas aquí son el diseño objetivo, no funcionalidad disponible. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 1 de la hoja de ruta).** Hoy existen el pager (caché acotada, checksums por página, free-list, commit atómico) y un B+Tree copy-on-write mínimo, medidos contra SQLite. No hay API pública, cifrado, índices secundarios ni paquete publicado. La API y las características descritas aquí son el diseño objetivo, no funcionalidad disponible. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -39,11 +39,11 @@ El competidor real de una base embebida es SQLite, y "SQLite pero más rápido" 
 
 Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (joins, estimación de cardinalidad, reordenamiento).
 
-Antes de invertir en el resto, la Fase 0.5 midió un motor mínimo contra `Microsoft.Data.Sqlite`: lectura puntual 6× más rápida, rango de fechas 38× más rápido e inserción secuencial entre empate y 5× más rápida. Los números, las condiciones y sus advertencias están en [`docs/benchmarks/fase-0.5.md`](docs/benchmarks/fase-0.5.md).
+Antes de invertir en el resto, la Fase 0.5 midió un motor mínimo contra `Microsoft.Data.Sqlite`: lectura puntual 6× más rápida, rango de fechas 38× más rápido e inserción secuencial entre empate y 5× más rápida. Los números, las condiciones y sus advertencias están en [`docs/benchmarks/fase-0.5.md`](docs/benchmarks/fase-0.5.md). Con el pager real de la Fase 1 las lecturas siguen entre 4,7× y 38× por delante; la inserción con commits pequeños quedó 1,28× por detrás ([`docs/benchmarks/fase-1.md`](docs/benchmarks/fase-1.md)).
 
 ## Características
 
-Todas forman parte del diseño. Hoy sólo existe, en versión mínima, el B+Tree copy-on-write con commit atómico.
+Todas forman parte del diseño. Hoy existen el pager y, en versión mínima, el B+Tree copy-on-write con commit atómico.
 
 **Almacenamiento**
 
@@ -139,7 +139,8 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | --- | --- | --- |
 | 0 | Esqueleto de la solución, CI, BenchmarkDotNet, analizadores | Hecho en macOS; pendiente confirmar CI en Linux y Windows |
 | 0.5 | Spike de validación: pager y B+Tree mínimos medidos contra SQLite | Hecho: [dentro del criterio](docs/benchmarks/fase-0.5.md), se sigue |
-| 1 – 1.5 | Capa de E/S, pager y modo en memoria | Pendiente |
+| 1 | Capa de E/S y pager: caché de páginas, checksums, free-list | Hecho en macOS: [criterio cumplido](docs/benchmarks/fase-1.md); pendiente confirmar CI en Linux y Windows |
+| 1.5 | Modo en memoria | Pendiente |
 | 2 | Cifrado por página y derivación de clave | Pendiente |
 | 3 | B+Tree copy-on-write | Pendiente |
 | 4 | MVCC, transacciones y commit atómico | Pendiente |

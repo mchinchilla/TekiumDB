@@ -7,7 +7,7 @@ using Tekium.Embedded.Storage;
 namespace Tekium.Embedded.Indexing;
 
 /// <summary>
-/// Byte layout of a B+Tree node, read and written in place over the page. Nothing is deserialized.
+/// Byte layout of a B+Tree node, read and written in place over the page payload. Nothing is deserialized.
 /// </summary>
 /// <remarks>
 /// <code>
@@ -15,21 +15,20 @@ namespace Tekium.Embedded.Indexing;
 /// 2   u16  entry count
 /// 4   u16  cell start: offset of the lowest cell
 /// 6   u16  garbage: bytes of dead cells that compaction reclaims
-/// 8   u32  page number
-/// 12  u32  rightmost child (internal only)
-/// 16  u64  id of the transaction that wrote the page
-/// 24  u16 × count   slot directory: cell offsets in key order, growing up
+/// 8   u32  rightmost child (internal only)
+/// 12  u16 × count   slot directory: cell offsets in key order, growing up
 /// ...               free space
 /// cell start        cells, growing down
 /// </code>
 /// Leaf cell: key length u16, value length u16, key, value.
 /// Internal cell: child u32, key length u16, key. Child <c>i</c> holds the keys below key <c>i</c> and not below
 /// key <c>i - 1</c>; the rightmost child holds the keys not below the last key.
-/// Phase 0.5 spike: no prefix compression, no overflow pages, no zone maps.
+/// Offsets are relative to the payload: the page header and checksum belong to the pager.
+/// Not yet: prefix compression, overflow pages, zone maps.
 /// </remarks>
 internal static class BTreeNode
 {
-    public const int HeaderSize = 24;
+    public const int HeaderSize = 12;
 
     private const byte LeafType = 1;
     private const byte InternalType = 2;
@@ -37,25 +36,15 @@ internal static class BTreeNode
     private const int CountOffset = 2;
     private const int CellStartOffset = 4;
     private const int GarbageOffset = 6;
-    private const int NumberOffset = 8;
-    private const int RightChildOffset = 12;
-    private const int TransactionOffset = 16;
+    private const int RightChildOffset = 8;
     private const int LeafCellHeader = 4;
     private const int InternalCellHeader = 6;
 
-    public static void Initialize(Span<byte> page, bool leaf, PageNumber number, TransactionId transactionId)
+    public static void Initialize(Span<byte> page, bool leaf)
     {
         page[..HeaderSize].Clear();
         page[0] = leaf ? LeafType : InternalType;
         WriteU16(page, CellStartOffset, page.Length);
-        Stamp(page, number, transactionId);
-    }
-
-    /// <summary>Records the identity of a page that was just copied for writing.</summary>
-    public static void Stamp(Span<byte> page, PageNumber number, TransactionId transactionId)
-    {
-        BinaryPrimitives.WriteUInt32LittleEndian(page[NumberOffset..], number.Value);
-        BinaryPrimitives.WriteUInt64LittleEndian(page[TransactionOffset..], transactionId.Value);
     }
 
     public static bool IsLeaf(ReadOnlySpan<byte> page) => page[0] == LeafType;
@@ -63,9 +52,6 @@ internal static class BTreeNode
     public static int Count(ReadOnlySpan<byte> page) => ReadU16(page, CountOffset);
 
     public static int Garbage(ReadOnlySpan<byte> page) => ReadU16(page, GarbageOffset);
-
-    public static PageNumber Number(ReadOnlySpan<byte> page) =>
-        new(BinaryPrimitives.ReadUInt32LittleEndian(page[NumberOffset..]));
 
     /// <summary>Contiguous free bytes between the slot directory and the cells.</summary>
     public static int FreeSpace(ReadOnlySpan<byte> page) =>

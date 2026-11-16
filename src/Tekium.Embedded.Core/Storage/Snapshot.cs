@@ -7,6 +7,7 @@ namespace Tekium.Embedded.Storage;
 /// It is what a root slot in the header stores.
 /// </summary>
 /// <param name="Root">Root page of the tree, or <see cref="PageNumber.None"/> for an empty database.</param>
-/// <param name="PageCount">Pages in use, including the header page.</param>
+/// <param name="PageCount">High-water mark of the file in pages, including the two meta pages.</param>
 /// <param name="TransactionId">Transaction that produced this state.</param>
-internal sealed record Snapshot(PageNumber Root, uint PageCount, TransactionId TransactionId);
+/// <param name="FreeList">First directory page of the free-list, or <see cref="PageNumber.None"/>.</param>
+internal sealed record Snapshot(PageNumber Root, uint PageCount, TransactionId TransactionId, PageNumber FreeList);

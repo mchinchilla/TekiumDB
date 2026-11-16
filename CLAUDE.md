@@ -21,6 +21,7 @@ Base de datos embebida de archivo único (`.tkdb`), cifrada, async-first, B+Tree
 dotnet build -c Release
 dotnet test
 dotnet test --filter-class "*PageSizeTests"
+dotnet test -c Release --filter-method "*One_million*" --explicit only   # prueba de 4 GiB, no corre en CI
 dotnet publish tests/Tekium.Embedded.AotSmoke -c Release -o artifacts/aot && ./artifacts/aot/Tekium.Embedded.AotSmoke
 dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'
 ```

@@ -1,7 +1,5 @@
 // Copyright (c) Tekium. Licensed under the MIT License.
 
-using System.Diagnostics.CodeAnalysis;
-
 namespace Tekium.Embedded.Storage;
 
 /// <summary>
@@ -11,15 +9,20 @@ namespace Tekium.Embedded.Storage;
 internal sealed class WriteTransaction : IPageSource, IAsyncDisposable
 {
     private readonly Pager _pager;
-    private readonly uint _firstNewPage;
-    private readonly List<byte[]> _newPages = [];
+    private readonly long _horizon;
+    private FreeList.Cursor _cursor;
     private bool _finished;
     private bool _disposed;
 
-    internal WriteTransaction(Pager pager, Snapshot basis)
+    internal WriteTransaction(
+        Pager pager, Snapshot basis, long horizon, Dictionary<uint, byte[]> dirty, List<uint> freed)
     {
         _pager = pager;
-        _firstNewPage = basis.PageCount;
+        _horizon = horizon;
+        _cursor = pager.FreeList.Begin();
+        Dirty = dirty;
+        Freed = freed;
+        PageCount = basis.PageCount;
         Root = basis.Root;
         Id = basis.TransactionId.Next();
     }
@@ -31,51 +34,89 @@ internal sealed class WriteTransaction : IPageSource, IAsyncDisposable
     /// <summary>Gets or sets the root the commit will publish.</summary>
     public PageNumber Root { get; set; }
 
-    /// <summary>Indicates whether the page was created by this transaction and may be modified in place.</summary>
-    public bool IsWritable(PageNumber number) => number.Value >= _firstNewPage;
+    /// <summary>Gets the pages this transaction wrote, by number. They are private to it until the commit.</summary>
+    internal Dictionary<uint, byte[]> Dirty { get; }
 
-    /// <summary>Creates a zeroed page.</summary>
-    public byte[] Allocate(out PageNumber number)
+    /// <summary>Gets the committed pages this transaction no longer reaches.</summary>
+    internal List<uint> Freed { get; }
+
+    /// <summary>Gets the high-water mark of the file after this transaction.</summary>
+    internal uint PageCount { get; private set; }
+
+    internal FreeList.Cursor Cursor => _cursor;
+
+    /// <summary>Creates a zeroed page and returns its payload.</summary>
+    public Memory<byte> Allocate(PageType type, out PageNumber number)
     {
         ThrowIfFinished();
-        var page = new byte[_pager.PageSize.Bytes];
-        number = new PageNumber(checked(_firstNewPage + (uint)_newPages.Count));
-        _newPages.Add(page);
-        return page;
+        number = AllocateNumber();
+        return CreatePage(number, type);
     }
 
-    /// <summary>Copy-on-write: returns a private copy of a committed page under a new number.</summary>
-    public byte[] CopyForWrite(byte[] committed, out PageNumber number)
+    /// <summary>Returns the payload of a page this transaction created, which may be modified in place.</summary>
+    public bool TryGetWritable(PageNumber number, out Memory<byte> payload)
     {
-        ThrowIfFinished();
-        var page = GC.AllocateUninitializedArray<byte>(committed.Length);
-        committed.CopyTo(page.AsSpan());
-        number = new PageNumber(checked(_firstNewPage + (uint)_newPages.Count));
-        _newPages.Add(page);
-        return page;
-    }
-
-    public bool TryGetCachedPage(PageNumber number, [NotNullWhen(true)] out byte[]? page)
-    {
-        if (IsWritable(number))
+        if (Dirty.TryGetValue(number.Value, out var page))
         {
-            page = _newPages[(int)(number.Value - _firstNewPage)];
+            payload = PageLayout.Payload(page);
             return true;
         }
 
-        return _pager.TryGetCachedPage(number, out page);
+        payload = default;
+        return false;
     }
 
-    public ValueTask<byte[]> GetPageAsync(PageNumber number, CancellationToken cancellationToken) =>
-        IsWritable(number)
-            ? new ValueTask<byte[]>(_newPages[(int)(number.Value - _firstNewPage)])
-            : _pager.GetPageAsync(number, cancellationToken);
+    /// <summary>
+    /// Copy-on-write: returns the payload of a private copy of a committed page, under a new number,
+    /// and frees the original.
+    /// </summary>
+    public Memory<byte> CopyForWrite(in PageLease committed, PageNumber original, out PageNumber number)
+    {
+        ThrowIfFinished();
+        number = AllocateNumber();
+        var page = _pager.RentBuffer();
+        committed.CopyPageTo(page);
+        PageLayout.Restamp(page, number, Id);
+        Dirty.Add(number.Value, page);
+        Freed.Add(original.Value);
+        return PageLayout.Payload(page);
+    }
+
+    /// <summary>Declares that the tree no longer reaches a page.</summary>
+    public void Free(PageNumber number)
+    {
+        ThrowIfFinished();
+        if (Dirty.Remove(number.Value, out var page))
+        {
+            _pager.ReturnBuffer(page);
+        }
+
+        Freed.Add(number.Value);
+    }
+
+    public bool TryPin(PageNumber number, out PageLease lease)
+    {
+        if (Dirty.TryGetValue(number.Value, out var page))
+        {
+            lease = new PageLease(page);
+            return true;
+        }
+
+        return _pager.TryPin(number, out lease);
+    }
+
+    public ValueTask<PageLease> PinAsync(PageNumber number, CancellationToken cancellationToken) =>
+        Dirty.TryGetValue(number.Value, out var page)
+            ? new ValueTask<PageLease>(new PageLease(page))
+            : _pager.PinAsync(number, cancellationToken);
 
     public async ValueTask CommitAsync(CancellationToken cancellationToken)
     {
         ThrowIfFinished();
-        await _pager.CommitAsync(_newPages, Root, cancellationToken).ConfigureAwait(false);
+
+        // Whatever happens, the transaction is over: a failed commit cannot be retried.
         _finished = true;
+        await _pager.CommitAsync(this, cancellationToken).ConfigureAwait(false);
     }
 
     public ValueTask DisposeAsync()
@@ -84,10 +125,24 @@ internal sealed class WriteTransaction : IPageSource, IAsyncDisposable
         {
             _disposed = true;
             _finished = true;
-            _pager.ReleaseWriter();
+            _pager.EndWrite(this);
         }
 
         return default;
+    }
+
+    internal PageNumber AllocateNumber() =>
+        _pager.FreeList.TryTake(_horizon, ref _cursor, out var reused)
+            ? reused
+            : new PageNumber(checked(PageCount++));
+
+    internal Memory<byte> CreatePage(PageNumber number, PageType type)
+    {
+        var page = _pager.RentBuffer();
+        page.AsSpan().Clear();
+        PageLayout.Stamp(page, type, number, Id);
+        Dirty.Add(number.Value, page);
+        return PageLayout.Payload(page);
     }
 
     private void ThrowIfFinished()

@@ -10,7 +10,7 @@ namespace Tekium.Embedded.Indexing;
 /// it copies the path from the root to the leaf, so every older root keeps describing a complete tree.
 /// </summary>
 /// <remarks>
-/// Phase 0.5 spike: put, point lookup and range scan. No delete, no merge, no overflow pages.
+/// Put, point lookup and range scan. Not yet: delete, merge, overflow pages.
 /// Writes go through one <see cref="WriteTransaction"/> at a time; reads are safe from any thread.
 /// </remarks>
 internal sealed class BTree
@@ -24,7 +24,7 @@ internal sealed class BTree
     private readonly int _maxEntrySize;
 
     // Scratch state of the single writer: the path of the insert in progress and separator buffers.
-    private readonly byte[][] _pathPages = new byte[MaxDepth][];
+    private readonly Memory<byte>[] _pathPages = new Memory<byte>[MaxDepth];
     private readonly PageNumber[] _pathNumbers = new PageNumber[MaxDepth];
     private readonly int[] _pathIndexes = new int[MaxDepth];
     private byte[] _separator;
@@ -39,13 +39,8 @@ internal sealed class BTree
         _nextSeparator = new byte[_maxKeySize];
     }
 
-    /// <summary>Copies the value of <paramref name="key"/> in the latest committed state.</summary>
-    /// <returns>The value length, or <see cref="NotFound"/>.</returns>
-    public ValueTask<int> GetAsync(
-        ReadOnlyMemory<byte> key, Memory<byte> destination, CancellationToken cancellationToken) =>
-        GetAsync(_pager, _pager.Current.Root, key, destination, cancellationToken);
-
     /// <summary>Copies the value of <paramref name="key"/> in the tree rooted at <paramref name="root"/>.</summary>
+    /// <remarks>The caller keeps the pages reachable: it holds a read snapshot or is the writer.</remarks>
     /// <returns>The value length, or <see cref="NotFound"/>.</returns>
     public static ValueTask<int> GetAsync(
         IPageSource source,
@@ -58,101 +53,80 @@ internal sealed class BTree
         var number = root;
         while (!number.IsNone)
         {
-            if (!source.TryGetCachedPage(number, out var page))
+            if (!source.TryPin(number, out var page))
             {
                 return GetSlowAsync(source, number, key, destination, cancellationToken);
             }
 
-            if (BTreeNode.IsLeaf(page))
+            using (page)
             {
-                return new ValueTask<int>(ReadLeaf(page, key.Span, destination.Span));
-            }
+                var node = page.Span;
+                if (BTreeNode.IsLeaf(node))
+                {
+                    return new ValueTask<int>(ReadLeaf(node, key.Span, destination.Span));
+                }
 
-            number = BTreeNode.Child(page, BTreeNode.FindChildIndex(page, key.Span));
+                number = BTreeNode.Child(node, BTreeNode.FindChildIndex(node, key.Span));
+            }
         }
 
         return new ValueTask<int>(NotFound);
     }
 
-    /// <summary>Scans the latest committed state. See the overload with an explicit root.</summary>
-    public IAsyncEnumerable<BTreeEntry> RangeAsync(
-        ReadOnlyMemory<byte> from, ReadOnlyMemory<byte> to, CancellationToken cancellationToken) =>
-        RangeAsync(_pager, _pager.Current.Root, from, to, cancellationToken);
-
     /// <summary>
     /// Scans keys in order from <paramref name="from"/> (inclusive; empty means the first key)
     /// up to <paramref name="to"/> (exclusive; empty means no upper bound).
     /// </summary>
-    public static async IAsyncEnumerable<BTreeEntry> RangeAsync(
+    /// <remarks>
+    /// Each entry points into its page and is valid until the enumerator advances.
+    /// The caller keeps the pages reachable: it holds a read snapshot or is the writer.
+    /// </remarks>
+    public static IAsyncEnumerable<BTreeEntry> RangeAsync(
         IPageSource source,
         PageNumber root,
         ReadOnlyMemory<byte> from,
         ReadOnlyMemory<byte> to,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        RangeCoreAsync(source, root, null, from, to, cancellationToken);
+
+    /// <summary>Copies the value of <paramref name="key"/> in the latest committed state.</summary>
+    /// <returns>The value length, or <see cref="NotFound"/>.</returns>
+    public ValueTask<int> GetAsync(
+        ReadOnlyMemory<byte> key, Memory<byte> destination, CancellationToken cancellationToken)
     {
-        if (root.IsNone)
+        var snapshot = _pager.BeginRead();
+        ValueTask<int> pending;
+        try
         {
-            yield break;
+            pending = GetAsync(_pager, snapshot.Root, key, destination, cancellationToken);
+        }
+        catch
+        {
+            snapshot.Dispose();
+            throw;
         }
 
-        // Leaves have no sibling links (copy-on-write could not keep them), so the scan keeps its path.
-        var pages = new byte[MaxDepth][];
-        var indexes = new int[MaxDepth];
-        var depth = 0;
-        var page = await source.GetPageAsync(root, cancellationToken).ConfigureAwait(false);
-        while (!BTreeNode.IsLeaf(page))
+        if (pending.IsCompletedSuccessfully)
         {
-            pages[depth] = page;
-            indexes[depth] = BTreeNode.FindChildIndex(page, from.Span);
-            page = await source.GetPageAsync(BTreeNode.Child(page, indexes[depth]), cancellationToken)
-                .ConfigureAwait(false);
-            depth++;
+            snapshot.Dispose();
+            return pending;
         }
 
-        var index = BTreeNode.LowerBound(page, from.Span, out _);
-        while (true)
+        return AwaitThenRelease(pending, snapshot);
+
+        static async ValueTask<int> AwaitThenRelease(ValueTask<int> pending, ReadSnapshot snapshot)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var count = BTreeNode.Count(page);
-            for (; index < count; index++)
+            using (snapshot)
             {
-                BTreeNode.LeafKeyRange(page, index, out var keyOffset, out var keyLength);
-                if (!to.IsEmpty && page.AsSpan(keyOffset, keyLength).SequenceCompareTo(to.Span) >= 0)
-                {
-                    yield break;
-                }
-
-                BTreeNode.LeafValueRange(page, index, out var valueOffset, out var valueLength);
-                yield return new BTreeEntry(
-                    new ReadOnlyMemory<byte>(page, keyOffset, keyLength),
-                    new ReadOnlyMemory<byte>(page, valueOffset, valueLength));
+                return await pending.ConfigureAwait(false);
             }
-
-            // Climb until some ancestor still has a child to the right, then go down its leftmost path.
-            while (depth > 0 && indexes[depth - 1] >= BTreeNode.Count(pages[depth - 1]))
-            {
-                depth--;
-            }
-
-            if (depth == 0)
-            {
-                yield break;
-            }
-
-            indexes[depth - 1]++;
-            page = await source.GetPageAsync(BTreeNode.Child(pages[depth - 1], indexes[depth - 1]), cancellationToken)
-                .ConfigureAwait(false);
-            while (!BTreeNode.IsLeaf(page))
-            {
-                pages[depth] = page;
-                indexes[depth] = 0;
-                page = await source.GetPageAsync(BTreeNode.Child(page, 0), cancellationToken).ConfigureAwait(false);
-                depth++;
-            }
-
-            index = 0;
         }
     }
+
+    /// <summary>Scans the latest committed state, which stays pinned until the enumeration ends.</summary>
+    public IAsyncEnumerable<BTreeEntry> RangeAsync(
+        ReadOnlyMemory<byte> from, ReadOnlyMemory<byte> to, CancellationToken cancellationToken) =>
+        RangeCoreAsync(_pager, PageNumber.None, _pager, from, to, cancellationToken);
 
     /// <summary>Inserts the entry, or replaces the value if the key exists.</summary>
     public async ValueTask PutAsync(
@@ -174,8 +148,8 @@ internal sealed class BTree
 
         if (transaction.Root.IsNone)
         {
-            var first = transaction.Allocate(out var firstNumber);
-            BTreeNode.Initialize(first, leaf: true, firstNumber, transaction.Id);
+            var first = transaction.Allocate(PageType.BTreeLeaf, out var firstNumber);
+            BTreeNode.Initialize(first.Span, leaf: true);
             transaction.Root = firstNumber;
         }
 
@@ -190,40 +164,145 @@ internal sealed class BTree
                 throw new InvalidDataException("The B+Tree is deeper than any valid tree can be.");
             }
 
-            if (!transaction.TryGetCachedPage(number, out var page))
+            if (!transaction.TryGetWritable(number, out var page))
             {
-                page = await transaction.GetPageAsync(number, cancellationToken).ConfigureAwait(false);
-            }
+                if (!transaction.TryPin(number, out var committed))
+                {
+                    committed = await transaction.PinAsync(number, cancellationToken).ConfigureAwait(false);
+                }
 
-            if (!transaction.IsWritable(number))
-            {
-                page = transaction.CopyForWrite(page, out number);
-                BTreeNode.Stamp(page, number, transaction.Id);
+                using (committed)
+                {
+                    page = transaction.CopyForWrite(committed, number, out number);
+                }
+
                 if (depth == 0)
                 {
                     transaction.Root = number;
                 }
                 else
                 {
-                    BTreeNode.SetChild(_pathPages[depth - 1], _pathIndexes[depth - 1], number);
+                    BTreeNode.SetChild(_pathPages[depth - 1].Span, _pathIndexes[depth - 1], number);
                 }
             }
 
             _pathPages[depth] = page;
             _pathNumbers[depth] = number;
-            if (BTreeNode.IsLeaf(page))
+            var node = page.Span;
+            if (BTreeNode.IsLeaf(node))
             {
                 break;
             }
 
-            var child = BTreeNode.FindChildIndex(page, key.Span);
-            rightmostPath &= child == BTreeNode.Count(page);
+            var child = BTreeNode.FindChildIndex(node, key.Span);
+            rightmostPath &= child == BTreeNode.Count(node);
             _pathIndexes[depth] = child;
-            number = BTreeNode.Child(page, child);
+            number = BTreeNode.Child(node, child);
             depth++;
         }
 
         InsertIntoLeaf(transaction, depth, key.Span, value.Span, rightmostPath);
+    }
+
+    private static async IAsyncEnumerable<BTreeEntry> RangeCoreAsync(
+        IPageSource source,
+        PageNumber root,
+        Pager? latestOf,
+        ReadOnlyMemory<byte> from,
+        ReadOnlyMemory<byte> to,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // The snapshot is taken here, when the enumeration starts, so that an enumerable that is
+        // never enumerated holds nothing.
+        ReadSnapshot? owned = latestOf?.BeginRead();
+        if (owned is { } snapshot)
+        {
+            root = snapshot.Root;
+        }
+
+        // Leaves have no sibling links (copy-on-write could not keep them), so the scan keeps its path,
+        // pinned: levels [0, depth) are internal nodes and level depth is the current leaf.
+        var pages = new PageLease[MaxDepth];
+        var indexes = new int[MaxDepth];
+        var depth = 0;
+        var held = 0;
+        try
+        {
+            if (root.IsNone)
+            {
+                yield break;
+            }
+
+            pages[0] = await source.PinAsync(root, cancellationToken).ConfigureAwait(false);
+            held = 1;
+            while (!BTreeNode.IsLeaf(pages[depth].Span))
+            {
+                indexes[depth] = BTreeNode.FindChildIndex(pages[depth].Span, from.Span);
+                var child = BTreeNode.Child(pages[depth].Span, indexes[depth]);
+                pages[depth + 1] = await source.PinAsync(child, cancellationToken).ConfigureAwait(false);
+                depth++;
+                held++;
+            }
+
+            var index = BTreeNode.LowerBound(pages[depth].Span, from.Span, out _);
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var leaf = pages[depth].Payload;
+                var count = BTreeNode.Count(leaf.Span);
+                for (; index < count; index++)
+                {
+                    BTreeNode.LeafKeyRange(leaf.Span, index, out var keyOffset, out var keyLength);
+                    if (!to.IsEmpty && leaf.Span.Slice(keyOffset, keyLength).SequenceCompareTo(to.Span) >= 0)
+                    {
+                        yield break;
+                    }
+
+                    BTreeNode.LeafValueRange(leaf.Span, index, out var valueOffset, out var valueLength);
+                    yield return new BTreeEntry(
+                        leaf.Slice(keyOffset, keyLength), leaf.Slice(valueOffset, valueLength));
+                }
+
+                // Climb until some ancestor still has a child to the right, then go down its leftmost path.
+                pages[depth].Dispose();
+                held--;
+                while (depth > 0 && indexes[depth - 1] >= BTreeNode.Count(pages[depth - 1].Span))
+                {
+                    depth--;
+                    pages[depth].Dispose();
+                    held--;
+                }
+
+                if (depth == 0)
+                {
+                    yield break;
+                }
+
+                indexes[depth - 1]++;
+                var next = BTreeNode.Child(pages[depth - 1].Span, indexes[depth - 1]);
+                pages[depth] = await source.PinAsync(next, cancellationToken).ConfigureAwait(false);
+                held++;
+                while (!BTreeNode.IsLeaf(pages[depth].Span))
+                {
+                    indexes[depth] = 0;
+                    var child = BTreeNode.Child(pages[depth].Span, 0);
+                    pages[depth + 1] = await source.PinAsync(child, cancellationToken).ConfigureAwait(false);
+                    depth++;
+                    held++;
+                }
+
+                index = 0;
+            }
+        }
+        finally
+        {
+            for (var i = 0; i < held; i++)
+            {
+                pages[i].Dispose();
+            }
+
+            owned?.Dispose();
+        }
     }
 
     private static int ReadLeaf(ReadOnlySpan<byte> leaf, ReadOnlySpan<byte> key, Span<byte> destination)
@@ -255,13 +334,13 @@ internal sealed class BTree
     {
         while (true)
         {
-            var page = await source.GetPageAsync(number, cancellationToken).ConfigureAwait(false);
-            if (BTreeNode.IsLeaf(page))
+            using var page = await source.PinAsync(number, cancellationToken).ConfigureAwait(false);
+            if (BTreeNode.IsLeaf(page.Span))
             {
-                return ReadLeaf(page, key.Span, destination.Span);
+                return ReadLeaf(page.Span, key.Span, destination.Span);
             }
 
-            number = BTreeNode.Child(page, BTreeNode.FindChildIndex(page, key.Span));
+            number = BTreeNode.Child(page.Span, BTreeNode.FindChildIndex(page.Span, key.Span));
         }
     }
 
@@ -300,7 +379,7 @@ internal sealed class BTree
     private void InsertIntoLeaf(
         WriteTransaction transaction, int depth, ReadOnlySpan<byte> key, ReadOnlySpan<byte> value, bool rightmostPath)
     {
-        Span<byte> leaf = _pathPages[depth];
+        var leaf = _pathPages[depth].Span;
         var index = BTreeNode.LowerBound(leaf, key, out var found);
         if (found)
         {
@@ -319,8 +398,8 @@ internal sealed class BTree
             return;
         }
 
-        Span<byte> right = transaction.Allocate(out var rightNumber);
-        BTreeNode.Initialize(right, leaf: true, rightNumber, transaction.Id);
+        var right = transaction.Allocate(PageType.BTreeLeaf, out var rightNumber).Span;
+        BTreeNode.Initialize(right, leaf: true);
         int separatorLength;
         if (rightmostPath && index == BTreeNode.Count(leaf))
         {
@@ -368,23 +447,23 @@ internal sealed class BTree
             if (level < 0)
             {
                 // The root itself was split: the tree grows one level.
-                Span<byte> root = transaction.Allocate(out var rootNumber);
-                BTreeNode.Initialize(root, leaf: false, rootNumber, transaction.Id);
+                var root = transaction.Allocate(PageType.BTreeInternal, out var rootNumber).Span;
+                BTreeNode.Initialize(root, leaf: false);
                 BTreeNode.SetChild(root, 0, _pathNumbers[0]);
                 Insert(root, 0, separator, right);
                 transaction.Root = rootNumber;
                 return;
             }
 
-            Span<byte> node = _pathPages[level];
+            var node = _pathPages[level].Span;
             var index = _pathIndexes[level];
             if (TryInsertSeparator(node, index, separator, right))
             {
                 return;
             }
 
-            Span<byte> sibling = transaction.Allocate(out var siblingNumber);
-            BTreeNode.Initialize(sibling, leaf: false, siblingNumber, transaction.Id);
+            var sibling = transaction.Allocate(PageType.BTreeInternal, out var siblingNumber).Span;
+            BTreeNode.Initialize(sibling, leaf: false);
             var count = BTreeNode.Count(node);
             var splitAt = rightmostPath ? count - 1 : BTreeNode.ChooseSplitIndex(node);
             var promotedLength = BTreeNode.SplitInternal(node, sibling, splitAt, _nextSeparator);

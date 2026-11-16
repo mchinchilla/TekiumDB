@@ -7,16 +7,13 @@ namespace Tekium.Embedded.Tests.Indexing;
 
 public sealed class BTreeNodeTests
 {
-    private static readonly TransactionId Tx = new(7);
-
     [Fact]
-    public void A_new_leaf_is_empty_and_stamped()
+    public void A_new_leaf_is_empty()
     {
         var page = NewLeaf();
 
         Assert.True(BTreeNode.IsLeaf(page));
         Assert.Equal(0, BTreeNode.Count(page));
-        Assert.Equal(new PageNumber(5), BTreeNode.Number(page));
         Assert.Equal(4096 - BTreeNode.HeaderSize, BTreeNode.FreeSpace(page));
     }
 
@@ -108,7 +105,7 @@ public sealed class BTreeNodeTests
         }
 
         var right = new byte[4096];
-        BTreeNode.Initialize(right, leaf: true, new PageNumber(6), Tx);
+        BTreeNode.Initialize(right, leaf: true);
 
         BTreeNode.SplitLeaf(left, right, 4);
 
@@ -150,7 +147,7 @@ public sealed class BTreeNodeTests
 
         BTreeNode.SetChild(left, 5, new PageNumber(105));
         var right = new byte[4096];
-        BTreeNode.Initialize(right, leaf: false, new PageNumber(6), Tx);
+        BTreeNode.Initialize(right, leaf: false);
         var separator = new byte[16];
 
         var length = BTreeNode.SplitInternal(left, right, 2, separator);
@@ -167,14 +164,14 @@ public sealed class BTreeNodeTests
     private static byte[] NewLeaf()
     {
         var page = new byte[4096];
-        BTreeNode.Initialize(page, leaf: true, new PageNumber(5), Tx);
+        BTreeNode.Initialize(page, leaf: true);
         return page;
     }
 
     private static byte[] NewInternal()
     {
         var page = new byte[4096];
-        BTreeNode.Initialize(page, leaf: false, new PageNumber(5), Tx);
+        BTreeNode.Initialize(page, leaf: false);
         return page;
     }
 }
