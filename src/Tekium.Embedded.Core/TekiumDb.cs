@@ -56,6 +56,12 @@ public sealed class TekiumDb : IAsyncDisposable
 
     internal Pager Pager { get; }
 
+    /// <summary>Gets or sets how many finished pages a bulk load keeps in memory before writing them to the file.</summary>
+    internal int BulkSpillPages { get; set; } = 2048;
+
+    /// <summary>Gets or sets how many bytes of entries a bulk load sorts in memory before writing them out as a run.</summary>
+    internal int BulkSortBudget { get; set; } = 64 << 20;
+
     /// <summary>Gets the tree operations of the single writer. Only whoever holds the write transaction may use it.</summary>
     internal BTree Tree { get; }
 

@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 6.7 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices especializados ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 6.8 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices especializados ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -123,7 +123,7 @@ El generador de código escribe el serializador de `Document` al compilar: no ha
 | --- | --- |
 | Tipos de columna | `bool`, enteros de 8 a 64 bits con y sin signo, `float`, `double`, `decimal`, `char`, `string`, `byte[]`, `Guid`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `DateOnly`, `TimeOnly`, enums, y la forma anulable de todos |
 | Clave | Una propiedad con `[TkKey]`: `Guid`, `int`, `long`, `uint`, `ulong` o `string` |
-| Operaciones | `InsertAsync`, `UpdateAsync`, `UpsertAsync`, `DeleteAsync`, `GetAsync`, `ScanAsync`, `QueryAsync`, `ExplainAsync` |
+| Operaciones | `InsertAsync`, `UpdateAsync`, `UpsertAsync`, `DeleteAsync`, `GetAsync`, `ScanAsync`, `QueryAsync`, `ExplainAsync`, `BulkInsertAsync` |
 | Otros atributos | `[TkColumn("nombre")]` guarda la propiedad con otro nombre; `[TkIgnore]` la deja fuera |
 | Tamaño de fila | Hasta 256 MiB. Una fila que no cabe en un cuarto de página se guarda en páginas de overflow, sin que quien la usa lo note |
 
@@ -242,6 +242,25 @@ await foreach (var change in db.WatchAsync<Order>(lastSeen, ct))
 | Lo que cuesta | Los commits conservados no liberan sus páginas: el archivo es más grande, en proporción a `ChangeRetention`. El escritor no espera al consumidor |
 | Si el consumidor se atrasa | Pasados `ChangeRetention` commits recibe `TkChangeFeedException` en vez de saltarse cambios: debe volver a leer la tabla y seguir desde ahí |
 
+### Carga masiva
+
+Para importar una tabla o restaurar un respaldo. Construye la tabla y sus índices de abajo hacia arriba, escribiendo cada página una sola vez, y no tiene todas las filas en memoria a la vez:
+
+```csharp
+await using var tx = await db.BeginWriteAsync();
+var loaded = await orders.BulkInsertAsync(tx, ReadOrdersFromCsv(path));   // IEnumerable<T> o IAsyncEnumerable<T>
+await tx.CommitAsync();
+```
+
+| Qué | Cómo |
+| --- | --- |
+| Orden de las filas | Cualquiera. Si llegan en orden de clave van directo al árbol, que es lo más rápido; si no, se ordenan antes, en espacio temporal del propio archivo |
+| Memoria | Acotada, no crece con el número de filas: las páginas terminadas se escriben al archivo durante la carga y pasan a ser parte de la base al confirmar |
+| Índices y restricciones | Los índices se construyen ordenando sus entradas. `CHECK`, `UNIQUE` y `FOREIGN KEY` se comprueban para cada fila |
+| Tabla con filas | Se reescribe entera, mezclada con las nuevas: pensado para cargar, no para agregar unas pocas filas a una tabla grande |
+| Si algo falla | Una clave repetida, una restricción violada o cualquier error deja la transacción sin poder confirmarse: entran todas las filas o ninguna |
+| Lo que no admite | Una tabla con `FOREIGN KEY` a sí misma |
+
 Lo que sigue es diseño objetivo y todavía no existe:
 
 ```csharp
@@ -298,7 +317,7 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 6 | Índices secundarios, codificación ordenada de claves, índices sobre expresiones y parciales | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.md); Windows sin verificar |
 | 6.5 | Restricciones declarativas: `CHECK`, `UNIQUE`, `FOREIGN KEY` | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.5.md); Windows sin verificar |
 | 6.7 | Change feed post-commit | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.7.md); Windows sin verificar |
-| 6.8 | Carga masiva | Pendiente |
+| 6.8 | Carga masiva: el B+Tree construido de abajo hacia arriba | Hecho en macOS y Linux, [medido](docs/benchmarks/fase-6.8.md): 3× más rápida que insertar fila por fila en una sola transacción, con la novena parte de la memoria; no es el orden de magnitud del criterio, que sólo se alcanza contra insertar con un commit cada mil filas (58×) |
 | 7 – 9 | Índices temporal, UUID v7 y vectorial HNSW | Pendiente |
 | 10 – 10.6 | Herramientas, backup en caliente, verificación y viaje en el tiempo | Pendiente |
 | 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |

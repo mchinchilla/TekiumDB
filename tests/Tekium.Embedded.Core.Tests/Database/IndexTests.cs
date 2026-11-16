@@ -634,22 +634,6 @@ public abstract class IndexTests : DatabaseTests
 
         Assert.Equal(rows.Count(static ticket => ticket.IsOpen), await CountIndexEntriesAsync(database, "tickets", "open"));
     }
-
-    /// <summary>Cuántas entradas tiene un índice en el último commit, o -1 si el catálogo no lo conoce.</summary>
-    private static async Task<int> CountIndexEntriesAsync(TekiumDb database, string table, string index)
-    {
-        var pager = database.Pager;
-        using var read = pager.BeginRead();
-        var key = CatalogStore.IndexKey(CatalogStore.TableKey(table), index);
-        await foreach (var entry in BTree.RangeAsync(pager, read.Root, key, default, Ct))
-        {
-            return entry.Key.Span.SequenceEqual(key)
-                ? await BTreeVerifier.CountAsync(pager, CatalogStore.IndexRoot(entry.Value.Span), Ct)
-                : -1;
-        }
-
-        return -1;
-    }
 }
 
 public sealed class IndexTests_File : IndexTests

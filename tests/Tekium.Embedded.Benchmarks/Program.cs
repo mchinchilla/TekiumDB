@@ -7,6 +7,7 @@ using Tekium.Embedded.Benchmarks;
 //      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- space
 //      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- ratio
 //      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- feed
+//      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- bulk one|bulk|shuffled|indexed-one|indexed-bulk|sqlite [filas]
 if (args is ["space"])
 {
     await SpaceAmplification.RunAsync();
@@ -23,6 +24,12 @@ if (args is ["feed"])
 {
     await ChangeFeedBenchmarks.ReportConsumerAsync();
     await ChangeFeedBenchmarks.ReportSpaceAsync();
+    return;
+}
+
+if (args is ["bulk", var mode, ..])
+{
+    await BulkLoadReport.RunAsync(mode, args.Length > 2 ? int.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : 10_000_000);
     return;
 }
 

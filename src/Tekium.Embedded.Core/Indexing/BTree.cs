@@ -837,7 +837,7 @@ internal sealed class BTree
     /// <summary>
     /// Puts a value in pages of its own, each starting with the number of the next one, and returns the first.
     /// </summary>
-    private static PageNumber WriteChain(WriteTransaction transaction, ReadOnlySpan<byte> value)
+    internal static PageNumber WriteChain(WriteTransaction transaction, ReadOnlySpan<byte> value)
     {
         var first = PageNumber.None;
         Span<byte> previous = default;

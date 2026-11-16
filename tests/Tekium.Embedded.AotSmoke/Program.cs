@@ -170,6 +170,29 @@ static async Task<int> TypedRoundTripAsync()
                 return 1;
             }
 
+            // Carga masiva: filas desordenadas, a una tabla con índices y restricciones que ya tiene filas.
+            await using (var writer = await database.BeginWriteAsync())
+            {
+                var loaded = await events.BulkInsertAsync(
+                    writer,
+                    Enumerable.Range(0, 3000).Select(i => new EventV2 { Id = Guid.CreateVersion7(at.AddMinutes(3000 - i)), Title = $"loaded {i}", At = at.AddDays(1 + i), Place = "here" }));
+                await writer.CommitAsync();
+                var counted = 0;
+                await foreach (var row in events.QueryAsync(EventV2.Fields.At.GreaterThan(at.AddHours(1))))
+                {
+                    counted += row.Title.StartsWith("loaded", StringComparison.Ordinal) ? 1 : 0;
+                }
+
+                if (loaded != 3000
+                    || counted != 3000
+                    || await events.ExplainAsync(EventV2.Fields.Title.EqualTo("loaded 7")) is not { Access: TkAccess.UniqueLookup }
+                    || (await events.GetAsync(first))?.Title != "written as version 1")
+                {
+                    await Console.Error.WriteLineAsync($"Bulk load failed: {loaded} loaded, {counted} found by index.");
+                    return 1;
+                }
+            }
+
             var recent = await events.GetAsync(second);
             if (old is { Title: "written as version 1", Place: null, Cost: null, Mood: Mood.Calm, Weight: 0 }
                 && old.At == at

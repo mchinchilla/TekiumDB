@@ -73,6 +73,8 @@ public sealed class Table<T> : TekiumDb.ITable
         }
     }
 
+    // What a bulk load keeps with each index entry while sorting: where its primary key starts, and whether it has a field with no value.
+    private const int BulkEntryMark = sizeof(ushort) + 1;
     private const int NoValue = -1;
     private const int NoSuchKey = -2;
 
@@ -229,6 +231,46 @@ public sealed class Table<T> : TekiumDb.ITable
     {
         ArgumentNullException.ThrowIfNull(transaction);
         await WriteAsync(transaction, row, WriteMode.Upsert, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Adds many rows at once, much faster than one by one: the table and its indexes are built from the
+    /// bottom up, each page written once. Fastest when the rows arrive in key order; if they do not,
+    /// they are sorted first.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Meant for loading a table: an initial import, or restoring a backup. A table that already has rows
+    /// is rewritten whole, merged with the new ones. Memory use does not grow with the number of rows:
+    /// finished pages go to the file as the load advances, and are part of the database only at commit.
+    /// </para>
+    /// <para>
+    /// The rows are added or none is: a duplicate key, a violated constraint or any other failure leaves
+    /// the transaction such that it can only be rolled back.
+    /// </para>
+    /// </remarks>
+    /// <param name="transaction">The write transaction.</param>
+    /// <param name="rows">The rows. Read once, as the load advances.</param>
+    /// <param name="cancellationToken">Cancels the load.</param>
+    /// <returns>The number of rows added.</returns>
+    /// <exception cref="TkDuplicateKeyException">Two rows have the same key, or the table already has a row with the key of one of them.</exception>
+    /// <exception cref="TkConstraintException">A row violates a constraint.</exception>
+    /// <exception cref="NotSupportedException">The table has a FOREIGN KEY to itself.</exception>
+    public ValueTask<long> BulkInsertAsync(
+        TkWriteTransaction transaction, IAsyncEnumerable<T> rows, CancellationToken cancellationToken = default)
+    {
+        Check(transaction);
+        ArgumentNullException.ThrowIfNull(rows);
+        return BulkInsertCoreAsync(transaction, rows, null, cancellationToken);
+    }
+
+    /// <inheritdoc cref="BulkInsertAsync(TkWriteTransaction, IAsyncEnumerable{T}, CancellationToken)"/>
+    public ValueTask<long> BulkInsertAsync(
+        TkWriteTransaction transaction, IEnumerable<T> rows, CancellationToken cancellationToken = default)
+    {
+        Check(transaction);
+        ArgumentNullException.ThrowIfNull(rows);
+        return BulkInsertCoreAsync(transaction, null, rows, cancellationToken);
     }
 
     /// <summary>Removes the row with this key.</summary>
@@ -839,6 +881,210 @@ public sealed class Table<T> : TekiumDb.ITable
         }
 
         await transaction.SetConstraintsAsync(state, _constraints.Encoded, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<long> BulkInsertCoreAsync(
+        TkWriteTransaction transaction, IAsyncEnumerable<T>? asyncRows, IEnumerable<T>? rows, CancellationToken cancellationToken)
+    {
+        var state = await transaction.TableForWriteAsync(this, cancellationToken).ConfigureAwait(false);
+        if (_constraints.ForeignKeys.Any(key => string.Equals(key.Table, Name, StringComparison.Ordinal)))
+        {
+            throw new NotSupportedException(
+                $"Table '{Name}' has a FOREIGN KEY to itself: a row may refer to one that comes later in the load, so its rows cannot be loaded in bulk.");
+        }
+
+        var inner = transaction.Inner;
+        var checksRows = _constraints.Checks.Length > 0 || _constraints.ForeignKeys.Length > 0;
+        try
+        {
+            // From here on pages of the transaction go to the file while others are being read: whatever
+            // it has changed so far goes first, so that no page still in memory is ever being read.
+            await inner.SpillAsync(cancellationToken).ConfigureAwait(false);
+            var load = new BulkLoad(this, inner, state);
+
+            // Each row is taken in without waiting for anything; only now and then is there something to
+            // write, and only then does the load wait.
+            if (rows is not null)
+            {
+                foreach (var row in rows)
+                {
+                    if (checksRows)
+                    {
+                        await CheckBulkRowAsync(transaction, state, row, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    if (load.Add(row))
+                    {
+                        await load.WriteAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+            else
+            {
+                await foreach (var row in asyncRows!.WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    if (checksRows)
+                    {
+                        await CheckBulkRowAsync(transaction, state, row, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    if (load.Add(row))
+                    {
+                        await load.WriteAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+
+            if (load.Count == 0)
+            {
+                return 0;
+            }
+
+            if (load.Builder is not null)
+            {
+                state.Root = load.Builder.Complete();
+            }
+            else
+            {
+                state.Root = await MergeRowsAsync(inner, load.Existing, load.Sorter!, cancellationToken).ConfigureAwait(false);
+                await BTree.DropAsync(inner, load.Existing, cancellationToken).ConfigureAwait(false);
+            }
+
+            state.Changed = true;
+            for (var i = 0; i < _indexes.Length; i++)
+            {
+                var index = state.Bound[i];
+                var old = index.Root;
+                index.Root = await MergeEntriesAsync(transaction, _indexes[i], old, load.Entries[i], cancellationToken).ConfigureAwait(false);
+                index.Dirty = true;
+                await BTree.DropAsync(inner, old, cancellationToken).ConfigureAwait(false);
+            }
+
+            return load.Count;
+        }
+        catch
+        {
+            // Trees half built and pages already in the file: nothing of this transaction can be kept.
+            transaction.Fail();
+            throw;
+        }
+    }
+
+    /// <summary>The constraints that depend on nothing but the row and the tables it refers to, for a row of a bulk load.</summary>
+    private async ValueTask CheckBulkRowAsync(
+        TkWriteTransaction transaction, TkWriteTransaction.TableState state, T row, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        var maxKey = _database.Tree.MaxKeySize;
+        var key = ArrayPool<byte>.Shared.Rent(maxKey);
+        try
+        {
+            var length = T.WriteKey(row, key.AsSpan(0, maxKey));
+            await EnforceAsync(transaction, state, row, key.AsMemory(0, length), null, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(key);
+        }
+    }
+
+    private TkDuplicateKeyException Duplicate(ReadOnlySpan<byte> key) =>
+        new($"Table '{Name}': more than one row has the key {TkKey.Format(key, _keyType)}.");
+
+    /// <summary>Builds the table anew from the rows it has and the sorted new ones, which must not repeat a key.</summary>
+    private async ValueTask<PageNumber> MergeRowsAsync(
+        WriteTransaction inner, PageNumber existing, RunSorter sorter, CancellationToken cancellationToken)
+    {
+        var builder = new BTreeBuilder(_database.Tree, inner, _database.BulkSpillPages);
+        var old = BTree.RangeAsync(inner, existing, default, default, cancellationToken).GetAsyncEnumerator(cancellationToken);
+        await using (old.ConfigureAwait(false))
+        {
+            var hasOld = await old.MoveNextAsync().ConfigureAwait(false);
+            var hasNew = await sorter.NextAsync(cancellationToken).ConfigureAwait(false);
+            while (hasOld || hasNew)
+            {
+                var order = !hasOld ? 1 : !hasNew ? -1 : old.Current.Key.Span.SequenceCompareTo(sorter.Key);
+                if (order == 0 || (order > 0 && builder.Count > 0 && sorter.Key.SequenceEqual(builder.LastKey)))
+                {
+                    throw Duplicate(sorter.Key);
+                }
+
+                if (order < 0)
+                {
+                    builder.Add(old.Current.Key.Span, old.Current.Value.Span);
+                    hasOld = await old.MoveNextAsync().ConfigureAwait(false);
+                }
+                else
+                {
+                    builder.Add(sorter.Key, sorter.Value);
+                    hasNew = await sorter.NextAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                if (builder.ShouldSpill)
+                {
+                    await builder.SpillAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+
+        return builder.Complete();
+    }
+
+    /// <summary>
+    /// Builds an index anew from the entries it has and the sorted new ones. In a unique index two
+    /// entries next to each other with the same values are a violation, unless they have a field with no value.
+    /// </summary>
+    private async ValueTask<PageNumber> MergeEntriesAsync(
+        TkWriteTransaction transaction, IndexDefinition index, PageNumber existing, RunSorter sorter, CancellationToken cancellationToken)
+    {
+        var inner = transaction.Inner;
+        var builder = new BTreeBuilder(_database.Tree, inner, _database.BulkSpillPages);
+        var previousPrefix = -1;
+        var previousExempt = false;
+        var value = new byte[sizeof(ushort)];
+        var old = BTree.RangeAsync(inner, existing, default, default, cancellationToken).GetAsyncEnumerator(cancellationToken);
+        await using (old.ConfigureAwait(false))
+        {
+            var hasOld = await old.MoveNextAsync().ConfigureAwait(false);
+            var hasNew = await sorter.NextAsync(cancellationToken).ConfigureAwait(false);
+            while (hasOld || hasNew)
+            {
+                var isNew = !hasOld || (hasNew && old.Current.Key.Span.SequenceCompareTo(sorter.Key) > 0);
+                var key = isNew ? sorter.Key : old.Current.Key.Span;
+                var mark = isNew ? sorter.Value : old.Current.Value.Span;
+                var prefix = BinaryPrimitives.ReadUInt16LittleEndian(mark);
+
+                // An entry already in the index says nothing of its fields. If it collides with a new one,
+                // that one says it for both: they have the same values.
+                var exempt = isNew ? mark[sizeof(ushort)] != 0 : (bool?)null;
+                if (index.IsUnique
+                    && prefix == previousPrefix
+                    && builder.LastKey[..previousPrefix].SequenceEqual(key[..prefix])
+                    && !(exempt ?? previousExempt))
+                {
+                    throw Violation(transaction, "UNIQUE", index.Name, key[prefix..], "another row already has the same values");
+                }
+
+                (previousPrefix, previousExempt) = (prefix, exempt ?? previousExempt);
+                mark[..sizeof(ushort)].CopyTo(value);
+                builder.Add(key, value);
+                if (isNew)
+                {
+                    hasNew = await sorter.NextAsync(cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    hasOld = await old.MoveNextAsync().ConfigureAwait(false);
+                }
+
+                if (builder.ShouldSpill)
+                {
+                    await builder.SpillAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+
+        return builder.Complete();
     }
 
     /// <summary>
@@ -1465,6 +1711,159 @@ public sealed class Table<T> : TekiumDb.ITable
         public ulong SnapshotId { get; } = snapshotId;
 
         public PageNumber Root { get; } = root;
+    }
+
+    /// <summary>
+    /// A bulk load in progress: where each row goes as it arrives. While the rows come in key order into
+    /// an empty table they go straight into the tree; otherwise they are sorted. The entries of every
+    /// index are always sorted, since they do not come in their order.
+    /// </summary>
+    private sealed class BulkLoad
+    {
+        private readonly Table<T> _table;
+        private readonly WriteTransaction _inner;
+        private readonly TkWriteTransaction.TableState _state;
+        private readonly int _maxKey;
+        private readonly int _budget;
+        private readonly byte[] _key;
+        private readonly byte[] _entry;
+        private readonly byte[] _mark = new byte[BulkEntryMark];
+        private byte[] _row;
+        private bool _spill;
+
+        public BulkLoad(Table<T> table, WriteTransaction inner, TkWriteTransaction.TableState state)
+        {
+            var database = table._database;
+            _table = table;
+            _inner = inner;
+            _state = state;
+            _maxKey = database.Tree.MaxKeySize;
+            _budget = Math.Max(1, database.BulkSortBudget / (table._indexes.Length + 1));
+            _key = new byte[_maxKey];
+            _entry = new byte[_maxKey + 1 + table._whereScratch];
+            _row = new byte[database.Tree.MaxEntrySize];
+            Existing = state.Root;
+            Builder = Existing.IsNone ? new BTreeBuilder(database.Tree, inner, database.BulkSpillPages) : null;
+            Entries = new RunSorter[table._indexes.Length];
+            for (var i = 0; i < Entries.Length; i++)
+            {
+                Entries[i] = new RunSorter(inner, _budget);
+            }
+        }
+
+        public long Count { get; private set; }
+
+        /// <summary>Gets the tree the rows are going straight into, while they can.</summary>
+        public BTreeBuilder? Builder { get; private set; }
+
+        /// <summary>Gets the rows set aside to be sorted, once any had to be.</summary>
+        public RunSorter? Sorter { get; private set; }
+
+        /// <summary>Gets the tree the sorted rows are merged with: the table as it was, or what was built before the rows lost their order.</summary>
+        public PageNumber Existing { get; private set; }
+
+        public RunSorter[] Entries { get; }
+
+        /// <summary>Takes a row in. Returns whether something is due to be written: see <see cref="WriteAsync"/>.</summary>
+        public bool Add(T row)
+        {
+            ArgumentNullException.ThrowIfNull(row);
+            var table = _table;
+            var key = _key.AsSpan(0, T.WriteKey(row, _key.AsSpan(0, _maxKey)));
+            var encoded = Encode(row);
+            var due = false;
+            var indexes = table._indexes;
+            for (var i = 0; i < indexes.Length; i++)
+            {
+                var length = table.IndexKey(
+                    indexes[i], row, key, _entry.AsSpan(0, _maxKey), _entry.AsSpan(_maxKey), out var prefix, out var hasNull);
+                if (length >= 0)
+                {
+                    // With the entry goes where its primary key starts, and whether one of its fields has no value.
+                    BinaryPrimitives.WriteUInt16LittleEndian(_mark, (ushort)prefix);
+                    _mark[sizeof(ushort)] = hasNull ? (byte)1 : (byte)0;
+                    Entries[i].Add(_entry.AsSpan(0, length), _mark);
+                    due |= Entries[i].IsFull;
+                }
+            }
+
+            var builder = Builder;
+            if (builder is not null && builder.Count > 0 && key.SequenceCompareTo(builder.LastKey) <= 0)
+            {
+                if (key.SequenceEqual(builder.LastKey))
+                {
+                    throw table.Duplicate(key);
+                }
+
+                // Out of order. What is built so far stands as the table, and the rest is sorted and merged
+                // into it; its pages go to the file before anything reads them back.
+                Existing = builder.Complete();
+                Builder = builder = null;
+                _spill = true;
+                due = true;
+            }
+
+            if (builder is not null)
+            {
+                builder.Add(key, encoded);
+                due |= builder.ShouldSpill;
+            }
+            else
+            {
+                Sorter ??= new RunSorter(_inner, _budget);
+                Sorter.Add(key, encoded);
+                due |= Sorter.IsFull;
+            }
+
+            Count++;
+            return due;
+        }
+
+        /// <summary>Writes what is due: the finished pages of the tree, and the runs of the sorters that are full.</summary>
+        public async ValueTask WriteAsync(CancellationToken cancellationToken)
+        {
+            if (_spill || Builder is { ShouldSpill: true })
+            {
+                _spill = false;
+                await _inner.SpillAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (Sorter is { IsFull: true })
+            {
+                await Sorter.WriteRunAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            foreach (var entries in Entries)
+            {
+                if (entries.IsFull)
+                {
+                    await entries.WriteRunAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+
+        /// <summary>Writes the row into a buffer kept for the whole load, which grows when a row needs it to.</summary>
+        private ReadOnlySpan<byte> Encode(T row)
+        {
+            while (true)
+            {
+                try
+                {
+                    var writer = new TkRowWriter(_row, _state.Schema!.Version, T.Columns.Length);
+                    T.Write(ref writer, row);
+                    return _row.AsSpan(0, writer.Length);
+                }
+                catch (TkRowTooLargeException) when (_row.Length < BTree.MaxValueSize)
+                {
+                    _row = new byte[(int)Math.Min((long)_row.Length * 4, BTree.MaxValueSize)];
+                }
+                catch (TkRowTooLargeException)
+                {
+                    throw new TkRowTooLargeException(
+                        $"Table '{_table.Name}': the row is larger than {BTree.MaxValueSize} bytes, the most a row may take.");
+                }
+            }
+        }
     }
 
     /// <summary>The index entries one write removes and adds, in one rented buffer: for each index, the old key, the new key and the value of the new entry.</summary>

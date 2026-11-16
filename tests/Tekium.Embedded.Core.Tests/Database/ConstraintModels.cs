@@ -82,3 +82,22 @@ public sealed partial record AuthorLoose
 
     public string Name { get; set; } = string.Empty;
 }
+
+/// <summary>Una restricción de cada clase sin referencia a su propia tabla: lo que una carga masiva admite.</summary>
+[TkTable("shipments")]
+public sealed partial record Shipment
+{
+    [TkKey]
+    public long Id { get; set; }
+
+    [TkForeignKey(typeof(Author))]
+    public string Carrier { get; set; } = string.Empty;
+
+    [TkIndex(Unique = true)]
+    public string? Tracking { get; set; }
+
+    public int Weight { get; set; } = 1;
+
+    [TkCheck]
+    public bool WeightIsPositive => Weight > 0;
+}

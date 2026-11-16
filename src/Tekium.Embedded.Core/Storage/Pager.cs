@@ -42,6 +42,9 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     private long _retentionFloor = long.MaxValue;
     private long _pinCount;
     private long _lastPin;
+
+    // How far into the file the transaction in progress has written ahead of its commit. Zero if it has not.
+    private uint _spilledPageCount;
     private SnapshotState _current;
     private int _currentSlot;
     private ulong _lastIssued;
@@ -93,6 +96,13 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     public int FreeListPageCount => FreeList.MetadataPageCount;
 
     internal FreeList FreeList { get; private set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether a spilled page is overwritten in memory as it is let go.
+    /// Whoever was still holding it then reads rubbish at once, instead of only when the buffer happens
+    /// to be reused: the tests turn it on.
+    /// </summary>
+    internal bool ScrubSpilledPages { get; set; }
 
     /// <summary>Creates an unencrypted database.</summary>
     public static ValueTask<Pager> CreateAsync(
@@ -279,7 +289,30 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
 
         _dirty.Clear();
         _freed.Clear();
+        Volatile.Write(ref _spilledPageCount, 0);
         _writerGate.Release();
+    }
+
+    /// <summary>Writes the pages of a transaction in progress to the file and drops them from memory.</summary>
+    internal async ValueTask SpillAsync(WriteTransaction transaction, CancellationToken cancellationToken)
+    {
+        var dirty = transaction.Dirty;
+        await WritePagesAsync(dirty, transaction.PageCount, cancellationToken).ConfigureAwait(false);
+        transaction.Spilled = true;
+        Volatile.Write(ref _spilledPageCount, transaction.PageCount);
+        foreach (var (number, page) in dirty)
+        {
+            // Whatever the cache had under a reused number is another page.
+            _cache.Invalidate(new PageNumber(number));
+            if (ScrubSpilledPages)
+            {
+                page.AsSpan().Fill(0xDD);
+            }
+
+            ReturnBuffer(page);
+        }
+
+        dirty.Clear();
     }
 
     /// <summary>
@@ -312,6 +345,11 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         if (dirty.Count > 0)
         {
             await WritePagesAsync(dirty, next.PageCount, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Also what the transaction wrote ahead of time: everything the new root reaches is durable before the root is.
+        if (dirty.Count > 0 || transaction.Spilled)
+        {
             await _device.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
 
@@ -656,7 +694,8 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
 
     private async ValueTask<PageLease> LoadAsync(PageNumber number, CancellationToken cancellationToken)
     {
-        if (number.Value < FileHeader.MetaPages || number.Value >= Current.PageCount)
+        // The writer may be reading back pages it wrote ahead of its commit, past the committed end of the file.
+        if (number.Value < FileHeader.MetaPages || number.Value >= Math.Max(Current.PageCount, Volatile.Read(ref _spilledPageCount)))
         {
             throw new InvalidDataException($"Page {number.Value} is referenced but is not part of the database.");
         }

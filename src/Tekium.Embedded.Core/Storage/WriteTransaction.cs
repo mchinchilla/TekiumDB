@@ -44,6 +44,9 @@ internal sealed class WriteTransaction : IPageSource, IAsyncDisposable
     /// <summary>Gets the committed pages this transaction no longer reaches.</summary>
     internal List<uint> Freed { get; }
 
+    /// <summary>Gets or sets a value indicating whether pages of the transaction are already in the file, yet to be made durable.</summary>
+    internal bool Spilled { get; set; }
+
     /// <summary>Gets the high-water mark of the file after this transaction.</summary>
     internal uint PageCount { get; private set; }
 
@@ -113,6 +116,22 @@ internal sealed class WriteTransaction : IPageSource, IAsyncDisposable
         Dirty.TryGetValue(number.Value, out var page)
             ? new ValueTask<PageLease>(new PageLease(page))
             : _pager.PinAsync(number, cancellationToken);
+
+    /// <summary>
+    /// Writes to the file every page the transaction has created so far, and lets go of them: from now on
+    /// they are read back from the file, and changing one copies it like a committed page. A transaction
+    /// that builds more than fits in memory does this as it goes.
+    /// </summary>
+    /// <remarks>
+    /// Nothing reaches those pages until the commit, so writing them early changes no state anybody can
+    /// see, and a rollback or a crash leaves them as unused space. Nobody may be holding a page of the
+    /// transaction while this runs: not a scan of it, nor a payload yet to be filled.
+    /// </remarks>
+    public ValueTask SpillAsync(CancellationToken cancellationToken)
+    {
+        ThrowIfFinished();
+        return Dirty.Count == 0 ? default : _pager.SpillAsync(this, cancellationToken);
+    }
 
     public async ValueTask CommitAsync(CancellationToken cancellationToken)
     {
