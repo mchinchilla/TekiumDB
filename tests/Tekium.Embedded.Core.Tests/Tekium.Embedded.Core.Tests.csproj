@@ -9,11 +9,15 @@
 
   <ItemGroup>
     <PackageReference Include="CsCheck" />
+    <!-- Para ejecutar el generador de código dentro de una prueba y examinar lo que produce. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
     <PackageReference Include="xunit.v3" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Tekium.Embedded.Core\Tekium.Embedded.Core.csproj" />
+    <!-- El generador de código corre en el compilador: se referencia como analizador, no como ensamblado. -->
+    <ProjectReference Include="..\..\src\Tekium.Embedded.Generators\Tekium.Embedded.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="true" />
     <!-- Las pruebas de crash lanzan este ejecutable y comparten con él la carga de trabajo. -->
     <ProjectReference Include="..\Tekium.Embedded.CrashChild\Tekium.Embedded.CrashChild.csproj" />
   </ItemGroup>

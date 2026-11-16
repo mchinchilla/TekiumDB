@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 4 de la hoja de ruta).** Hoy existen el pager (caché acotada, free-list, commit atómico), el cifrado AES-256-GCM por página con Argon2id, el B+Tree copy-on-write con inserción, borrado, split y merge, y las transacciones con aislamiento por snapshot, probadas matando el proceso en cada punto del commit. No hay API pública, índices secundarios ni paquete publicado. La API y las características descritas aquí son el diseño objetivo, no funcionalidad disponible. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 5 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices secundarios, consultas por rango, valores grandes ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -43,7 +43,7 @@ Antes de invertir en el resto, la Fase 0.5 midió un motor mínimo contra `Micro
 
 ## Características
 
-Todas forman parte del diseño. Hoy existen el pager, el cifrado y el B+Tree copy-on-write con commit atómico; faltan en el árbol los valores grandes (páginas de overflow) y la compresión de prefijos.
+Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy-on-write con commit atómico, el catálogo y las tablas tipadas; faltan en el árbol los valores grandes (páginas de overflow) y la compresión de prefijos.
 
 **Almacenamiento**
 
@@ -51,7 +51,7 @@ Todas forman parte del diseño. Hoy existen el pager, el cifrado y el B+Tree cop
 - B+Tree copy-on-write con MVCC: un escritor, lectores ilimitados sin bloqueo, cada uno sobre su snapshot inmutable.
 - Commit atómico por slots de raíz alternados. Si el proceso muere a mitad de un commit, la base abre en el estado anterior, sin recuperación.
 - Compresión Zstandard por página, opcional.
-- Modo en memoria para pruebas (el dispositivo ya existe; falta exponerlo en la API pública).
+- Modo en memoria para pruebas: `new DbOptions { InMemory = true }`.
 
 **Seguridad**
 
@@ -74,25 +74,62 @@ Todas forman parte del diseño. Hoy existen el pager, el cifrado y el B+Tree cop
 
 ## Vistazo a la API
 
-Diseño objetivo del núcleo tipado. Todavía no compila contra este repositorio.
+Esto compila y funciona hoy:
 
 ```csharp
+using Tekium.Embedded;
+
+[TkTable("documents")]
+public sealed partial class Document
+{
+    [TkKey]
+    public Guid Id { get; set; }
+
+    public string Title { get; set; } = "";
+
+    public string? Summary { get; set; }      // anulable: puede no tener valor
+
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
 await using var db = await TekiumDb.OpenAsync(new DbOptions
 {
-    Path = "app.tkdb",
-    Password = password,
-    PageSize = 8192,
-    CacheSizeMb = 256
+    Path = "app.tkdb",                        // o InMemory = true, para pruebas
+    Password = password.AsMemory(),           // opcional: sin contraseña no se cifra
 });
 
 var docs = db.Table<Document>();
 
 await using (var tx = await db.BeginWriteAsync())
 {
-    await docs.InsertAsync(tx, doc);
-    await tx.CommitAsync();
+    await docs.InsertAsync(tx, new Document { Id = Guid.CreateVersion7(), Title = "Hola", CreatedAt = DateTimeOffset.UtcNow });
+    await tx.CommitAsync();                   // sin commit, salir del scope hace rollback
 }
 
+var one = await docs.GetAsync(id);            // null si no existe
+
+await foreach (var doc in docs.ScanAsync())   // en orden de clave
+    Process(doc);
+
+await using (var read = db.BeginRead())       // una vista que no cambia aunque otros escriban
+{
+    var before = await docs.GetAsync(read, id);
+}
+```
+
+El generador de código escribe el serializador de `Document` al compilar: no hay reflexión en tiempo de ejecución, y por eso funciona con Native AOT. Si la clase cambia (columnas nuevas, quitadas o reordenadas) las filas ya escritas no se tocan: cada una recuerda con qué versión del esquema se escribió.
+
+| Qué | Cómo |
+| --- | --- |
+| Tipos de columna | `bool`, enteros de 8 a 64 bits con y sin signo, `float`, `double`, `decimal`, `char`, `string`, `byte[]`, `Guid`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `DateOnly`, `TimeOnly`, enums, y la forma anulable de todos |
+| Clave | Una propiedad con `[TkKey]`: `Guid`, `int`, `long`, `uint`, `ulong` o `string` |
+| Operaciones | `InsertAsync`, `UpdateAsync`, `UpsertAsync`, `DeleteAsync`, `GetAsync`, `ScanAsync` |
+| Otros atributos | `[TkColumn("nombre")]` guarda la propiedad con otro nombre; `[TkIgnore]` la deja fuera |
+| Límite actual | Una fila tiene que caber en un cuarto de página (unos 2 KiB con páginas de 8 KiB) hasta que existan las páginas de overflow |
+
+Lo que sigue es diseño objetivo y todavía no existe:
+
+```csharp
 await foreach (var d in docs.RangeAsync(x => x.CreatedAt, from, to))
     Process(d);
 
@@ -133,18 +170,19 @@ El diseño completo —formato de archivo, flujo de commit, construcción del no
 
 ## Estado y hoja de ruta
 
-Las fases son estrictamente secuenciales: cada una termina con su criterio de salida cumplido y CI en verde antes de empezar la siguiente.
+Las fases son estrictamente secuenciales: cada una termina con su criterio de salida cumplido y CI en verde antes de empezar la siguiente. Mientras no haya CI disponible, la verificación es local: macOS directamente y Linux con `scripts/test-linux.sh`.
 
 | Fase | Entrega | Estado |
 | --- | --- | --- |
-| 0 | Esqueleto de la solución, CI, BenchmarkDotNet, analizadores | Hecho en macOS; pendiente confirmar CI en Linux y Windows |
+| 0 | Esqueleto de la solución, CI, BenchmarkDotNet, analizadores | Hecho en macOS y Linux; Windows sin verificar |
 | 0.5 | Spike de validación: pager y B+Tree mínimos medidos contra SQLite | Hecho: [dentro del criterio](docs/benchmarks/fase-0.5.md), se sigue |
-| 1 | Capa de E/S y pager: caché de páginas, checksums, free-list | Hecho en macOS: [criterio cumplido](docs/benchmarks/fase-1.md); pendiente confirmar CI en Linux y Windows |
-| 1.5 | Modo en memoria | Hecho en macOS: las pruebas del pager corren sobre archivo y sobre memoria; pendiente confirmar CI en Linux y Windows |
-| 2 | Cifrado por página y derivación de clave | Hecho en macOS: [criterio cumplido](docs/benchmarks/fase-2.md); pendiente confirmar CI en Linux y Windows |
-| 3 | B+Tree copy-on-write: insert, lookup, delete, split, merge | Hecho en macOS: un millón de operaciones aleatorias contra un modelo; pendiente confirmar CI en Linux y Windows |
-| 4 | MVCC, transacciones y commit atómico | Hecho en macOS: [criterio cumplido](docs/benchmarks/fase-4.md); pendiente confirmar CI en Linux y Windows |
-| 5 – 5.5 | Catálogo, filas tipadas, generador de código y compresión | Pendiente |
+| 1 | Capa de E/S y pager: caché de páginas, checksums, free-list | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-1.md); Windows sin verificar |
+| 1.5 | Modo en memoria | Hecho en macOS y Linux: las pruebas del pager corren sobre archivo y sobre memoria; Windows sin verificar |
+| 2 | Cifrado por página y derivación de clave | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-2.md); Windows sin verificar |
+| 3 | B+Tree copy-on-write: insert, lookup, delete, split, merge | Hecho en macOS y Linux: un millón de operaciones aleatorias contra un modelo; Windows sin verificar |
+| 4 | MVCC, transacciones y commit atómico | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-4.md); Windows sin verificar |
+| 5 | Catálogo, filas tipadas y generador de código | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-5.md); Windows sin verificar |
+| 5.5 | Compresión Zstandard por página | Pendiente |
 | 6 – 6.8 | Índices secundarios, restricciones, change feed y carga masiva | Pendiente |
 | 7 – 9 | Índices temporal, UUID v7 y vectorial HNSW | Pendiente |
 | 10 – 10.6 | Herramientas, backup en caliente, verificación y viaje en el tiempo | Pendiente |
@@ -174,6 +212,9 @@ dotnet publish tests/Tekium.Embedded.AotSmoke -c Release -o artifacts/aot
 
 # Benchmarks
 dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'
+
+# Todo lo anterior en Linux, dentro de un contenedor (requiere Docker)
+scripts/test-linux.sh
 ```
 
 Las pruebas usan xUnit v3 sobre Microsoft.Testing.Platform, por eso los filtros son `--filter-class` y `--filter-method` en lugar de `--filter`.
@@ -182,7 +223,8 @@ Las pruebas usan xUnit v3 sobre Microsoft.Testing.Platform, por eso los filtros 
 
 ```
 src/
-  Tekium.Embedded.Core/          Núcleo del motor
+  Tekium.Embedded.Core/          Núcleo del motor y API pública
+  Tekium.Embedded.Generators/    Generador de código fuente: el serializador de cada [TkTable]
 tests/
   Tekium.Embedded.Core.Tests/    Pruebas unitarias
   Tekium.Embedded.CrashChild/    Proceso que las pruebas de crash lanzan y matan a mitad de un commit
@@ -190,6 +232,7 @@ tests/
   Tekium.Embedded.AotSmoke/      Consumidor mínimo publicado con Native AOT
 docs/benchmarks/                 Resultados de benchmarks publicados por fase
 .github/workflows/ci.yml         Build, pruebas y AOT en Linux, Windows y macOS
+scripts/test-linux.sh            Lo mismo dentro de un contenedor Linux, para verificar sin CI
 BannedSymbols.txt                APIs prohibidas en todo el repositorio
 src/BannedSymbols.Engine.txt     APIs prohibidas dentro del motor
 CLAUDE.md                        Reglas de trabajo y de rendimiento

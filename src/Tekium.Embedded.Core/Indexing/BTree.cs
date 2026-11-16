@@ -29,6 +29,9 @@ internal sealed class BTree
     private readonly int[] _pathIndexes = new int[MaxDepth];
     private readonly byte[] _mergeScratch;
     private byte[] _separator;
+
+    // Root of the tree the operation in progress works on. It changes as the path is copied.
+    private PageNumber _root;
     private byte[] _nextSeparator;
 
     public BTree(Pager pager)
@@ -40,6 +43,12 @@ internal sealed class BTree
         _nextSeparator = new byte[_maxKeySize];
         _mergeScratch = new byte[PageLayout.PayloadSize(pager.PageSize)];
     }
+
+    /// <summary>Gets the longest key the tree accepts.</summary>
+    public int MaxKeySize => _maxKeySize;
+
+    /// <summary>Gets the most bytes a key and its value may take together.</summary>
+    public int MaxEntrySize => _maxEntrySize;
 
     /// <summary>Copies the value of <paramref name="key"/> in the tree rooted at <paramref name="root"/>.</summary>
     /// <remarks>The caller keeps the pages reachable: it holds a read snapshot or is the writer.</remarks>
@@ -130,13 +139,36 @@ internal sealed class BTree
         ReadOnlyMemory<byte> from, ReadOnlyMemory<byte> to, CancellationToken cancellationToken) =>
         RangeCoreAsync(_pager, PageNumber.None, _pager, from, to, cancellationToken);
 
-    /// <summary>Inserts the entry, or replaces the value if the key exists.</summary>
+    /// <summary>Inserts the entry into the main tree of the transaction, or replaces the value if the key exists.</summary>
     public async ValueTask PutAsync(
         WriteTransaction transaction,
         ReadOnlyMemory<byte> key,
         ReadOnlyMemory<byte> value,
         CancellationToken cancellationToken)
     {
+        try
+        {
+            await PutAsync(transaction, transaction.Root, key, value, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Also when it fails halfway: the pages copied so far hang from the new root.
+            transaction.Root = _root;
+        }
+    }
+
+    /// <summary>
+    /// Inserts the entry into the tree rooted at <paramref name="root"/>, or replaces the value if the key exists.
+    /// </summary>
+    /// <returns>The root of the tree afterwards, which the caller must keep: copy-on-write moves it.</returns>
+    public async ValueTask<PageNumber> PutAsync(
+        WriteTransaction transaction,
+        PageNumber root,
+        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> value,
+        CancellationToken cancellationToken)
+    {
+        _root = root;
         if (key.IsEmpty || key.Length > _maxKeySize)
         {
             throw new ArgumentException($"The key must be between 1 and {_maxKeySize} bytes.", nameof(key));
@@ -148,16 +180,16 @@ internal sealed class BTree
                 $"Key and value together must not exceed {_maxEntrySize} bytes.", nameof(value));
         }
 
-        if (transaction.Root.IsNone)
+        if (_root.IsNone)
         {
             var first = transaction.Allocate(PageType.BTreeLeaf, out var firstNumber);
             BTreeNode.Initialize(first.Span, leaf: true);
-            transaction.Root = firstNumber;
+            _root = firstNumber;
         }
 
         // Walk down making every page on the path writable. After this loop the insert needs no I/O.
         var depth = 0;
-        var number = transaction.Root;
+        var number = _root;
         var rightmostPath = true;
         while (true)
         {
@@ -180,7 +212,7 @@ internal sealed class BTree
 
                 if (depth == 0)
                 {
-                    transaction.Root = number;
+                    _root = number;
                 }
                 else
                 {
@@ -204,16 +236,41 @@ internal sealed class BTree
         }
 
         InsertIntoLeaf(transaction, depth, key.Span, value.Span, rightmostPath);
+        return _root;
     }
 
-    /// <summary>Removes the entry with this key.</summary>
+    /// <summary>Removes the entry with this key from the main tree of the transaction.</summary>
     /// <returns><see langword="true"/> if the key existed.</returns>
     public async ValueTask<bool> DeleteAsync(
         WriteTransaction transaction, ReadOnlyMemory<byte> key, CancellationToken cancellationToken)
     {
+        try
+        {
+            return (await DeleteAsync(transaction, transaction.Root, key, cancellationToken).ConfigureAwait(false))
+                .Removed;
+        }
+        finally
+        {
+            transaction.Root = _root;
+        }
+    }
+
+    /// <summary>Removes the entry with this key from the tree rooted at <paramref name="root"/>.</summary>
+    /// <returns>Whether the key existed, and the root of the tree afterwards.</returns>
+    public async ValueTask<(bool Removed, PageNumber Root)> DeleteAsync(
+        WriteTransaction transaction, PageNumber root, ReadOnlyMemory<byte> key, CancellationToken cancellationToken)
+    {
+        _root = root;
+        var removed = await DeleteCoreAsync(transaction, key, cancellationToken).ConfigureAwait(false);
+        return (removed, _root);
+    }
+
+    private async ValueTask<bool> DeleteCoreAsync(
+        WriteTransaction transaction, ReadOnlyMemory<byte> key, CancellationToken cancellationToken)
+    {
         // First find the key without touching anything: a delete that finds nothing must not copy the path.
         var depth = 0;
-        var number = transaction.Root;
+        var number = _root;
         while (true)
         {
             if (number.IsNone)
@@ -272,7 +329,7 @@ internal sealed class BTree
                 _pathNumbers[level] = current;
                 if (level == 0)
                 {
-                    transaction.Root = current;
+                    _root = current;
                 }
                 else
                 {
@@ -545,7 +602,7 @@ internal sealed class BTree
             return;
         }
 
-        transaction.Root = BTreeNode.IsLeaf(root) ? PageNumber.None : BTreeNode.Child(root, 0);
+        _root = BTreeNode.IsLeaf(root) ? PageNumber.None : BTreeNode.Child(root, 0);
         transaction.Free(_pathNumbers[0]);
     }
 
@@ -624,7 +681,7 @@ internal sealed class BTree
                 BTreeNode.Initialize(root, leaf: false);
                 BTreeNode.SetChild(root, 0, _pathNumbers[0]);
                 Insert(root, 0, separator, right);
-                transaction.Root = rootNumber;
+                _root = rootNumber;
                 return;
             }
 

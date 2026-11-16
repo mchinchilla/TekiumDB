@@ -9,7 +9,7 @@ Base de datos embebida de archivo único (`.tkdb`), cifrada, async-first, B+Tree
 - **TDD al 100%.** Primero la prueba, verla fallar, después el mínimo código que la pasa, después refactor. No entra código de producción sin una prueba que lo haya pedido. Para B+Tree/MVCC la prueba es de propiedades contra un modelo (`SortedDictionary`), no de ejemplos.
 - **Async/await siempre.** Toda E/S es asíncrona de punta a punta; no hay métodos síncronos salvo `Dispose`. Ver reglas duras abajo.
 - **DDD donde aplica.** Cada capa del núcleo es un contexto con su lenguaje (el del plan) y su contrato interno; ninguna conoce a la de arriba.
-  - Carpetas/namespaces de `Tekium.Embedded.Core`: `Storage` (E/S, pager), `Security` (cifrado, KDF), `Transactions` (MVCC), `Indexing`, `Catalog`, y la API pública en la raíz.
+  - Carpetas/namespaces de `Tekium.Embedded.Core`: `Storage` (E/S, pager), `Security` (cifrado, KDF), `Transactions` (MVCC), `Indexing`, `Catalog`, y la API pública en la raíz. El generador de código vive en `src/Tekium.Embedded.Generators` (netstandard2.0, lo carga el compilador) y viaja dentro del paquete del núcleo.
   - Conceptos del dominio como objetos de valor (`PageSize`, `PageNumber`, `TransactionId`…): `readonly struct`, inmutables, sin estado inválido representable (incluido `default`), validados en la frontera.
   - Los patrones tácticos no pueden costar asignaciones en el camino caliente: nada de clases-entidad por página ni por fila.
 - **Layout:** `/src` código de producto, `/tests` pruebas unitarias, benchmarks y el smoke de AOT. El núcleo no referencia a `.Sql`, `.Linq` ni `.Vectors`, y no lleva dependencias NuGet en runtime.
@@ -17,6 +17,9 @@ Base de datos embebida de archivo único (`.tkdb`), cifrada, async-first, B+Tree
 - **El B+Tree se prueba contra un modelo.** Todo cambio en `Indexing/` debe pasar `BTreePropertyTests` (secuencias aleatorias con CsCheck y un millón de operaciones contra un `SortedDictionary`), que además verifican la estructura con `BTreeVerifier` y que no se pierda ninguna página. Si CsCheck falla imprime la semilla: se reproduce con `CsCheck_Seed=<semilla>`.
 - **El commit se prueba matándolo.** Todo cambio en `Pager.CommitAsync`, en la free-list o en el orden de escrituras y flushes debe pasar `PowerLossTests` (corte de energía simulado antes de cada operación, con lo no vaciado perdido a pedazos) y `ProcessCrashTests` (un proceso hijo, `tests/Tekium.Embedded.CrashChild`, que se mata en cada punto). Las dos usan la misma carga (`CrashWorkload`) y la misma exigencia (`CrashRecovery`). Lo que toque lectores concurrentes debe pasar `ConcurrencyTests`.
 - **Un commit de resultado incierto detiene al escritor.** Si falla la escritura del slot de raíz o su flush, el pager no acepta más escrituras hasta reabrir: no se "arregla" para que siga. Pasado ese punto el commit tampoco observa la cancelación.
+- **No hay CI por ahora: se verifica en local.** Antes de dar una fase por cerrada: `dotnet test -c Release` y el smoke de AOT en macOS, y `scripts/test-linux.sh` (Docker) para Linux. Windows queda sin verificar y se dice.
+- **El formato de fila y el catálogo son formato de archivo.** Los valores de `TkColumnType` no se renumeran; la disposición de la fila (versión, mapa de nulos, valores) y las claves del catálogo no cambian sin subir la versión de formato. Un cambio en `TkRowWriter`/`TkRowReader` pasa `RoundTripTests`, `RowFormatTests` y `SchemaEvolutionTests`.
+- **El generador se prueba de dos formas.** `TableGeneratorTests` lo corre dentro de la prueba (diagnósticos, y que lo generado compile sin advertencias); las pruebas de `Database/` usan tipos generados de verdad. Un tipo de columna nuevo se agrega en `TkColumnType`, lector, escritor, `TableParser.Map` y `Everything` (el tipo de prueba que los tiene todos).
 - Código, identificadores y XML docs en inglés. Cada `.cs` lleva la cabecera de licencia (la exige `IDE0073`). Toda dependencia debe ser compatible con MIT.
 
 ## Comandos
@@ -30,6 +33,7 @@ dotnet test -c Release --filter-method "*for_several_minutes*" --explicit only  
 dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- space        # amplificación de espacio
 dotnet publish tests/Tekium.Embedded.AotSmoke -c Release -o artifacts/aot && ./artifacts/aot/Tekium.Embedded.AotSmoke
 dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'
+scripts/test-linux.sh                                                             # build, pruebas y AOT en Linux (Docker)
 ```
 
 Las pruebas corren con xUnit v3 sobre Microsoft.Testing.Platform (`global.json`), no VSTest: los filtros son `--filter-class`, `--filter-method`, etc.

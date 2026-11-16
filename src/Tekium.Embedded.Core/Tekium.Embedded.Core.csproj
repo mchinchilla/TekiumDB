@@ -19,4 +19,10 @@
     <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>
 
+  <!-- El paquete lleva dentro el generador de código: quien instala el núcleo no instala nada más. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Tekium.Embedded.Generators\Tekium.Embedded.Generators.csproj" ReferenceOutputAssembly="false" />
+    <None Include="..\Tekium.Embedded.Generators\bin\$(Configuration)\netstandard2.0\Tekium.Embedded.Generators.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+  </ItemGroup>
+
 </Project>

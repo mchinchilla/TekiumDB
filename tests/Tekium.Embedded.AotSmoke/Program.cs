@@ -2,6 +2,8 @@
 
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
+using Tekium.Embedded;
+using Tekium.Embedded.AotSmoke;
 using Tekium.Embedded.Indexing;
 using Tekium.Embedded.Security;
 using Tekium.Embedded.Storage;
@@ -39,12 +41,70 @@ finally
 
 failures += await RoundTripAsync("memory", static () => new MemoryStorageDevice(), reopen: false);
 failures += await EncryptedRoundTripAsync();
+failures += await TypedRoundTripAsync();
 
 await Console.Out.WriteLineAsync(
     $"TekiumDB AOT smoke: {(failures == 0 ? "OK" : "FAILED")} " +
     $"(dynamic code supported: {RuntimeFeature.IsDynamicCodeSupported})");
 
 return failures;
+
+// La API pública de punta a punta: serializadores generados, catálogo y evolución de esquema, sin reflexión.
+static async Task<int> TypedRoundTripAsync()
+{
+    var file = Path.Combine(Path.GetTempPath(), $"tekium-aot-typed-{Guid.NewGuid():N}.tkdb");
+    var options = new DbOptions { Path = file, Password = "aot typed password".AsMemory(), CacheSizeMb = 8 };
+    // Con su marca de tiempo explícita: dos UUID v7 del mismo milisegundo no tienen orden garantizado.
+    var at = new DateTimeOffset(2026, 11, 16, 9, 30, 0, TimeSpan.FromHours(-6));
+    var first = Guid.CreateVersion7(at);
+    var second = Guid.CreateVersion7(at.AddSeconds(1));
+    try
+    {
+        var database = await TekiumDb.OpenAsync(options);
+        await using (database)
+        {
+            await using var writer = await database.BeginWriteAsync();
+            await database.Table<EventV1>().InsertAsync(writer, new EventV1 { Id = first, Title = "written as version 1", At = at, Obsolete = 9 });
+            await writer.CommitAsync();
+        }
+
+        database = await TekiumDb.OpenAsync(options);
+        await using (database)
+        {
+            var events = database.Table<EventV2>();
+            var old = await events.GetAsync(first);
+            await using (var writer = await database.BeginWriteAsync())
+            {
+                await events.InsertAsync(writer, new EventV2 { Id = second, Title = "written as version 2", At = at, Place = "here", Cost = 12.50m, Mood = Mood.Busy, Attachment = [1, 2, 3], Weight = 0.5 });
+                await writer.CommitAsync();
+            }
+
+            var titles = new List<string>();
+            await foreach (var row in events.ScanAsync())
+            {
+                titles.Add(row.Title);
+            }
+
+            var recent = await events.GetAsync(second);
+            if (old is { Title: "written as version 1", Place: null, Cost: null, Mood: Mood.Calm, Weight: 0 }
+                && old.At == at
+                && old.At.Offset == at.Offset
+                && recent is { Place: "here", Cost: 12.50m, Mood: Mood.Busy, Attachment: [1, 2, 3], Weight: 0.5 }
+                && titles is ["written as version 1", "written as version 2"]
+                && database.IsEncrypted)
+            {
+                return 0;
+            }
+
+            await Console.Error.WriteLineAsync($"Typed round-trip failed: {titles.Count} rows, old row {(old is null ? "missing" : old.Title)}.");
+            return 1;
+        }
+    }
+    finally
+    {
+        File.Delete(file);
+    }
+}
 
 // Cifrado: AesGcm, HKDF, HMAC y el Argon2id administrado bajo Native AOT.
 static async Task<int> EncryptedRoundTripAsync()

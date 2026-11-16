@@ -95,6 +95,19 @@ internal static class BTreeVerifier
         }
     }
 
+    /// <summary>Verifica el árbol y devuelve cuántas entradas tiene.</summary>
+    public static async Task<int> CountAsync(IPageSource source, PageNumber root, CancellationToken cancellationToken)
+    {
+        await VerifyAsync(source, root, cancellationToken);
+        var count = 0;
+        await foreach (var unused in BTree.RangeAsync(source, root, default, default, cancellationToken))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
     /// <summary>
     /// Ninguna página se pierde: toda página del archivo es de cabecera, la alcanza el árbol, o está en
     /// la free-list (como página libre o como página de la propia lista).
