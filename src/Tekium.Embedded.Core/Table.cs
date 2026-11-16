@@ -20,6 +20,10 @@ public sealed class Table<T> : TekiumDb.ITable
     private readonly TekiumDb _database;
     private readonly TkColumnType _keyType;
     private readonly IndexDefinition[] _indexes;
+    private readonly ConstraintSet _constraints;
+
+    // The catalog key of the table each FOREIGN KEY refers to.
+    private readonly byte[][] _parentKeys;
 
     // Room to evaluate the condition of any partial index of the table.
     private readonly int _whereScratch;
@@ -61,11 +65,16 @@ public sealed class Table<T> : TekiumDb.ITable
 
         _keyType = key.Type;
         _indexes = IndexDefinition.Build<T>(Name, TableKey);
+        _constraints = ConstraintSet.Build<T>(Name, _indexes);
+        _parentKeys = Array.ConvertAll(_constraints.ForeignKeys, static key => CatalogStore.TableKey(key.Table));
         foreach (var index in _indexes)
         {
             _whereScratch = Math.Max(_whereScratch, IndexDefinition.ScratchSize(index.Where));
         }
     }
+
+    private const int NoValue = -1;
+    private const int NoSuchKey = -2;
 
     private enum WriteMode
     {
@@ -259,6 +268,7 @@ public sealed class Table<T> : TekiumDb.ITable
                 changes = Changes(old, null, stored.Span);
             }
 
+            await EnsureNotReferredAsync(transaction, state, stored, cancellationToken).ConfigureAwait(false);
             try
             {
                 if (changes is not null)
@@ -383,6 +393,7 @@ public sealed class Table<T> : TekiumDb.ITable
                 throw new TkDuplicateKeyException($"Table '{Name}' already has a row with that key.");
             }
 
+            await EnforceAsync(transaction, state, row, key, changes, cancellationToken).ConfigureAwait(false);
             try
             {
                 if (changes is not null)
@@ -462,18 +473,29 @@ public sealed class Table<T> : TekiumDb.ITable
     /// with the same values. Returns -1 if the index is partial and the row is not in it.
     /// </summary>
     private int IndexKey(
-        IndexDefinition index, T row, ReadOnlySpan<byte> primaryKey, Span<byte> destination, Span<byte> scratch, out int prefix)
+        IndexDefinition index,
+        T row,
+        ReadOnlySpan<byte> primaryKey,
+        Span<byte> destination,
+        Span<byte> scratch,
+        out int prefix,
+        out bool hasNull)
     {
         prefix = 0;
+        hasNull = false;
         if (!Matches(row, index.Where, scratch))
         {
             return -1;
         }
 
         var writer = new TkKeyWriter(destination);
-        foreach (var field in index.Fields)
+        for (var i = 0; i < index.Fields.Length; i++)
         {
-            T.WriteField(ref writer, row, field);
+            var start = writer.Length;
+            T.WriteField(ref writer, row, index.Fields[i]);
+
+            // A nullable field starts with the mark of whether it has a value.
+            hasNull |= index.Nullable[i] && writer.Length > start && destination[start] == 0;
         }
 
         prefix = writer.Length;
@@ -499,11 +521,12 @@ public sealed class Table<T> : TekiumDb.ITable
             {
                 changes.OldLength(i) = old is null
                     ? -1
-                    : IndexKey(_indexes[i], old, primaryKey, changes.Old(i, maxKey).Span, scratch, out _);
+                    : IndexKey(_indexes[i], old, primaryKey, changes.Old(i, maxKey).Span, scratch, out _, out _);
                 changes.NewLength(i) = -1;
                 if (replacement is not null)
                 {
-                    changes.NewLength(i) = IndexKey(_indexes[i], replacement, primaryKey, changes.New(i, maxKey).Span, scratch, out var prefix);
+                    changes.NewLength(i) = IndexKey(
+                        _indexes[i], replacement, primaryKey, changes.New(i, maxKey).Span, scratch, out var prefix, out changes.HasNull(i));
                     BinaryPrimitives.WriteUInt16LittleEndian(changes.Value(i).Span, (ushort)prefix);
                 }
             }
@@ -554,6 +577,270 @@ public sealed class Table<T> : TekiumDb.ITable
         }
     }
 
+    /// <summary>
+    /// Builds the error of a violated constraint, and aborts the transaction: after a violation it can
+    /// only be rolled back.
+    /// </summary>
+    private TkConstraintException Violation(
+        TkWriteTransaction transaction, string kind, string constraint, ReadOnlySpan<byte> key, string why)
+    {
+        transaction.Fail();
+        var text = TkKey.Format(key, _keyType);
+        return new TkConstraintException(
+            $"Table '{Name}': the row with key {text} violates {kind} constraint '{constraint}': {why}. The transaction is aborted.",
+            Name,
+            constraint,
+            text);
+    }
+
+    /// <summary>Whether a unique index already has an entry with the indexed values of this key, for another row.</summary>
+    private static async ValueTask<bool> TakenAsync(
+        IPageSource source, PageNumber root, ReadOnlyMemory<byte> key, int prefix, CancellationToken cancellationToken)
+    {
+        // Being unique, the index has at most one entry with those values: the first one decides.
+        var values = key[..prefix];
+        var entries = BTree.RangeAsync(source, root, values, PrefixEnd(values.Span), cancellationToken);
+        await foreach (var entry in entries.ConfigureAwait(false))
+        {
+            return !entry.Key.Span.SequenceEqual(key.Span);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Checks a row about to be written against every constraint, before anything changes: CHECK first,
+    /// which needs nothing but the row; then FOREIGN KEY; then UNIQUE.
+    /// </summary>
+    private async ValueTask EnforceAsync(
+        TkWriteTransaction transaction,
+        TkWriteTransaction.TableState state,
+        T row,
+        ReadOnlyMemory<byte> key,
+        KeyChanges? changes,
+        CancellationToken cancellationToken)
+    {
+        var checks = _constraints.Checks;
+        for (var i = 0; i < checks.Length; i++)
+        {
+            if (!T.Check(row, i))
+            {
+                throw Violation(transaction, "CHECK", checks[i].Name, key.Span, $"({checks[i].Text}) is false");
+            }
+        }
+
+        var foreignKeys = _constraints.ForeignKeys;
+        if (foreignKeys.Length > 0)
+        {
+            var maxKey = _database.Tree.MaxKeySize;
+            var buffer = ArrayPool<byte>.Shared.Rent(maxKey);
+            try
+            {
+                for (var i = 0; i < foreignKeys.Length; i++)
+                {
+                    var length = ForeignKey(row, i, buffer.AsSpan(0, maxKey));
+                    var found = length == NoValue;
+                    if (length >= 0)
+                    {
+                        // A row may refer to itself, also while it is being inserted.
+                        var parent = await transaction.TableAsync(foreignKeys[i].Table, _parentKeys[i], cancellationToken)
+                            .ConfigureAwait(false);
+                        found = (ReferenceEquals(parent, state) && buffer.AsSpan(0, length).SequenceEqual(key.Span))
+                            || await BTree.GetAsync(transaction.Inner, parent.Root, buffer.AsMemory(0, length), Memory<byte>.Empty, cancellationToken)
+                                .ConfigureAwait(false) != BTree.NotFound;
+                    }
+
+                    if (!found)
+                    {
+                        throw Violation(
+                            transaction, "FOREIGN KEY", foreignKeys[i].Name, key.Span, $"no row of '{foreignKeys[i].Table}' has the key it refers to");
+                    }
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+
+        if (changes is null)
+        {
+            return;
+        }
+
+        for (var i = 0; i < _indexes.Length; i++)
+        {
+            var length = changes.NewLength(i);
+            if (_indexes[i].IsUnique
+                && length >= 0
+                && !changes.HasNull(i)
+                && await TakenAsync(
+                    transaction.Inner,
+                    state.Bound[i].Root,
+                    changes.New(i, length),
+                    BinaryPrimitives.ReadUInt16LittleEndian(changes.Value(i).Span),
+                    cancellationToken).ConfigureAwait(false))
+            {
+                throw Violation(transaction, "UNIQUE", _indexes[i].Name, key.Span, "another row already has the same values");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The key a row refers to through a FOREIGN KEY, as the other table stores it: its length,
+    /// <see cref="NoValue"/> if the column has none, or <see cref="NoSuchKey"/> if no key can be that value.
+    /// </summary>
+    private static int ForeignKey(T row, int foreignKey, Span<byte> destination)
+    {
+        try
+        {
+            return T.WriteForeignKey(row, foreignKey, destination) is var length and >= 0 ? length : NoValue;
+        }
+        catch (ArgumentException)
+        {
+            // Too long to be a key, or empty: nothing in the other table can have it.
+            return NoSuchKey;
+        }
+    }
+
+    /// <summary>Refuses to delete a row while rows of this or another table refer to it through a FOREIGN KEY.</summary>
+    private async ValueTask EnsureNotReferredAsync(
+        TkWriteTransaction transaction, TkWriteTransaction.TableState state, ReadOnlyMemory<byte> key, CancellationToken cancellationToken)
+    {
+        var referrers = await transaction.ReferrersAsync(state, cancellationToken).ConfigureAwait(false);
+        if (referrers.Count == 0)
+        {
+            return;
+        }
+
+        var maxKey = _database.Tree.MaxKeySize;
+        var buffer = ArrayPool<byte>.Shared.Rent(maxKey);
+        try
+        {
+            foreach (var referrer in referrers)
+            {
+                var referring = await transaction.TableAsync(referrer.Table, CatalogStore.TableKey(referrer.Table), cancellationToken)
+                    .ConfigureAwait(false);
+                var indexes = await transaction.IndexesAsync(referring, cancellationToken).ConfigureAwait(false);
+                if (!indexes.TryGetValue(referrer.Index, out var index))
+                {
+                    throw new InvalidDataException(
+                        $"Table '{referrer.Table}' lacks the index of its FOREIGN KEY '{referrer.Name}' to table '{Name}'.");
+                }
+
+                // The entries of the rows that refer to this one start with its key, as an index holds it.
+                var probe = buffer.AsMemory(0, ReferenceProbe(key.Span, referrer.IsNullable, buffer.AsSpan(0, maxKey)));
+                var entries = BTree.RangeAsync(transaction.Inner, index.Root, probe, PrefixEnd(probe.Span), cancellationToken);
+                await foreach (var entry in entries.ConfigureAwait(false))
+                {
+                    // A row that refers to itself does not keep itself from being deleted.
+                    if (ReferenceEquals(referring, state) && IsEntryOf(entry, key.Span))
+                    {
+                        continue;
+                    }
+
+                    transaction.Fail();
+                    var text = TkKey.Format(key.Span, _keyType);
+                    throw new TkConstraintException(
+                        $"Table '{referrer.Table}': FOREIGN KEY constraint '{referrer.Name}' is violated: the row of '{Name}' with key {text} cannot be deleted while rows of '{referrer.Table}' refer to it. The transaction is aborted.",
+                        referrer.Table,
+                        referrer.Name,
+                        text);
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>A stored key of this table as the first field of an index of a table that refers to it.</summary>
+    private int ReferenceProbe(ReadOnlySpan<byte> key, bool isNullable, Span<byte> destination)
+    {
+        var writer = new TkKeyWriter(destination);
+        if (isNullable)
+        {
+            writer.WritePresent();
+        }
+
+        if (_keyType == TkColumnType.Text)
+        {
+            // In an index, text has its zeros escaped and an end mark; in the table it is the whole key.
+            writer.Write(key);
+        }
+        else
+        {
+            writer.WriteRaw(key);
+        }
+
+        return writer.IsTruncated
+            ? throw new InvalidDataException($"Table '{Name}': a stored key is too long to be looked up in an index.")
+            : writer.Length;
+    }
+
+    private static bool IsEntryOf(BTreeEntry entry, ReadOnlySpan<byte> primaryKey) =>
+        entry.Value.Length == sizeof(ushort)
+        && BinaryPrimitives.ReadUInt16LittleEndian(entry.Value.Span) is var prefix
+        && prefix <= entry.Key.Length
+        && entry.Key.Span[prefix..].SequenceEqual(primaryKey);
+
+    /// <summary>
+    /// Makes the CHECK and FOREIGN KEY constraints of the table those the type declares. The ones that
+    /// are new are checked against the rows the table already has, as adding a constraint does.
+    /// </summary>
+    internal async ValueTask BindConstraintsAsync(
+        TkWriteTransaction transaction, TkWriteTransaction.TableState state, CancellationToken cancellationToken)
+    {
+        var stored = await transaction.ConstraintsAsync(state, cancellationToken).ConfigureAwait(false);
+        if (stored.AsSpan().SequenceEqual(_constraints.Encoded))
+        {
+            return;
+        }
+
+        var old = ConstraintSet.Decode(stored);
+        var added = _constraints.Checks.Any(check => !old.Checks.Contains(check))
+            || _constraints.ForeignKeys.Any(key => !old.ForeignKeys.Any(
+                known => string.Equals(known.Name, key.Name, StringComparison.Ordinal) && string.Equals(known.Table, key.Table, StringComparison.Ordinal)));
+        if (added && !state.Root.IsNone)
+        {
+            var maxKey = _database.Tree.MaxKeySize;
+            var key = ArrayPool<byte>.Shared.Rent(maxKey);
+            try
+            {
+                var rows = BTree.RangeAsync(transaction.Inner, state.Root, default, default, cancellationToken);
+                await foreach (var entry in rows.ConfigureAwait(false))
+                {
+                    // The entry points into its page: what the checks need is taken before reading anything else.
+                    var length = entry.Key.Length;
+                    entry.Key.Span.CopyTo(key);
+                    var plan = await PlanAsync(entry.Value, transaction.Inner, transaction.CatalogRoot, transaction, cancellationToken)
+                        .ConfigureAwait(false);
+                    var row = Decode(entry.Value.Span, plan);
+                    await EnforceAsync(transaction, state, row, key.AsMemory(0, length), null, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(key);
+            }
+        }
+
+        // The tables referred to must know who to ask before deleting a row.
+        var parents = old.ForeignKeys.Select(static key => key.Table)
+            .Concat(_constraints.ForeignKeys.Select(static key => key.Table))
+            .Distinct(StringComparer.Ordinal);
+        foreach (var parent in parents)
+        {
+            var foreignKeys = _constraints.ForeignKeys
+                .Where(key => string.Equals(key.Table, parent, StringComparison.Ordinal))
+                .Select(key => new Referrer(Name, key.Name, key.Index, key.IsNullable));
+            await transaction.SetReferrersAsync(parent, Name, foreignKeys, cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.SetConstraintsAsync(state, _constraints.Encoded, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Fills an index that did not exist with the rows the table already has.</summary>
     internal async ValueTask BuildIndexAsync(
         TkWriteTransaction transaction,
@@ -585,9 +872,18 @@ public sealed class Table<T> : TekiumDb.ITable
                     row.Key.Span,
                     buffer.AsSpan(0, maxKey),
                     buffer.AsSpan(maxKey + sizeof(ushort), scratchSize),
-                    out var prefix);
+                    out var prefix,
+                    out var hasNull);
                 if (length >= 0)
                 {
+                    if (index.IsUnique
+                        && !hasNull
+                        && await TakenAsync(transaction.Inner, entry.Root, buffer.AsMemory(0, length), prefix, cancellationToken).ConfigureAwait(false))
+                    {
+                        throw Violation(
+                            transaction, "UNIQUE", index.Name, buffer.AsSpan(prefix, length - prefix), "another row already has the same values");
+                    }
+
                     BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(maxKey), (ushort)prefix);
                     entry.Root = await tree.PutAsync(
                         transaction.Inner, entry.Root, buffer.AsMemory(0, length), buffer.AsMemory(maxKey, sizeof(ushort)), cancellationToken)
@@ -676,7 +972,7 @@ public sealed class Table<T> : TekiumDb.ITable
                     yield return row;
                 }
             }
-            else if (choice.Access == TkAccess.IndexScan)
+            else if (choice.Access is TkAccess.IndexScan or TkAccess.UniqueLookup)
             {
                 primaryKey = ArrayPool<byte>.Shared.Rent(_database.Tree.MaxKeySize);
                 var entries = BTree.RangeAsync(source, states[choice.Index].Root, choice.From, choice.To, cancellationToken);
@@ -691,6 +987,12 @@ public sealed class Table<T> : TekiumDb.ITable
                     if (Matches(row, terms, scratch))
                     {
                         yield return row;
+                    }
+
+                    if (choice.Access == TkAccess.UniqueLookup)
+                    {
+                        // The constraint says there is no other.
+                        break;
                     }
                 }
             }
@@ -831,6 +1133,12 @@ public sealed class Table<T> : TekiumDb.ITable
                 pinned++;
             }
 
+            if (index.IsUnique && pinned == index.Fields.Length && !PinsNoValue(index, terms))
+            {
+                // Every field of a unique index fixed to a value: one row at most, and nothing beats that.
+                return IndexRange(i, pinned, terms) with { Access = TkAccess.UniqueLookup };
+            }
+
             var ranged = pinned < index.Fields.Length && Find(terms, index.Fields[pinned]) is not null;
             var score = (pinned * 4) + (ranged ? 2 : 0) + (index.Where.Length > 0 ? 1 : 0);
             if (score > bestScore)
@@ -868,6 +1176,20 @@ public sealed class Table<T> : TekiumDb.ITable
         }
 
         return new Choice(TkAccess.KeyRange, -1, from, to);
+    }
+
+    /// <summary>Whether the filter fixes a field of the index to having no value: such rows are exempt from uniqueness.</summary>
+    private static bool PinsNoValue(IndexDefinition index, ReadOnlySpan<FilterTerm> terms)
+    {
+        for (var i = 0; i < index.Fields.Length; i++)
+        {
+            if (index.Nullable[i] && Find(terms, index.Fields[i]) is { Low: [0] })
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Whether every row the filter accepts meets the conditions of a partial index.</summary>
@@ -1116,6 +1438,7 @@ public sealed class Table<T> : TekiumDb.ITable
     {
         private readonly byte[] _buffer;
         private readonly int[] _lengths;
+        private readonly bool[] _hasNull;
         private readonly int _maxKey;
         private readonly int _scratch;
         private readonly int _count;
@@ -1126,6 +1449,7 @@ public sealed class Table<T> : TekiumDb.ITable
             _maxKey = maxKey;
             _scratch = scratch;
             _lengths = new int[count * 2];
+            _hasNull = new bool[count];
             _buffer = ArrayPool<byte>.Shared.Rent((count * Slot) + scratch);
         }
 
@@ -1136,6 +1460,9 @@ public sealed class Table<T> : TekiumDb.ITable
         public ref int OldLength(int index) => ref _lengths[index * 2];
 
         public ref int NewLength(int index) => ref _lengths[(index * 2) + 1];
+
+        /// <summary>Whether the new entry of an index has a field with no value, which exempts it from uniqueness.</summary>
+        public ref bool HasNull(int index) => ref _hasNull[index];
 
         public Memory<byte> Old(int index, int length) => _buffer.AsMemory(index * Slot, length);
 

@@ -16,3 +16,6 @@ TK0011 | TekiumDB | Error | Two indexes have the same name
 TK0012 | TekiumDB | Error | The condition of a partial index cannot be understood
 TK0013 | TekiumDB | Error | An index declared on the class must name its properties
 TK0014 | TekiumDB | Error | A table type cannot have a member named Fields
+TK0015 | TekiumDB | Error | A CHECK constraint must be a bool property with a body
+TK0016 | TekiumDB | Error | A FOREIGN KEY must be a column of the type of the key it refers to
+TK0017 | TekiumDB | Error | Two constraints have the same name

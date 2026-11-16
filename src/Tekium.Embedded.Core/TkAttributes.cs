@@ -73,4 +73,39 @@ public sealed class TkIndexAttribute : Attribute
     /// <c>&amp;&amp;</c>, so that the engine can tell when a query implies it.
     /// </summary>
     public string? Where { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether two rows may not have the same values in the index: a
+    /// UNIQUE constraint, named like the index. Rows with no value in any of its properties are exempt.
+    /// </summary>
+    public bool Unique { get; set; }
+}
+
+/// <summary>
+/// Declares a CHECK constraint: the <see cref="bool"/> property it is on must be true of every row
+/// written. The property must be deterministic and depend on nothing but the columns of its own row.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class TkCheckAttribute : Attribute
+{
+    /// <summary>Gets or sets the name of the constraint. By default, the name of the property.</summary>
+    public string? Name { get; set; }
+}
+
+/// <summary>
+/// Declares a FOREIGN KEY constraint: the column it is on holds the key of a row of another table, which
+/// must exist. A nullable column may hold no value. A row cannot be deleted while others refer to it.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class TkForeignKeyAttribute : Attribute
+{
+    /// <summary>Initializes a new instance of the <see cref="TkForeignKeyAttribute"/> class.</summary>
+    /// <param name="table">The row type of the table referred to, whose key has the type of this column.</param>
+    public TkForeignKeyAttribute(Type table) => Table = table;
+
+    /// <summary>Gets the row type of the table referred to.</summary>
+    public Type Table { get; }
+
+    /// <summary>Gets or sets the name of the constraint. By default, <c>fk_</c> and the name of the property.</summary>
+    public string? Name { get; set; }
 }

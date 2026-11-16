@@ -33,16 +33,21 @@ internal sealed partial class EventV2
     [TkKey]
     public Guid Id { get; set; }
 
+    [TkIndex(Unique = true)]
     public string Title { get; set; } = string.Empty;
 
     [TkIndex]
     public DateTimeOffset At { get; set; }
+
+    [TkCheck]
+    public bool CostIsNotNegative => Cost is null || Cost >= 0;
 
     [TkIndex]
     public int TitleLength => Title.Length;
 
     public bool IsBusy => Mood == Mood.Busy;
 
+    [TkForeignKey(typeof(Venue))]
     public string? Place { get; set; }
 
     public decimal? Cost { get; set; }
@@ -52,4 +57,12 @@ internal sealed partial class EventV2
     public byte[]? Attachment { get; set; }
 
     public double Weight { get; set; }
+}
+
+/// <summary>La tabla a la que se refiere la clave foránea de los eventos.</summary>
+[TkTable("venues")]
+internal sealed partial class Venue
+{
+    [TkKey]
+    public string Name { get; set; } = string.Empty;
 }

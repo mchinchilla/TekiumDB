@@ -15,6 +15,9 @@ internal static class TableParser
     private const string ColumnAttribute = "Tekium.Embedded.TkColumnAttribute";
     private const string IgnoreAttribute = "Tekium.Embedded.TkIgnoreAttribute";
     private const string IndexAttribute = "Tekium.Embedded.TkIndexAttribute";
+    internal const string CheckAttribute = "Tekium.Embedded.TkCheckAttribute";
+    internal const string ForeignKeyAttribute = "Tekium.Embedded.TkForeignKeyAttribute";
+    internal const string KeyAttributeName = KeyAttribute;
 
     private static readonly SymbolDisplayFormat FullyQualified =
         SymbolDisplayFormat.FullyQualifiedFormat.WithMiscellaneousOptions(
@@ -103,7 +106,8 @@ internal static class TableParser
             diagnostics.Add(DiagnosticModel.Create("TK0014", location, type.Name));
         }
 
-        var indexes = IndexParser.Parse(type, columns, location, diagnostics, context.SemanticModel.Compilation, cancellationToken, out var computed);
+        var indexes = IndexParser.Parse(
+            type, columns, location, diagnostics, context.SemanticModel.Compilation, cancellationToken, out var computed, out var checks, out var foreignKeys);
 
         var tableName = context.Attributes[0].ConstructorArguments is { Length: 1 } arguments && arguments[0].Value is string name
             ? name
@@ -121,6 +125,8 @@ internal static class TableParser
             keyColumn,
             new EquatableArray<ColumnModel>(computed),
             new EquatableArray<IndexModel>(indexes),
+            new EquatableArray<CheckModel>(checks),
+            new EquatableArray<ForeignKeyModel>(foreignKeys),
             new EquatableArray<DiagnosticModel>(diagnostics.ToImmutable()));
     }
 
@@ -175,10 +181,28 @@ internal static class TableParser
         }
     }
 
+    /// <summary>The properties of the type and of its base classes, base classes first, in declaration order.</summary>
+    internal static IEnumerable<IPropertySymbol> PropertiesInOrder(INamedTypeSymbol type)
+    {
+        var chain = new Stack<INamedTypeSymbol>();
+        for (var current = type; current is not null && current.SpecialType != SpecialType.System_Object; current = current.BaseType)
+        {
+            chain.Push(current);
+        }
+
+        while (chain.Count > 0)
+        {
+            foreach (var property in chain.Pop().GetMembers().OfType<IPropertySymbol>())
+            {
+                yield return property;
+            }
+        }
+    }
+
     internal static IEnumerable<AttributeData> IndexAttributes(ISymbol symbol) =>
         symbol.GetAttributes().Where(static data => data.AttributeClass?.ToDisplayString() == IndexAttribute);
 
-    private static bool Has(ISymbol symbol, string attribute) =>
+    internal static bool Has(ISymbol symbol, string attribute) =>
         symbol.GetAttributes().Any(data => data.AttributeClass?.ToDisplayString() == attribute);
 
     private static bool IsKeyType(string storeType) =>

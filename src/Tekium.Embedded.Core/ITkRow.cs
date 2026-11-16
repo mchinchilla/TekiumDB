@@ -47,4 +47,25 @@ public interface ITkRow<TSelf>
     /// <param name="field">The field: the position of a column, or past the columns, of an expression.</param>
     static virtual void WriteField(ref TkKeyWriter writer, TSelf row, int field) =>
         throw new NotSupportedException("This row type declares no fields to index or filter by.");
+
+    /// <summary>Gets the CHECK constraints declared on the type.</summary>
+    static virtual ReadOnlySpan<TkCheck> Checks => default;
+
+    /// <summary>Gets the FOREIGN KEY constraints declared on the type.</summary>
+    static virtual ReadOnlySpan<TkForeignKey> ForeignKeys => default;
+
+    /// <summary>Evaluates one CHECK constraint on <paramref name="row"/>.</summary>
+    /// <param name="row">The row.</param>
+    /// <param name="check">The position of the constraint in <see cref="Checks"/>.</param>
+    /// <returns>Whether the row meets it.</returns>
+    static virtual bool Check(TSelf row, int check) =>
+        throw new NotSupportedException("This row type declares no CHECK constraints.");
+
+    /// <summary>Writes the key of the row that <paramref name="row"/> refers to through one FOREIGN KEY, as that table stores it.</summary>
+    /// <param name="row">The row.</param>
+    /// <param name="foreignKey">The position of the constraint in <see cref="ForeignKeys"/>.</param>
+    /// <param name="destination">Where the key goes.</param>
+    /// <returns>The number of bytes written, or -1 if the column has no value.</returns>
+    static virtual int WriteForeignKey(TSelf row, int foreignKey, Span<byte> destination) =>
+        throw new NotSupportedException("This row type declares no FOREIGN KEY constraints.");
 }

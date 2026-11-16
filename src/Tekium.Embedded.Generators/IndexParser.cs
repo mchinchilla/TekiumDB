@@ -33,7 +33,9 @@ internal sealed class IndexParser
         ImmutableArray<DiagnosticModel>.Builder diagnostics,
         Compilation compilation,
         CancellationToken cancellationToken,
-        out ImmutableArray<ColumnModel> computed)
+        out ImmutableArray<ColumnModel> computed,
+        out ImmutableArray<CheckModel> checks,
+        out ImmutableArray<ForeignKeyModel> foreignKeys)
     {
         var parser = new IndexParser(type, columns, compilation, cancellationToken);
         var indexes = ImmutableArray.CreateBuilder<IndexModel>();
@@ -41,12 +43,9 @@ internal sealed class IndexParser
         // Those on the class first, then those on the properties, base classes first.
         var declared = new List<(AttributeData Attribute, IPropertySymbol? Property)>();
         declared.AddRange(TableParser.IndexAttributes(type).Select(static data => (data, (IPropertySymbol?)null)));
-        foreach (var member in TableParser.AllMembers(type).Reverse())
+        foreach (var property in TableParser.PropertiesInOrder(type))
         {
-            if (member is IPropertySymbol property)
-            {
-                declared.AddRange(TableParser.IndexAttributes(property).Select(data => (data, (IPropertySymbol?)property)));
-            }
+            declared.AddRange(TableParser.IndexAttributes(property).Select(data => (data, (IPropertySymbol?)property)));
         }
 
         foreach (var (attribute, property) in declared)
@@ -101,12 +100,111 @@ internal sealed class IndexParser
 
             if (valid)
             {
-                indexes.Add(new IndexModel(name, new EquatableArray<int>(fields.ToImmutable()), where));
+                var unique = attribute.NamedArguments.Any(static argument => argument.Key == "Unique" && argument.Value.Value is true);
+                indexes.Add(new IndexModel(name, new EquatableArray<int>(fields.ToImmutable()), where, unique));
+            }
+        }
+
+        var constraints = new HashSet<string>(StringComparer.Ordinal);
+        var checkModels = ImmutableArray.CreateBuilder<CheckModel>();
+        var foreignKeyModels = ImmutableArray.CreateBuilder<ForeignKeyModel>();
+        foreach (var property in TableParser.PropertiesInOrder(type))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var location = property.Locations.FirstOrDefault() ?? typeLocation;
+            foreach (var attribute in property.GetAttributes())
+            {
+                var kind = attribute.AttributeClass?.ToDisplayString();
+                if (kind == TableParser.CheckAttribute)
+                {
+                    var name = Named(attribute, "Name") is { Length: > 0 } given ? given : property.Name;
+                    if (property is not { IsStatic: false, Type.SpecialType: SpecialType.System_Boolean, GetMethod: not null }
+                        || parser.Body(property) is not { } body)
+                    {
+                        diagnostics.Add(DiagnosticModel.Create("TK0015", location, property.Name));
+                    }
+                    else if (!constraints.Add(name))
+                    {
+                        diagnostics.Add(DiagnosticModel.Create("TK0017", location, type.Name, name));
+                    }
+                    else
+                    {
+                        checkModels.Add(new CheckModel(name, Escaped(property.Name), body.NormalizeWhitespace(eol: "\n").ToFullString()));
+                    }
+                }
+                else if (kind == TableParser.ForeignKeyAttribute)
+                {
+                    var name = Named(attribute, "Name") is { Length: > 0 } given ? given : "fk_" + property.Name;
+                    var target = attribute.ConstructorArguments is { Length: 1 } arguments ? arguments[0].Value as INamedTypeSymbol : null;
+                    var column = parser.ColumnOf(property.Name);
+                    var targetTable = target is null ? null : TableName(target);
+                    var targetKey = target is null
+                        ? null
+                        : TableParser.AllMembers(target).OfType<IPropertySymbol>().FirstOrDefault(static key => TableParser.Has(key, TableParser.KeyAttributeName));
+                    if (column < 0
+                        || targetTable is null
+                        || targetKey is null
+                        || columns[column].IsEnum
+                        || TableParser.ToColumn(targetKey) is not { IsEnum: false } keyColumn
+                        || keyColumn.StoreType != columns[column].StoreType)
+                    {
+                        diagnostics.Add(DiagnosticModel.Create("TK0016", location, property.Name, target?.Name ?? "?"));
+                        continue;
+                    }
+
+                    if (!constraints.Add(name))
+                    {
+                        diagnostics.Add(DiagnosticModel.Create("TK0017", location, type.Name, name));
+                        continue;
+                    }
+
+                    // Deleting a row asks who refers to it: that needs an index that starts with the column.
+                    var index = -1;
+                    for (var i = 0; i < indexes.Count && index < 0; i++)
+                    {
+                        index = indexes[i].Where is null && indexes[i].Fields[0] == column ? i : -1;
+                    }
+
+                    if (index < 0)
+                    {
+                        var indexName = name;
+                        while (indexes.Any(existing => existing.Name == indexName))
+                        {
+                            indexName += "_";
+                        }
+
+                        index = indexes.Count;
+                        indexes.Add(new IndexModel(indexName, new EquatableArray<int>(ImmutableArray.Create(column)), null));
+                    }
+
+                    foreignKeyModels.Add(new ForeignKeyModel(name, targetTable, column, index));
+                }
             }
         }
 
         computed = parser._computed.ToImmutableArray();
+        checks = checkModels.ToImmutable();
+        foreignKeys = foreignKeyModels.ToImmutable();
         return indexes.ToImmutable();
+    }
+
+    private static string Escaped(string name) =>
+        SyntaxFacts.GetKeywordKind(name) != SyntaxKind.None || SyntaxFacts.GetContextualKeywordKind(name) != SyntaxKind.None
+            ? "@" + name
+            : name;
+
+    /// <summary>The name of the table a type is, if it is marked as one.</summary>
+    private static string? TableName(INamedTypeSymbol type)
+    {
+        foreach (var attribute in type.GetAttributes())
+        {
+            if (attribute.AttributeClass?.ToDisplayString() == TableParser.TableAttribute)
+            {
+                return attribute.ConstructorArguments is { Length: 1 } arguments && arguments[0].Value is string name ? name : type.Name;
+            }
+        }
+
+        return null;
     }
 
     private static string? Named(AttributeData attribute, string name)
@@ -147,6 +245,20 @@ internal sealed class IndexParser
             default:
                 return null;
         }
+    }
+
+    /// <summary>The position of the column a property is stored in, or -1 if it is not a column.</summary>
+    private int ColumnOf(string propertyName)
+    {
+        for (var i = 0; i < _columns.Count; i++)
+        {
+            if (Plain(_columns[i].Property) == propertyName)
+            {
+                return i;
+            }
+        }
+
+        return -1;
     }
 
     private ColumnModel Model(int field) => field < _columns.Count ? _columns[field] : _computed[field - _columns.Count];

@@ -17,13 +17,26 @@ internal sealed record TableModel(
     int KeyColumn,
     EquatableArray<ColumnModel> Computed,
     EquatableArray<IndexModel> Indexes,
+    EquatableArray<CheckModel> Checks,
+    EquatableArray<ForeignKeyModel> ForeignKeys,
     EquatableArray<DiagnosticModel> Diagnostics);
+
+/// <summary>One CHECK constraint: its name, the bool property that evaluates it and the source of that property.</summary>
+internal sealed record CheckModel(string Name, string Property, string Text);
+
+/// <summary>One FOREIGN KEY constraint.</summary>
+/// <param name="Name">Name of the constraint.</param>
+/// <param name="Table">Name of the table referred to.</param>
+/// <param name="Column">Position of the column that holds the key.</param>
+/// <param name="Index">Position of the index that starts with that column.</param>
+internal sealed record ForeignKeyModel(string Name, string Table, int Column, int Index);
 
 /// <summary>One secondary index.</summary>
 /// <param name="Name">Name of the index.</param>
 /// <param name="Fields">The indexed fields: positions among the columns, or past them, among the computed properties.</param>
 /// <param name="Where">The C# expression that builds the filter of a partial index, or nothing.</param>
-internal sealed record IndexModel(string Name, EquatableArray<int> Fields, string? Where);
+/// <param name="Unique">Whether it is also a UNIQUE constraint.</param>
+internal sealed record IndexModel(string Name, EquatableArray<int> Fields, string? Where, bool Unique = false);
 
 /// <summary>One column: the property it comes from and how it is stored.</summary>
 /// <param name="Property">Name of the property.</param>

@@ -15,13 +15,18 @@ public sealed class TkIndex<TRow>
     /// <param name="name">The name of the index, unique in its table.</param>
     /// <param name="fields">The indexed fields, most significant first: columns, or past the columns, expressions.</param>
     /// <param name="where">The rows that are in the index, or <see langword="null"/> for all of them.</param>
-    public TkIndex(string name, ReadOnlySpan<int> fields, TkFilter<TRow>? where = null)
+    /// <param name="isUnique">Whether two rows may not have the same values in the index.</param>
+    public TkIndex(string name, ReadOnlySpan<int> fields, TkFilter<TRow>? where = null, bool isUnique = false)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);
         Name = name;
         _fields = fields.ToArray();
         Where = where;
+        IsUnique = isUnique;
     }
+
+    /// <summary>Gets a value indicating whether the index is also a UNIQUE constraint.</summary>
+    public bool IsUnique { get; }
 
     /// <summary>Gets the name of the index.</summary>
     public string Name { get; }

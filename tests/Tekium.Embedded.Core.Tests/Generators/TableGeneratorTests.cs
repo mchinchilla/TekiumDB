@@ -248,6 +248,125 @@ public sealed class TableGeneratorTests
         Assert.Contains("TkIndex<Order>(\"open\", new int[] { 2 }, Fields.Deleted.EqualTo((bool)(false)).And(Fields.Total.GreaterThan((decimal)(0L))))", generated.Single(), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Constraints_generate_checks_unique_indexes_and_foreign_keys_that_compile_without_warnings()
+    {
+        var (diagnostics, generated) = Run("""
+            #nullable enable
+            using System;
+            using Tekium.Embedded;
+
+            [TkTable("customers")]
+            public sealed partial class Customer
+            {
+                [TkKey] public Guid Id { get; set; }
+                [TkIndex(Unique = true)] public string Email { get; set; } = "";
+            }
+
+            [TkTable("warehouses")]
+            public sealed partial class Warehouse
+            {
+                [TkKey] public string Code { get; set; } = "";
+            }
+
+            [TkTable("orders")]
+            [TkIndex(nameof(Customer), nameof(Number), Unique = true, Name = "number per customer")]
+            public sealed partial class Order
+            {
+                [TkKey] public long Id { get; set; }
+                [TkForeignKey(typeof(Customer))] public Guid Customer { get; set; }
+                [TkForeignKey(typeof(Warehouse), Name = "ships from")] public string? Warehouse { get; set; }
+                public int Number { get; set; }
+                public decimal Total { get; set; }
+                public DateOnly Placed { get; set; }
+                public DateOnly? Shipped { get; set; }
+
+                [TkCheck] public bool TotalIsNotNegative => Total >= 0;
+
+                [TkCheck(Name = "ships after it is placed")]
+                public bool @checked
+                {
+                    get { return Shipped is null || Shipped >= Placed; }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+        var order = generated.Single(static source => source.Contains("partial class Order", StringComparison.Ordinal));
+
+        Assert.Contains("new global::Tekium.Embedded.TkCheck(\"TotalIsNotNegative\", \"Total >= 0\")", order, StringComparison.Ordinal);
+        Assert.Contains("new global::Tekium.Embedded.TkCheck(\"ships after it is placed\", \"{", order, StringComparison.Ordinal);
+        Assert.Contains("return Shipped is null || Shipped >= Placed;", order, StringComparison.Ordinal);
+        Assert.Contains("case 1: return row.@checked;", order, StringComparison.Ordinal);
+
+        // La primera clave foránea aprovecha el índice que ya empieza por su columna; la segunda trae el suyo.
+        Assert.Contains("TkIndex<Order>(\"number per customer\", new int[] { 1, 3 }, null, true)", order, StringComparison.Ordinal);
+        Assert.Contains("TkIndex<Order>(\"ships from\", new int[] { 2 }, null)", order, StringComparison.Ordinal);
+        Assert.Contains("new global::Tekium.Embedded.TkForeignKey(\"fk_Customer\", \"customers\", 1, 0)", order, StringComparison.Ordinal);
+        Assert.Contains("new global::Tekium.Embedded.TkForeignKey(\"ships from\", \"warehouses\", 2, 1)", order, StringComparison.Ordinal);
+        Assert.Contains("return global::Tekium.Embedded.TkKey.Write(row.Customer, destination);", order, StringComparison.Ordinal);
+        Assert.Contains("return row.Warehouse is { } __k1 ? global::Tekium.Embedded.TkKey.Write(__k1, destination) : -1;", order, StringComparison.Ordinal);
+
+        Assert.Contains(
+            "TkIndex<Customer>(\"Email\", new int[] { 1 }, null, true)",
+            generated.Single(static source => source.Contains("partial class Customer", StringComparison.Ordinal)),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>El ejemplo de restricciones del README, tal cual.</summary>
+    [Fact]
+    public void The_constraint_example_of_the_readme_compiles()
+    {
+        var (diagnostics, generated) = Run("""
+            #nullable enable
+            using System;
+            using Tekium.Embedded;
+
+            [TkTable("customers")]
+            public sealed partial class Customer
+            {
+                [TkKey] public Guid Id { get; set; }
+
+                [TkIndex(Unique = true)] public string Email { get; set; } = "";
+            }
+
+            [TkTable("invoices")]
+            public sealed partial class Invoice
+            {
+                [TkKey] public long Id { get; set; }
+
+                [TkForeignKey(typeof(Customer))] public Guid Customer { get; set; }
+
+                public decimal Total { get; set; }
+
+                [TkCheck] public bool TotalIsNotNegative => Total >= 0;
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+        Assert.Equal(2, generated.Length);
+        Assert.Contains(generated, static source => source.Contains("TkForeignKey(\"fk_Customer\", \"customers\", 1, 0)", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("TK0015", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkCheck] public int Count => Id; }", "'Count'")]
+    [InlineData("TK0015", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkCheck] public bool Stored { get; set; } }", "'Stored'")]
+    [InlineData("TK0015", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkCheck] public static bool Shared => true; }", "'Shared'")]
+    [InlineData("TK0016", "public class P { } [TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkForeignKey(typeof(P))] public int Parent { get; set; } }", "'Parent' cannot be a FOREIGN KEY to 'P'")]
+    [InlineData("TK0016", "[TkTable] public partial class P { [TkKey] public long Id { get; set; } } [TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkForeignKey(typeof(P))] public int Parent { get; set; } }", "'Parent'")]
+    [InlineData("TK0016", "[TkTable] public partial class P { [TkKey] public int Id { get; set; } } [TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkForeignKey(typeof(P))] public int Parent => 1; }", "'Parent'")]
+    [InlineData("TK0017", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkCheck] public bool A => Id > 0; [TkCheck(Name = \"A\")] public bool B => Id < 9; }", "more than one constraint named 'A'")]
+    [InlineData("TK0017", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkForeignKey(typeof(T), Name = \"A\")] public int? Up { get; set; } [TkCheck] public bool A => Id > 0; }", "more than one constraint named 'A'")]
+    public void A_constraint_that_cannot_be_kept_is_reported_as_an_error(string id, string source, string says)
+    {
+        var (diagnostics, _) = Run("#nullable enable\nusing Tekium.Embedded;\n" + source, mustCompile: false);
+
+        var diagnostic = Assert.Single(diagnostics, found => found.Id == id);
+        Assert.Equal(DiagnosticSeverity.Error, diagnostic.Severity);
+        Assert.Contains(says, diagnostic.GetMessage(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
+        Assert.Equal("Tables.cs", diagnostic.Location.GetLineSpan().Path);
+    }
+
     [Theory]
     [InlineData("TK0010", "[TkIndex(\"Missing\")] [TkTable] public partial class T { [TkKey] public int Id { get; set; } }", "'Missing'")]
     [InlineData("TK0010", "[TkIndex(\"Id\", \"Id\")] [TkTable] public partial class T { [TkKey] public int Id { get; set; } }", "'Id'")]

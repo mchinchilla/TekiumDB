@@ -99,6 +99,24 @@ public static class TkKey
         throw new ArgumentException($"The key of the table is a {expected}, not a {typeof(TKey).Name}.", nameof(key));
     }
 
+    /// <summary>A stored key as text, to name a row in an error.</summary>
+    internal static string Format(ReadOnlySpan<byte> stored, TkColumnType type)
+    {
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        return type switch
+        {
+            TkColumnType.Uuid when stored.Length == 16 => new Guid(stored, bigEndian: true).ToString(),
+            TkColumnType.I32 when stored.Length == sizeof(int) =>
+                ((int)(BinaryPrimitives.ReadUInt32BigEndian(stored) ^ 0x8000_0000)).ToString(culture),
+            TkColumnType.I64 when stored.Length == sizeof(long) =>
+                ((long)(BinaryPrimitives.ReadUInt64BigEndian(stored) ^ 0x8000_0000_0000_0000)).ToString(culture),
+            TkColumnType.U32 when stored.Length == sizeof(uint) => BinaryPrimitives.ReadUInt32BigEndian(stored).ToString(culture),
+            TkColumnType.U64 when stored.Length == sizeof(ulong) => BinaryPrimitives.ReadUInt64BigEndian(stored).ToString(culture),
+            TkColumnType.Text => System.Text.Encoding.UTF8.GetString(stored),
+            _ => Convert.ToHexString(stored),
+        };
+    }
+
     /// <summary>Whether a column of this type can be the key of a table.</summary>
     internal static bool IsSupported(TkColumnType type) =>
         type is TkColumnType.Uuid or TkColumnType.I32 or TkColumnType.I64 or TkColumnType.U32

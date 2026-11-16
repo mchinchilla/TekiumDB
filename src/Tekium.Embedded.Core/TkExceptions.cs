@@ -99,3 +99,47 @@ public sealed class TkIndexKeyTooLargeException : Exception
     {
     }
 }
+
+/// <summary>
+/// A write would have broken a CHECK, UNIQUE or FOREIGN KEY constraint. The transaction it was part of
+/// is aborted: it can only be rolled back.
+/// </summary>
+public sealed class TkConstraintException : Exception
+{
+    /// <summary>Initializes a new instance of the <see cref="TkConstraintException"/> class.</summary>
+    public TkConstraintException()
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="TkConstraintException"/> class.</summary>
+    /// <param name="message">What was violated.</param>
+    public TkConstraintException(string message)
+        : base(message)
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="TkConstraintException"/> class.</summary>
+    /// <param name="message">What was violated.</param>
+    /// <param name="innerException">The cause.</param>
+    public TkConstraintException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+
+    internal TkConstraintException(string message, string table, string constraint, string key)
+        : base(message)
+    {
+        Table = table;
+        Constraint = constraint;
+        Key = key;
+    }
+
+    /// <summary>Gets the name of the table whose constraint was violated.</summary>
+    public string? Table { get; }
+
+    /// <summary>Gets the name of the constraint.</summary>
+    public string? Constraint { get; }
+
+    /// <summary>Gets the key of the row that violated it, as text.</summary>
+    public string? Key { get; }
+}

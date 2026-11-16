@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 6 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay restricciones, índices especializados ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 6.5 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices especializados ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -69,7 +69,7 @@ Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy
 
 - Núcleo tipado, sin reflexión en runtime: un generador de código fuente emite los serializadores.
 - Capas opcionales en paquetes separados: SQL con proveedor ADO.NET, LINQ y vectores.
-- Restricciones declarativas (`CHECK`, `UNIQUE`, `FOREIGN KEY`) y change feed post-commit.
+- Restricciones declarativas (`CHECK`, `UNIQUE`, `FOREIGN KEY`; ya existen: ver [Restricciones](#restricciones)) y change feed post-commit.
 - Backup en caliente, verificación de integridad y viaje en el tiempo sobre snapshots.
 
 ## Vistazo a la API
@@ -171,6 +171,49 @@ var plan = await orders.ExplainAsync(recent);                  // IndexScan, "Cu
 | Cambios de índices | Declarar uno nuevo, cambiarlo o quitarlo no requiere migración: la primera escritura con el tipo nuevo lo construye, reconstruye o elimina. Hasta entonces las consultas recorren la tabla |
 | Límite | Los valores indexados de una fila más su clave no pueden pasar de 1/16 de página (512 bytes con páginas de 8 KiB): una fila que lo exceda se rechaza con `TkIndexKeyTooLargeException` |
 
+### Restricciones
+
+Se declaran con atributos y el motor las comprueba en cada escritura. Una violación lanza `TkConstraintException`, que nombra la restricción y la fila, y aborta la transacción: ya sólo puede deshacerse.
+
+```csharp
+[TkTable("customers")]
+public sealed partial class Customer
+{
+    [TkKey] public Guid Id { get; set; }
+
+    [TkIndex(Unique = true)] public string Email { get; set; } = "";     // UNIQUE
+}
+
+[TkTable("invoices")]
+public sealed partial class Invoice
+{
+    [TkKey] public long Id { get; set; }
+
+    [TkForeignKey(typeof(Customer))] public Guid Customer { get; set; }  // FOREIGN KEY
+
+    public decimal Total { get; set; }
+
+    [TkCheck] public bool TotalIsNotNegative => Total >= 0;              // CHECK
+}
+
+try
+{
+    await invoices.InsertAsync(tx, new Invoice { Id = 1, Customer = unknown, Total = 10 });
+}
+catch (TkConstraintException violation)
+{
+    // violation.Constraint == "fk_Customer", violation.Table == "invoices", violation.Key == "1"
+}
+```
+
+| Restricción | Cómo |
+| --- | --- |
+| `CHECK` | `[TkCheck]` sobre una propiedad `bool` calculada a partir de las columnas de la fila. Debe ser determinista |
+| `UNIQUE` | `Unique = true` en un `[TkIndex]`, de una o varias columnas, también parcial. Las filas sin valor en alguna de sus columnas quedan exentas. El planificador sabe que una búsqueda con todas sus columnas fijadas da a lo sumo una fila (`UniqueLookup`) |
+| `FOREIGN KEY` | `[TkForeignKey(typeof(Otra))]` sobre una columna del tipo de la clave de la otra tabla. La fila referida debe existir (o la columna no tener valor), y no puede borrarse mientras alguien se refiera a ella. No hay borrado en cascada. Trae su propio índice |
+| Añadirlas después | La primera escritura con el tipo que las declara las comprueba contra las filas que ya hay, y si alguna no cumple, la rechaza nombrándola |
+| Momento de la comprobación | En cada operación, no al confirmar: dos filas que se refieren una a otra se insertan con la referencia vacía y se completan después |
+
 Lo que sigue es diseño objetivo y todavía no existe:
 
 ```csharp
@@ -225,7 +268,8 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 5 | Catálogo, filas tipadas y generador de código | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-5.md); Windows sin verificar |
 | 5.5 | Compresión Zstandard por página | Hecho y [medido](docs/benchmarks/fase-5.5.md): comprime 3,3× los bytes escritos pero no ahorra disco y cuesta latencia; queda apagada por defecto |
 | 6 | Índices secundarios, codificación ordenada de claves, índices sobre expresiones y parciales | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.md); Windows sin verificar |
-| 6.5 – 6.8 | Restricciones declarativas, change feed y carga masiva | Pendiente |
+| 6.5 | Restricciones declarativas: `CHECK`, `UNIQUE`, `FOREIGN KEY` | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.5.md); Windows sin verificar |
+| 6.7 – 6.8 | Change feed y carga masiva | Pendiente |
 | 7 – 9 | Índices temporal, UUID v7 y vectorial HNSW | Pendiente |
 | 10 – 10.6 | Herramientas, backup en caliente, verificación y viaje en el tiempo | Pendiente |
 | 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |
@@ -266,7 +310,7 @@ Las pruebas usan xUnit v3 sobre Microsoft.Testing.Platform, por eso los filtros 
 ```
 src/
   Tekium.Embedded.Core/          Núcleo del motor y API pública
-  Tekium.Embedded.Generators/    Generador de código fuente: el serializador, los campos y los índices de cada [TkTable]
+  Tekium.Embedded.Generators/    Generador de código fuente: serializador, campos, índices y restricciones de cada [TkTable]
 tests/
   Tekium.Embedded.Core.Tests/    Pruebas unitarias
   Tekium.Embedded.CrashChild/    Proceso que las pruebas de crash lanzan y matan a mitad de un commit

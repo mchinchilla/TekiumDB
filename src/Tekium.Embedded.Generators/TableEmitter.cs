@@ -200,7 +200,7 @@ internal static class TableEmitter
             {
                 var ordinals = string.Join(", ", index.Fields.Select(static field => field.ToString(CultureInfo.InvariantCulture)));
                 source.AppendLine(
-                    $"        new {Root}TkIndex<{table.Name}>({Literal(index.Name)}, new int[] {{ {ordinals} }}, {index.Where ?? "null"}),");
+                    $"        new {Root}TkIndex<{table.Name}>({Literal(index.Name)}, new int[] {{ {ordinals} }}, {index.Where ?? "null"}{(index.Unique ? ", true" : string.Empty)}),");
             }
 
             source.AppendLine("    };");
@@ -209,6 +209,7 @@ internal static class TableEmitter
             source.AppendLine();
         }
 
+        EmitConstraints(source, table, row);
         source.AppendLine($"    static void {row}.WriteField(ref {Root}TkKeyWriter writer, {table.Name} row, int field)");
         source.AppendLine("    {");
         source.AppendLine("        switch (field)");
@@ -244,6 +245,72 @@ internal static class TableEmitter
         source.AppendLine("                throw new global::System.ArgumentOutOfRangeException(nameof(field));");
         source.AppendLine("        }");
         source.AppendLine("    }");
+    }
+
+    private static void EmitConstraints(StringBuilder source, TableModel table, string row)
+    {
+        if (table.Checks.Count > 0)
+        {
+            source.AppendLine($"    private static readonly {Root}TkCheck[] __tkChecks = new {Root}TkCheck[]");
+            source.AppendLine("    {");
+            foreach (var check in table.Checks)
+            {
+                source.AppendLine($"        new {Root}TkCheck({Literal(check.Name)}, {Literal(check.Text)}),");
+            }
+
+            source.AppendLine("    };");
+            source.AppendLine();
+            source.AppendLine($"    static global::System.ReadOnlySpan<{Root}TkCheck> {row}.Checks => __tkChecks;");
+            source.AppendLine();
+            source.AppendLine($"    static bool {row}.Check({table.Name} row, int check)");
+            source.AppendLine("    {");
+            source.AppendLine("        switch (check)");
+            source.AppendLine("        {");
+            for (var i = 0; i < table.Checks.Count; i++)
+            {
+                source.AppendLine($"            case {i.ToString(CultureInfo.InvariantCulture)}: return row.{table.Checks[i].Property};");
+            }
+
+            source.AppendLine("            default: throw new global::System.ArgumentOutOfRangeException(nameof(check));");
+            source.AppendLine("        }");
+            source.AppendLine("    }");
+            source.AppendLine();
+        }
+
+        if (table.ForeignKeys.Count > 0)
+        {
+            source.AppendLine($"    private static readonly {Root}TkForeignKey[] __tkForeignKeys = new {Root}TkForeignKey[]");
+            source.AppendLine("    {");
+            foreach (var key in table.ForeignKeys)
+            {
+                source.AppendLine(
+                    $"        new {Root}TkForeignKey({Literal(key.Name)}, {Literal(key.Table)}, {key.Column.ToString(CultureInfo.InvariantCulture)}, {key.Index.ToString(CultureInfo.InvariantCulture)}),");
+            }
+
+            source.AppendLine("    };");
+            source.AppendLine();
+            source.AppendLine($"    static global::System.ReadOnlySpan<{Root}TkForeignKey> {row}.ForeignKeys => __tkForeignKeys;");
+            source.AppendLine();
+            source.AppendLine($"    static int {row}.WriteForeignKey({table.Name} row, int foreignKey, global::System.Span<byte> destination)");
+            source.AppendLine("    {");
+            source.AppendLine("        switch (foreignKey)");
+            source.AppendLine("        {");
+            for (var i = 0; i < table.ForeignKeys.Count; i++)
+            {
+                var column = table.Columns[table.ForeignKeys[i].Column];
+                var access = "row." + column.Property;
+                var local = "__k" + i.ToString(CultureInfo.InvariantCulture);
+                source.AppendLine($"            case {i.ToString(CultureInfo.InvariantCulture)}:");
+                source.AppendLine(column.IsNullable
+                    ? $"                return {access} is {{ }} {local} ? {Root}TkKey.Write({local}, destination) : -1;"
+                    : $"                return {Root}TkKey.Write({NotNull(column, access)}, destination);");
+            }
+
+            source.AppendLine("            default: throw new global::System.ArgumentOutOfRangeException(nameof(foreignKey));");
+            source.AppendLine("        }");
+            source.AppendLine("    }");
+            source.AppendLine();
+        }
     }
 
     /// <summary>A reference that must not be null says which property it was when it is.</summary>

@@ -14,7 +14,7 @@ namespace Tekium.Embedded.Catalog;
 /// <remarks>
 /// <see cref="Encoded"/> is what the catalog stores, and it is file format. Two definitions are the
 /// same index exactly when those bytes are equal: an index whose stored definition differs from the
-/// declared one is never read, and is rebuilt by the next write. Layout: a format byte; the number of
+/// declared one is never read, and is rebuilt by the next write. Layout: a format byte (2 if the index is unique); the number of
 /// fields and each field; the number of conditions and, for each, its field, a byte of flags (1 has a
 /// low bound, 2 it is inclusive, 4 has a high bound, 8 it is inclusive) and the two bounds, each with a
 /// two-byte length. A field is its type, whether it is nullable, whether it is an expression, its name
@@ -24,8 +24,13 @@ internal sealed class IndexDefinition
 {
     private const byte Format = 1;
 
-    private IndexDefinition(string name, int[] fields, FilterTerm[] where, byte[] catalogKey, byte[] encoded)
+    // A unique index is another format: one that was not unique does not become so by being read as such.
+    private const byte UniqueFormat = 2;
+
+    private IndexDefinition(string name, int[] fields, bool[] nullable, FilterTerm[] where, bool isUnique, byte[] catalogKey, byte[] encoded)
     {
+        Nullable = nullable;
+        IsUnique = isUnique;
         Name = name;
         Fields = fields;
         Where = where;
@@ -40,6 +45,12 @@ internal sealed class IndexDefinition
 
     /// <summary>Gets the conditions a row meets to be in the index, one per field. Empty if every row is.</summary>
     public FilterTerm[] Where { get; }
+
+    /// <summary>Gets, for each field of the key, whether it may have no value.</summary>
+    public bool[] Nullable { get; }
+
+    /// <summary>Gets a value indicating whether two rows may not have the same values in the index.</summary>
+    public bool IsUnique { get; }
 
     public byte[] CatalogKey { get; }
 
@@ -86,7 +97,9 @@ internal sealed class IndexDefinition
                 }
             }
 
-            definitions[i] = new IndexDefinition(index.Name, fields, where, catalogKey, Encode<T>(fields, where));
+            var nullable = Array.ConvertAll(fields, static field => IsNullable<T>(field));
+            definitions[i] = new IndexDefinition(
+                index.Name, fields, nullable, where, index.IsUnique, catalogKey, Encode<T>(fields, where, index.IsUnique));
         }
 
         return definitions;
@@ -107,11 +120,15 @@ internal sealed class IndexDefinition
         return longest + 1;
     }
 
-    private static byte[] Encode<T>(int[] fields, FilterTerm[] where)
+    private static bool IsNullable<T>(int field)
+        where T : class, ITkRow<T> =>
+        field < T.Columns.Length ? T.Columns[field].IsNullable : T.Expressions[field - T.Columns.Length].IsNullable;
+
+    private static byte[] Encode<T>(int[] fields, FilterTerm[] where, bool isUnique)
         where T : class, ITkRow<T>
     {
         var encoded = new ArrayBufferWriter<byte>();
-        Write(encoded, Format);
+        Write(encoded, isUnique ? UniqueFormat : Format);
         Write(encoded, (byte)fields.Length);
         foreach (var field in fields)
         {

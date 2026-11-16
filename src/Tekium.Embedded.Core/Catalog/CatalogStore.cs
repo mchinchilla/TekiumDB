@@ -24,6 +24,8 @@ internal static class CatalogStore
     private const byte TablePrefix = 1;
     private const byte SchemaPrefix = 2;
     private const byte IndexPrefix = 3;
+    private const byte ConstraintsPrefix = 4;
+    private const byte ReferrersPrefix = 5;
     private const byte IndexFormat = 1;
     private const int IndexHeaderSize = 5;
     private const int ExpectedSchemaSize = 1024;
@@ -56,6 +58,43 @@ internal static class CatalogStore
 
     /// <summary>Whether a catalog key is an index entry.</summary>
     public static bool IsIndexKey(ReadOnlySpan<byte> key) => key.Length > 1 && key[0] == IndexPrefix;
+
+    /// <summary>The key of the entry that holds the CHECK and FOREIGN KEY constraints of a table.</summary>
+    public static byte[] ConstraintsKey(ReadOnlySpan<byte> tableKey)
+    {
+        var key = tableKey.ToArray();
+        key[0] = ConstraintsPrefix;
+        return key;
+    }
+
+    /// <summary>The key of the entry that lists the foreign keys of other tables that refer to a table.</summary>
+    public static byte[] ReferrersKey(ReadOnlySpan<byte> tableKey)
+    {
+        var key = tableKey.ToArray();
+        key[0] = ReferrersPrefix;
+        return key;
+    }
+
+    /// <summary>Reads a whole catalog entry, whatever its size. Empty if there is none.</summary>
+    public static async ValueTask<byte[]> ReadAsync(
+        IPageSource source, PageNumber catalogRoot, ReadOnlyMemory<byte> key, CancellationToken cancellationToken)
+    {
+        var (buffer, length) = await BTree.GetRentedAsync(source, catalogRoot, key, ExpectedSchemaSize, cancellationToken)
+            .ConfigureAwait(false);
+        if (buffer is null)
+        {
+            return [];
+        }
+
+        try
+        {
+            return buffer.AsSpan(0, length).ToArray();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
 
     /// <summary>What the key of every index of a table starts with: the table key and a zero.</summary>
     public static byte[] IndexKeyPrefix(ReadOnlySpan<byte> tableKey)

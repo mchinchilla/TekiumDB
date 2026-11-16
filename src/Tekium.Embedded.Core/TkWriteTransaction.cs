@@ -118,6 +118,35 @@ public sealed class TkWriteTransaction : TkTransaction
     /// </summary>
     internal void Fail() => _failed = true;
 
+    /// <summary>The CHECK and FOREIGN KEY constraints of a table as the catalog of this transaction has them. Empty if none.</summary>
+    internal async ValueTask<byte[]> ConstraintsAsync(TableState state, CancellationToken cancellationToken) =>
+        state.Constraints ??= await CatalogStore.ReadAsync(
+            _inner, _inner.Root, CatalogStore.ConstraintsKey(state.TableKey), cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Replaces the constraints of a table in the catalog of this transaction.</summary>
+    internal async ValueTask SetConstraintsAsync(TableState state, byte[] encoded, CancellationToken cancellationToken)
+    {
+        await SetAsync(CatalogStore.ConstraintsKey(state.TableKey), encoded, cancellationToken).ConfigureAwait(false);
+        state.Constraints = encoded;
+    }
+
+    /// <summary>The foreign keys of other tables that refer to a table, as this transaction sees them.</summary>
+    internal async ValueTask<List<Referrer>> ReferrersAsync(TableState state, CancellationToken cancellationToken) =>
+        state.Referrers ??= ConstraintSet.DecodeReferrers(await CatalogStore.ReadAsync(
+            _inner, _inner.Root, CatalogStore.ReferrersKey(state.TableKey), cancellationToken).ConfigureAwait(false));
+
+    /// <summary>Replaces, among those who refer to a table, the foreign keys of one referring table.</summary>
+    internal async ValueTask SetReferrersAsync(
+        string table, string referring, IEnumerable<Referrer> foreignKeys, CancellationToken cancellationToken)
+    {
+        var state = await TableAsync(table, CatalogStore.TableKey(table), cancellationToken).ConfigureAwait(false);
+        var referrers = await ReferrersAsync(state, cancellationToken).ConfigureAwait(false);
+        referrers.RemoveAll(referrer => string.Equals(referrer.Table, referring, StringComparison.Ordinal));
+        referrers.AddRange(foreignKeys);
+        await SetAsync(CatalogStore.ReferrersKey(state.TableKey), ConstraintSet.EncodeReferrers(referrers), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     /// <summary>The indexes of a table as this transaction sees them, by name: loaded from the catalog on first use.</summary>
     internal async ValueTask<Dictionary<string, IndexEntry>> IndexesAsync(TableState state, CancellationToken cancellationToken)
     {
@@ -183,6 +212,9 @@ public sealed class TkWriteTransaction : TkTransaction
 
                 bound[i] = entry;
             }
+
+            state.Bound = bound;
+            await table.BindConstraintsAsync(this, state, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -190,8 +222,19 @@ public sealed class TkWriteTransaction : TkTransaction
             throw;
         }
 
-        state.Bound = bound;
         state.IndexedAs = typeof(T);
+    }
+
+    private async ValueTask SetAsync(byte[] key, byte[] value, CancellationToken cancellationToken)
+    {
+        if (value.Length == 0)
+        {
+            await Database.Tree.DeleteAsync(_inner, key, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await Database.Tree.PutAsync(_inner, key, value, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -288,6 +331,12 @@ public sealed class TkWriteTransaction : TkTransaction
 
         /// <summary>Gets the catalog keys of the indexes this transaction dropped, to remove at commit.</summary>
         public List<byte[]> DroppedIndexes { get; } = [];
+
+        /// <summary>Gets or sets the stored CHECK and FOREIGN KEY constraints. <see langword="null"/> until something asks for them.</summary>
+        public byte[]? Constraints { get; set; }
+
+        /// <summary>Gets or sets the foreign keys of other tables that refer to this one. <see langword="null"/> until something asks for them.</summary>
+        public List<Referrer>? Referrers { get; set; }
 
         /// <summary>Gets or sets the type whose declared indexes <see cref="Bound"/> are.</summary>
         public Type? IndexedAs { get; set; }

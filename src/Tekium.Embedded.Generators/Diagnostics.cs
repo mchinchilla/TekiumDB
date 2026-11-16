@@ -78,6 +78,21 @@ internal static class Diagnostics
         "A table type cannot have a member named Fields",
         "'{0}' has a member named 'Fields', the name of the class generated to write conditions with; rename it");
 
+    public static readonly DiagnosticDescriptor UnsupportedCheck = Error(
+        "TK0015",
+        "A CHECK constraint must be a bool property with a body",
+        "'{0}' cannot be a CHECK constraint: [TkCheck] goes on an instance property of type bool that computes its value from the columns of the row");
+
+    public static readonly DiagnosticDescriptor UnsupportedForeignKey = Error(
+        "TK0016",
+        "A FOREIGN KEY must be a column of the type of the key it refers to",
+        "'{0}' cannot be a FOREIGN KEY to '{1}': it must be a column, '{1}' must be marked with [TkTable], and the column must have the type of its key");
+
+    public static readonly DiagnosticDescriptor DuplicateConstraint = Error(
+        "TK0017",
+        "Two constraints have the same name",
+        "'{0}' declares more than one constraint named '{1}'; give one of them another Name");
+
     public static DiagnosticDescriptor? Find(string id) => id switch
     {
         "TK0001" => NotPartial,
@@ -94,6 +109,9 @@ internal static class Diagnostics
         "TK0012" => UnsupportedCondition,
         "TK0013" => IndexWithoutColumns,
         "TK0014" => FieldsTaken,
+        "TK0015" => UnsupportedCheck,
+        "TK0016" => UnsupportedForeignKey,
+        "TK0017" => DuplicateConstraint,
         _ => null,
     };
 

@@ -19,6 +19,9 @@ public enum TkAccess
 
     /// <summary>Reads nothing: the conditions of the filter contradict each other.</summary>
     Nothing = 4,
+
+    /// <summary>Reads the one entry of a unique index the filter asks for: at most one row.</summary>
+    UniqueLookup = 5,
 }
 
 /// <summary>The way the engine chose to run a query.</summary>

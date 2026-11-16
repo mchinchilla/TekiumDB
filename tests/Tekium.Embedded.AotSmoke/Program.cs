@@ -80,6 +80,7 @@ static async Task<int> TypedRoundTripAsync()
             var old = await events.GetAsync(first);
             await using (var writer = await database.BeginWriteAsync())
             {
+                await database.Table<Venue>().InsertAsync(writer, new Venue { Name = "here" });
                 await events.InsertAsync(writer, new EventV2 { Id = second, Title = "written as version 2", At = at, Place = "here", Cost = 12.50m, Mood = Mood.Busy, Attachment = large, Weight = 0.5 });
                 await writer.CommitAsync();
             }
@@ -118,6 +119,37 @@ static async Task<int> TypedRoundTripAsync()
                 || await events.ExplainAsync(EventV2.Fields.TitleLength.EqualTo(3)) is not { Access: TkAccess.IndexScan, Index: "TitleLength" })
             {
                 await Console.Error.WriteLineAsync($"Index round-trip failed: {byDate.Count} by date, {byCost.Count} by cost, {byLength.Count} by length.");
+                return 1;
+            }
+
+            // Restricciones: cada violación nombra la suya y aborta su transacción.
+            var third = Guid.CreateVersion7(at.AddSeconds(2));
+            var violated = new List<string?>();
+            foreach (var attempt in new Func<TkWriteTransaction, ValueTask>[]
+            {
+                writer => events.InsertAsync(writer, new EventV2 { Id = third, Title = "negative", At = at, Cost = -1m }),
+                writer => events.InsertAsync(writer, new EventV2 { Id = third, Title = "written as version 2", At = at }),
+                writer => events.InsertAsync(writer, new EventV2 { Id = third, Title = "nowhere", At = at, Place = "missing" }),
+                async writer => await database.Table<Venue>().DeleteAsync(writer, "here"),
+            })
+            {
+                await using var writer = await database.BeginWriteAsync();
+                try
+                {
+                    await attempt(writer);
+                    await writer.CommitAsync();
+                    violated.Add("none");
+                }
+                catch (TkConstraintException violation)
+                {
+                    violated.Add(violation.Constraint);
+                }
+            }
+
+            if (violated is not ["CostIsNotNegative", "Title", "fk_Place", "fk_Place"]
+                || await events.ExplainAsync(EventV2.Fields.Title.EqualTo("written as version 2")) is not { Access: TkAccess.UniqueLookup, Index: "Title" })
+            {
+                await Console.Error.WriteLineAsync($"Constraint round-trip failed: {string.Join(", ", violated)}.");
                 return 1;
             }
 
