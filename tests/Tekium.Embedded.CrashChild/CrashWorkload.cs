@@ -158,7 +158,8 @@ internal sealed class CrashWorkload
                 continue;
             }
 
-            var value = new byte[random.Next(40, 700)];
+            // Uno de cada ocho valores no cabe en una hoja y va a páginas de overflow.
+            var value = new byte[random.Next(8) == 0 ? random.Next(2000, 9000) : random.Next(40, 700)];
             value.AsSpan().Fill((byte)random.Next(256));
             yield return (key, value);
         }

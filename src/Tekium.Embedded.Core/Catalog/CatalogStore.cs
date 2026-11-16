@@ -19,6 +19,7 @@ internal static class CatalogStore
 
     private const byte TablePrefix = 1;
     private const byte SchemaPrefix = 2;
+    private const int ExpectedSchemaSize = 1024;
 
     /// <summary>The key of the entry that says where the rows of a table are.</summary>
     public static byte[] TableKey(string name)
@@ -51,12 +52,15 @@ internal static class CatalogStore
         {
             var length = await BTree.GetAsync(source, catalogRoot, tableKey, buffer.AsMemory(0, TableInfo.EncodedSize), cancellationToken)
                 .ConfigureAwait(false);
-            return length == BTree.NotFound ? null : TableInfo.Decode(buffer.AsSpan(0, length));
-        }
-        catch (ArgumentException)
-        {
-            // The entry is longer than a table entry can be.
-            throw new InvalidDataException("A table entry in the catalog is damaged.");
+            if (length == BTree.NotFound)
+            {
+                return null;
+            }
+
+            // Longer than a table entry can be: the read says so instead of a length.
+            return length >= 0
+                ? TableInfo.Decode(buffer.AsSpan(0, length))
+                : throw new InvalidDataException("A table entry in the catalog is damaged.");
         }
         finally
         {
@@ -69,18 +73,21 @@ internal static class CatalogStore
         PageNumber catalogRoot,
         ReadOnlyMemory<byte> tableKey,
         byte version,
-        int maxEntrySize,
         CancellationToken cancellationToken)
     {
-        var buffer = ArrayPool<byte>.Shared.Rent(maxEntrySize);
+        // A schema with many columns does not fit in a leaf; the tree stores it in overflow pages.
+        var (buffer, length) = await BTree.GetRentedAsync(
+            source, catalogRoot, SchemaKey(tableKey.Span, version), ExpectedSchemaSize, cancellationToken)
+            .ConfigureAwait(false);
+        if (buffer is null)
+        {
+            throw new InvalidDataException(
+                $"A row was written with schema version {version}, which the catalog does not have.");
+        }
+
         try
         {
-            var length = await BTree.GetAsync(
-                source, catalogRoot, SchemaKey(tableKey.Span, version), buffer.AsMemory(0, maxEntrySize), cancellationToken)
-                .ConfigureAwait(false);
-            return length == BTree.NotFound
-                ? throw new InvalidDataException($"A row was written with schema version {version}, which the catalog does not have.")
-                : TableSchema.Decode(version, buffer.AsSpan(0, length));
+            return TableSchema.Decode(version, buffer.AsSpan(0, length));
         }
         finally
         {

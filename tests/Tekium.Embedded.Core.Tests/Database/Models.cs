@@ -265,3 +265,65 @@ public sealed partial record ContactThatForbidsNull
 
     public string Phone { get; set; } = string.Empty;
 }
+
+/// <summary>
+/// Una tabla de 600 columnas, escrita a mano porque nadie quiere leer 600 propiedades: implementa lo
+/// mismo que el generador. Sólo guarda la clave y la última columna; las demás van nulas.
+/// </summary>
+public sealed class Wide : ITkRow<Wide>
+{
+    private const int ColumnCount = 600;
+
+    private static readonly TkColumn[] AllColumns =
+    [
+        new("Id", TkColumnType.I32, false),
+        .. Enumerable.Range(1, ColumnCount - 2).Select(static i => new TkColumn($"OptionalColumnNumber{i:D4}", TkColumnType.F64, true)),
+        new("Last", TkColumnType.I32, false),
+    ];
+
+    public static string TableName => "wide";
+
+    public static ReadOnlySpan<TkColumn> Columns => AllColumns;
+
+    public static int KeyColumn => 0;
+
+    public int Id { get; set; }
+
+    public int Last { get; set; }
+
+    public static void Write(ref TkRowWriter writer, Wide row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        writer.WriteInt32(row.Id);
+        for (var i = 0; i < ColumnCount - 2; i++)
+        {
+            writer.WriteNull();
+        }
+
+        writer.WriteInt32(row.Last);
+    }
+
+    public static Wide Read(ref TkRowReader reader)
+    {
+        var row = new Wide();
+        while (reader.Next(out var member))
+        {
+            if (member == 0)
+            {
+                row.Id = reader.ReadInt32();
+            }
+            else if (member == ColumnCount - 1)
+            {
+                row.Last = reader.ReadInt32();
+            }
+        }
+
+        return row;
+    }
+
+    public static int WriteKey(Wide row, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        return TkKey.Write(row.Id, destination);
+    }
+}

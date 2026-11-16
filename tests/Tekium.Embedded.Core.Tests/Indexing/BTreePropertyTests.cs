@@ -16,15 +16,17 @@ namespace Tekium.Embedded.Tests.Indexing;
 public sealed class BTreePropertyTests
 {
     // Páginas chicas y valores de hasta 900 bytes: pocas entradas por nodo, árboles profundos,
-    // splits y merges constantes. Caché de 32 páginas para que el desalojo participe.
+    // splits y merges constantes. Uno de cada doce valores es grande y sale a páginas de overflow.
+    // Caché de 32 páginas para que el desalojo participe.
     private static readonly PagerOptions Options = new() { PageSize = PageSize.FromBytes(4096), CachePages = 32 };
 
     private static readonly Comparer<byte[]> ByteOrder =
         Comparer<byte[]>.Create(static (a, b) => a.AsSpan().SequenceCompareTo(b));
 
     private static readonly Gen<Operation> AnyOperation =
-        Gen.Select(Gen.Int[0, 99], Gen.Int[0, 399], Gen.Int[0, 900], Gen.Byte)
-            .Select(static (roll, key, length, fill) => new Operation(KindOf(roll), key, length, fill));
+        Gen.Select(Gen.Int[0, 99], Gen.Int[0, 399], Gen.Int[0, 900], Gen.Byte, Gen.Int[0, 11])
+            .Select(static (roll, key, length, fill, large) =>
+                new Operation(KindOf(roll), key, large == 0 ? 1000 + (length * 12) : length, fill));
 
     private enum Kind
     {
@@ -88,7 +90,11 @@ public sealed class BTreePropertyTests
                     _ => random.Next(100) < (growing ? 70 : 30) ? Kind.Put : Kind.Delete,
                 };
                 await harness.ApplyAsync(
-                    new Operation(kind, random.Next(20_000), random.Next(0, 300), (byte)random.Next(256)));
+                    new Operation(
+                        kind,
+                        random.Next(20_000),
+                        random.Next(40) == 0 ? random.Next(1000, 9000) : random.Next(0, 300),
+                        (byte)random.Next(256)));
 
                 if (i % 100_000 == 99_999)
                 {
@@ -127,7 +133,7 @@ public sealed class BTreePropertyTests
     private sealed class Harness : IAsyncDisposable
     {
         private readonly TestDevice _device = TestDevice.Memory();
-        private readonly byte[] _buffer = new byte[1024];
+        private readonly byte[] _buffer = new byte[16_384];
         private SortedDictionary<byte[], byte[]> _committed = new(ByteOrder);
         private SortedDictionary<byte[], byte[]> _working = new(ByteOrder);
         private Pager _pager = null!;

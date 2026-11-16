@@ -201,18 +201,37 @@ public sealed class Table<T> : TekiumDb.ITable
         return T.Read(ref reader);
     }
 
-    private int Encode(T row, byte version, Span<byte> destination)
+    /// <summary>
+    /// Writes the row into a buffer rented from the shared pool, which the caller returns. Most rows fit
+    /// in the first one; a large row is written again into a larger one.
+    /// </summary>
+    private byte[] Encode(T row, byte version, int expectedSize, out int length)
     {
-        try
+        for (var size = expectedSize; ; size = (int)Math.Min((long)size * 4, BTree.MaxValueSize))
         {
-            var writer = new TkRowWriter(destination, version, T.Columns.Length);
-            T.Write(ref writer, row);
-            return writer.Length;
-        }
-        catch (TkRowTooLargeException)
-        {
-            throw new TkRowTooLargeException(
-                $"Table '{Name}': the row does not fit in {destination.Length} bytes, the most a row with that key may take with this page size.");
+            var buffer = ArrayPool<byte>.Shared.Rent(size);
+            try
+            {
+                var writer = new TkRowWriter(buffer.AsSpan(0, Math.Min(buffer.Length, BTree.MaxValueSize)), version, T.Columns.Length);
+                T.Write(ref writer, row);
+                length = writer.Length;
+                return buffer;
+            }
+            catch (TkRowTooLargeException) when (size < BTree.MaxValueSize)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+            catch (TkRowTooLargeException)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+                throw new TkRowTooLargeException(
+                    $"Table '{Name}': the row is larger than {BTree.MaxValueSize} bytes, the most a row may take.");
+            }
+            catch
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+                throw;
+            }
         }
     }
 
@@ -232,20 +251,17 @@ public sealed class Table<T> : TekiumDb.ITable
         Check(transaction);
         var state = await transaction.TableForWriteAsync(this, cancellationToken).ConfigureAwait(false);
 
-        // One buffer: the key, then the row, then room to read the row already there.
         var tree = _database.Tree;
-        var maxKey = tree.MaxKeySize;
-        var maxEntry = tree.MaxEntrySize;
-        var buffer = ArrayPool<byte>.Shared.Rent(maxKey + (2 * maxEntry));
+        var keyBuffer = ArrayPool<byte>.Shared.Rent(tree.MaxKeySize);
+        byte[]? rowBuffer = null;
         try
         {
-            var keyLength = T.WriteKey(row, buffer.AsSpan(0, maxKey));
-            var key = buffer.AsMemory(0, keyLength);
-            var rowLength = Encode(row, state.Schema!.Version, buffer.AsSpan(maxKey, maxEntry - keyLength));
+            var key = keyBuffer.AsMemory(0, T.WriteKey(row, keyBuffer.AsSpan(0, tree.MaxKeySize)));
+            rowBuffer = Encode(row, state.Schema!.Version, tree.MaxEntrySize, out var rowLength);
             if (mode != WriteMode.Upsert)
             {
-                var existing = await BTree.GetAsync(
-                    transaction.Inner, state.Root, key, buffer.AsMemory(maxKey + maxEntry, maxEntry), cancellationToken)
+                // Only whether it is there matters: with no room for the value, the read says found or not.
+                var existing = await BTree.GetAsync(transaction.Inner, state.Root, key, Memory<byte>.Empty, cancellationToken)
                     .ConfigureAwait(false);
                 if (mode == WriteMode.Update && existing == BTree.NotFound)
                 {
@@ -259,14 +275,18 @@ public sealed class Table<T> : TekiumDb.ITable
             }
 
             state.Root = await tree.PutAsync(
-                transaction.Inner, state.Root, key, buffer.AsMemory(maxKey, rowLength), cancellationToken)
+                transaction.Inner, state.Root, key, rowBuffer.AsMemory(0, rowLength), cancellationToken)
                 .ConfigureAwait(false);
             state.Changed = true;
             return true;
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            ArrayPool<byte>.Shared.Return(keyBuffer);
+            if (rowBuffer is not null)
+            {
+                ArrayPool<byte>.Shared.Return(rowBuffer);
+            }
         }
     }
 
@@ -278,28 +298,43 @@ public sealed class Table<T> : TekiumDb.ITable
         TKey key,
         CancellationToken cancellationToken)
     {
+        // One buffer for the key and, after it, the row: a row that fits in a leaf needs nothing else.
         var tree = _database.Tree;
         var maxKey = tree.MaxKeySize;
         var buffer = ArrayPool<byte>.Shared.Rent(maxKey + tree.MaxEntrySize);
+        byte[]? large = null;
         try
         {
             var keyLength = TkKey.Write(key, _keyType, buffer.AsSpan(0, maxKey));
             var root = await RootAsync(source, catalogRoot, snapshotId, writer, cancellationToken).ConfigureAwait(false);
-            var length = await BTree.GetAsync(
-                source, root, buffer.AsMemory(0, keyLength), buffer.AsMemory(maxKey, tree.MaxEntrySize), cancellationToken)
+            var row = buffer.AsMemory(maxKey, tree.MaxEntrySize);
+            var length = await BTree.GetAsync(source, root, buffer.AsMemory(0, keyLength), row, cancellationToken)
                 .ConfigureAwait(false);
-            if (length == BTree.NotFound)
+            if (BTree.IsTooSmall(length, out var required))
+            {
+                // The row lives in overflow pages: read it again now that its size is known.
+                large = ArrayPool<byte>.Shared.Rent(required);
+                row = large;
+                length = await BTree.GetAsync(source, root, buffer.AsMemory(0, keyLength), row, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (length < 0)
             {
                 return null;
             }
 
-            var row = buffer.AsMemory(maxKey, length);
+            row = row[..length];
             var plan = await PlanAsync(row, source, catalogRoot, writer, cancellationToken).ConfigureAwait(false);
             return Decode(row.Span, plan);
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
+            if (large is not null)
+            {
+                ArrayPool<byte>.Shared.Return(large);
+            }
         }
     }
 
@@ -386,7 +421,7 @@ public sealed class Table<T> : TekiumDb.ITable
             }
 
             var schema = await CatalogStore.LoadSchemaAsync(
-                source, catalogRoot, TableKey, version, _database.Tree.MaxEntrySize, cancellationToken)
+                source, catalogRoot, TableKey, version, cancellationToken)
                 .ConfigureAwait(false);
             var built = ReadPlan.Build(Name, schema, T.Columns, T.KeyColumn);
             Volatile.Write(ref _plans[version], built);

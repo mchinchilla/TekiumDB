@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 5 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices secundarios, consultas por rango, valores grandes ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 5 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices secundarios, consultas por rango ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -43,7 +43,7 @@ Antes de invertir en el resto, la Fase 0.5 midió un motor mínimo contra `Micro
 
 ## Características
 
-Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy-on-write con commit atómico, el catálogo y las tablas tipadas; faltan en el árbol los valores grandes (páginas de overflow) y la compresión de prefijos.
+Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy-on-write con commit atómico, el catálogo y las tablas tipadas, con filas de cualquier tamaño (páginas de overflow); falta en el árbol la compresión de prefijos.
 
 **Almacenamiento**
 
@@ -125,7 +125,7 @@ El generador de código escribe el serializador de `Document` al compilar: no ha
 | Clave | Una propiedad con `[TkKey]`: `Guid`, `int`, `long`, `uint`, `ulong` o `string` |
 | Operaciones | `InsertAsync`, `UpdateAsync`, `UpsertAsync`, `DeleteAsync`, `GetAsync`, `ScanAsync` |
 | Otros atributos | `[TkColumn("nombre")]` guarda la propiedad con otro nombre; `[TkIgnore]` la deja fuera |
-| Límite actual | Una fila tiene que caber en un cuarto de página (unos 2 KiB con páginas de 8 KiB) hasta que existan las páginas de overflow |
+| Tamaño de fila | Hasta 256 MiB. Una fila que no cabe en un cuarto de página se guarda en páginas de overflow, sin que quien la usa lo note |
 
 Lo que sigue es diseño objetivo y todavía no existe:
 

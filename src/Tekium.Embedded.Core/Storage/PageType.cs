@@ -10,4 +10,5 @@ internal enum PageType : byte
     BTreeInternal = 2,
     FreeListTrunk = 3,
     FreeListDirectory = 4,
+    Overflow = 5,
 }

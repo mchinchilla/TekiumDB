@@ -89,14 +89,12 @@ public sealed class BTreeTests
     }
 
     [Fact]
-    public async Task Entries_larger_than_the_inline_limit_are_rejected()
+    public async Task Keys_that_are_empty_or_too_long_are_rejected()
     {
         await using var pager = await NewPagerAsync();
         var tree = new BTree(pager);
         await using var tx = await pager.BeginWriteAsync(Ct);
 
-        await Assert.ThrowsAsync<ArgumentException>(
-            async () => await tree.PutAsync(tx, new byte[] { 1 }, new byte[4096 / 4], Ct));
         await Assert.ThrowsAsync<ArgumentException>(
             async () => await tree.PutAsync(tx, ReadOnlyMemory<byte>.Empty, new byte[1], Ct));
         await Assert.ThrowsAsync<ArgumentException>(
@@ -104,15 +102,16 @@ public sealed class BTreeTests
     }
 
     [Fact]
-    public async Task A_destination_too_small_for_the_value_is_an_error()
+    public async Task A_destination_too_small_for_the_value_says_so()
     {
         await using var pager = await NewPagerAsync();
         var tree = new BTree(pager);
         await using var tx = await pager.BeginWriteAsync(Ct);
         await tree.PutAsync(tx, new byte[] { 1 }, new byte[10], Ct);
 
-        await Assert.ThrowsAsync<ArgumentException>(
-            async () => await BTree.GetAsync(tx, tx.Root, new byte[] { 1 }, new byte[9], Ct));
+        var result = await BTree.GetAsync(tx, tx.Root, new byte[] { 1 }, new byte[9], Ct);
+        Assert.True(BTree.IsTooSmall(result, out var required));
+        Assert.Equal(10, required);
     }
 
     [Theory]

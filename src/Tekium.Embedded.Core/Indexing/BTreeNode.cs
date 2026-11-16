@@ -20,15 +20,24 @@ namespace Tekium.Embedded.Indexing;
 /// ...               free space
 /// cell start        cells, growing down
 /// </code>
-/// Leaf cell: key length u16, value length u16, key, value.
+/// Leaf cell: key length u16, value length u16, key, value. The top bit of the value length says the
+/// value is too large for a leaf: what the cell holds then is an overflow reference, its total length
+/// (u32) and the first page of the chain that holds it (u32).
 /// Internal cell: child u32, key length u16, key. Child <c>i</c> holds the keys below key <c>i</c> and not below
 /// key <c>i - 1</c>; the rightmost child holds the keys not below the last key.
 /// Offsets are relative to the payload: the page header and checksum belong to the pager.
-/// Not yet: prefix compression, overflow pages, zone maps.
+/// Not yet: prefix compression, zone maps.
 /// </remarks>
 internal static class BTreeNode
 {
     public const int HeaderSize = 12;
+
+    /// <summary>What a leaf keeps of a value that lives in overflow pages.</summary>
+    public const int OverflowReferenceSize = 8;
+
+    // A page is at most 32 KiB, so a length stored in a cell never needs the top bit.
+    private const int OverflowFlag = 0x8000;
+    private const int LengthMask = 0x7FFF;
 
     private const byte LeafType = 1;
     private const byte InternalType = 2;
@@ -91,7 +100,29 @@ internal static class BTreeNode
     {
         var cell = CellOffset(page, index);
         offset = cell + LeafCellHeader + ReadU16(page, cell);
-        length = ReadU16(page, cell + 2);
+        length = ReadU16(page, cell + 2) & LengthMask;
+    }
+
+    /// <summary>Whether what the leaf holds for this entry is a reference to overflow pages, not the value.</summary>
+    public static bool IsOverflow(ReadOnlySpan<byte> page, int index) =>
+        (ReadU16(page, CellOffset(page, index) + 2) & OverflowFlag) != 0;
+
+    public static void WriteOverflowReference(Span<byte> destination, int length, PageNumber first)
+    {
+        BinaryPrimitives.WriteUInt32LittleEndian(destination, (uint)length);
+        BinaryPrimitives.WriteUInt32LittleEndian(destination[4..], first.Value);
+    }
+
+    public static void ReadOverflowReference(ReadOnlySpan<byte> reference, out int length, out PageNumber first)
+    {
+        var stored = reference.Length == OverflowReferenceSize ? BinaryPrimitives.ReadUInt32LittleEndian(reference) : 0;
+        if (stored == 0 || stored > int.MaxValue)
+        {
+            throw new InvalidDataException("A B+Tree leaf holds a damaged reference to a large value.");
+        }
+
+        length = (int)stored;
+        first = new PageNumber(BinaryPrimitives.ReadUInt32LittleEndian(reference[4..]));
     }
 
     /// <summary>Child <paramref name="index"/>; an index equal to the count is the rightmost child.</summary>
@@ -143,7 +174,8 @@ internal static class BTreeNode
         return found ? index + 1 : index;
     }
 
-    public static bool TryInsertLeaf(Span<byte> page, int index, ReadOnlySpan<byte> key, ReadOnlySpan<byte> value)
+    public static bool TryInsertLeaf(
+        Span<byte> page, int index, ReadOnlySpan<byte> key, ReadOnlySpan<byte> value, bool overflow = false)
     {
         var size = LeafCellHeader + key.Length + value.Length;
         if (FreeSpace(page) < size + SlotSize)
@@ -153,7 +185,7 @@ internal static class BTreeNode
 
         var cell = CellStart(page) - size;
         WriteU16(page, cell, key.Length);
-        WriteU16(page, cell + 2, value.Length);
+        WriteU16(page, cell + 2, overflow ? value.Length | OverflowFlag : value.Length);
         key.CopyTo(page[(cell + LeafCellHeader)..]);
         value.CopyTo(page[(cell + LeafCellHeader + key.Length)..]);
         InsertSlot(page, index, cell);
@@ -241,7 +273,7 @@ internal static class BTreeNode
         var count = Count(left);
         for (var i = index; i < count; i++)
         {
-            if (!TryInsertLeaf(right, i - index, Key(left, i), LeafValue(left, i)))
+            if (!TryInsertLeaf(right, i - index, Key(left, i), LeafValue(left, i), IsOverflow(left, i)))
             {
                 throw new InvalidDataException("A B+Tree leaf holds more than a page can contain.");
             }
@@ -303,12 +335,12 @@ internal static class BTreeNode
         {
             for (var i = 0; i < leftCount; i++)
             {
-                fits &= TryInsertLeaf(target, i, Key(left, i), LeafValue(left, i));
+                fits &= TryInsertLeaf(target, i, Key(left, i), LeafValue(left, i), IsOverflow(left, i));
             }
 
             for (var i = 0; i < rightCount; i++)
             {
-                fits &= TryInsertLeaf(target, leftCount + i, Key(right, i), LeafValue(right, i));
+                fits &= TryInsertLeaf(target, leftCount + i, Key(right, i), LeafValue(right, i), IsOverflow(right, i));
             }
         }
         else
@@ -337,7 +369,7 @@ internal static class BTreeNode
 
     private static int CellSize(ReadOnlySpan<byte> page, int cell) =>
         IsLeaf(page)
-            ? LeafCellHeader + ReadU16(page, cell) + ReadU16(page, cell + 2)
+            ? LeafCellHeader + ReadU16(page, cell) + (ReadU16(page, cell + 2) & LengthMask)
             : InternalCellHeader + ReadU16(page, cell + 4);
 
     private static void InsertSlot(Span<byte> page, int index, int cell)

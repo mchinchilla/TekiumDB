@@ -1,5 +1,7 @@
 // Copyright (c) Tekium. Licensed under the MIT License.
 
+using System.Buffers;
+using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using Tekium.Embedded.Storage;
 
@@ -17,7 +19,13 @@ internal sealed class BTree
 {
     public const int NotFound = -1;
 
+    /// <summary>The largest value the tree stores. A value that does not fit in a leaf goes to overflow pages.</summary>
+    public const int MaxValueSize = 1 << 28;
+
     private const int MaxDepth = 16;
+
+    // An overflow page starts with the number of the next page of the chain.
+    private const int OverflowHeaderSize = 4;
 
     private readonly Pager _pager;
     private readonly int _maxKeySize;
@@ -28,6 +36,7 @@ internal sealed class BTree
     private readonly PageNumber[] _pathNumbers = new PageNumber[MaxDepth];
     private readonly int[] _pathIndexes = new int[MaxDepth];
     private readonly byte[] _mergeScratch;
+    private readonly byte[] _reference = new byte[BTreeNode.OverflowReferenceSize];
     private byte[] _separator;
 
     // Root of the tree the operation in progress works on. It changes as the path is copied.
@@ -52,7 +61,10 @@ internal sealed class BTree
 
     /// <summary>Copies the value of <paramref name="key"/> in the tree rooted at <paramref name="root"/>.</summary>
     /// <remarks>The caller keeps the pages reachable: it holds a read snapshot or is the writer.</remarks>
-    /// <returns>The value length, or <see cref="NotFound"/>.</returns>
+    /// <returns>
+    /// The value length, or <see cref="NotFound"/>, or a result for which <see cref="IsTooSmall"/> is true
+    /// when <paramref name="destination"/> cannot hold the value.
+    /// </returns>
     public static ValueTask<int> GetAsync(
         IPageSource source,
         PageNumber root,
@@ -74,7 +86,10 @@ internal sealed class BTree
                 var node = page.Span;
                 if (BTreeNode.IsLeaf(node))
                 {
-                    return new ValueTask<int>(ReadLeaf(node, key.Span, destination.Span));
+                    var length = ReadLeaf(node, key.Span, destination.Span, out var chain);
+                    return chain.IsNone
+                        ? new ValueTask<int>(length)
+                        : ReadChainAsync(source, chain, destination[..length], cancellationToken);
                 }
 
                 number = BTreeNode.Child(node, BTreeNode.FindChildIndex(node, key.Span));
@@ -82,6 +97,56 @@ internal sealed class BTree
         }
 
         return new ValueTask<int>(NotFound);
+    }
+
+    /// <summary>Whether a result of <see cref="GetAsync(IPageSource, PageNumber, ReadOnlyMemory{byte}, Memory{byte}, CancellationToken)"/> says the destination was too small.</summary>
+    /// <param name="result">What the read returned.</param>
+    /// <param name="required">How many bytes the value needs.</param>
+    public static bool IsTooSmall(int result, out int required)
+    {
+        required = result < NotFound ? NotFound - result : 0;
+        return result < NotFound;
+    }
+
+    /// <summary>
+    /// Reads a value of any size into a buffer rented from the shared pool, which the caller returns.
+    /// </summary>
+    /// <returns>The buffer and the value length, or no buffer if the key is not there.</returns>
+    public static async ValueTask<(byte[]? Buffer, int Length)> GetRentedAsync(
+        IPageSource source, PageNumber root, ReadOnlyMemory<byte> key, int expectedSize, CancellationToken cancellationToken)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(expectedSize);
+        try
+        {
+            var length = await GetAsync(source, root, key, buffer, cancellationToken).ConfigureAwait(false);
+            if (IsTooSmall(length, out var required))
+            {
+                // Rare: the value lives in overflow pages. Now that its size is known, read it again.
+                ArrayPool<byte>.Shared.Return(buffer);
+                buffer = null;
+                buffer = ArrayPool<byte>.Shared.Rent(required);
+                length = await GetAsync(source, root, key, buffer, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (length < 0)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+                return (null, 0);
+            }
+
+            var result = buffer;
+            buffer = null;
+            return (result, length);
+        }
+        catch
+        {
+            if (buffer is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+
+            throw;
+        }
     }
 
     /// <summary>
@@ -174,10 +239,9 @@ internal sealed class BTree
             throw new ArgumentException($"The key must be between 1 and {_maxKeySize} bytes.", nameof(key));
         }
 
-        if (key.Length + value.Length > _maxEntrySize)
+        if (value.Length > MaxValueSize)
         {
-            throw new ArgumentException(
-                $"Key and value together must not exceed {_maxEntrySize} bytes.", nameof(value));
+            throw new ArgumentException($"A value must not exceed {MaxValueSize} bytes.", nameof(value));
         }
 
         if (_root.IsNone)
@@ -235,7 +299,23 @@ internal sealed class BTree
             depth++;
         }
 
-        InsertIntoLeaf(transaction, depth, key.Span, value.Span, rightmostPath);
+        // If the key exists and its value lives in overflow pages, those pages are no longer reached.
+        if (TryGetOverflow(_pathPages[depth].Span, key.Span, out var oldLength, out var oldFirst))
+        {
+            await FreeChainAsync(transaction, oldFirst, oldLength, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (key.Length + value.Length > _maxEntrySize)
+        {
+            // Too large for a leaf: the value goes to its own pages and the leaf keeps where they start.
+            BTreeNode.WriteOverflowReference(_reference, value.Length, WriteChain(transaction, value.Span));
+            InsertIntoLeaf(transaction, depth, key.Span, _reference, overflow: true, rightmostPath);
+        }
+        else
+        {
+            InsertIntoLeaf(transaction, depth, key.Span, value.Span, overflow: false, rightmostPath);
+        }
+
         return _root;
     }
 
@@ -340,6 +420,11 @@ internal sealed class BTree
             _pathPages[level] = writable;
         }
 
+        if (TryGetOverflow(_pathPages[depth].Span, key.Span, out var oldLength, out var oldFirst))
+        {
+            await FreeChainAsync(transaction, oldFirst, oldLength, cancellationToken).ConfigureAwait(false);
+        }
+
         var leaf = _pathPages[depth].Span;
         BTreeNode.RemoveSlot(leaf, BTreeNode.LowerBound(leaf, key.Span, out _));
 
@@ -394,6 +479,7 @@ internal sealed class BTree
         var indexes = new int[MaxDepth];
         var depth = 0;
         var held = 0;
+        byte[]? large = null;
         try
         {
             if (root.IsNone)
@@ -427,8 +513,31 @@ internal sealed class BTree
                     }
 
                     BTreeNode.LeafValueRange(leaf.Span, index, out var valueOffset, out var valueLength);
-                    yield return new BTreeEntry(
-                        leaf.Slice(keyOffset, keyLength), leaf.Slice(valueOffset, valueLength));
+                    if (!BTreeNode.IsOverflow(leaf.Span, index))
+                    {
+                        yield return new BTreeEntry(
+                            leaf.Slice(keyOffset, keyLength), leaf.Slice(valueOffset, valueLength));
+                        continue;
+                    }
+
+                    // The value lives in pages of its own: it is put together in a buffer that, like the
+                    // page of any other entry, is good until the scan moves on.
+                    BTreeNode.ReadOverflowReference(
+                        leaf.Span.Slice(valueOffset, valueLength), out var length, out var first);
+                    if (large is null || large.Length < length)
+                    {
+                        if (large is not null)
+                        {
+                            ArrayPool<byte>.Shared.Return(large);
+                        }
+
+                        large = null;
+                        large = ArrayPool<byte>.Shared.Rent(length);
+                    }
+
+                    await ReadChainAsync(source, first, large.AsMemory(0, length), cancellationToken)
+                        .ConfigureAwait(false);
+                    yield return new BTreeEntry(leaf.Slice(keyOffset, keyLength), large.AsMemory(0, length));
                 }
 
                 // Climb until some ancestor still has a child to the right, then go down its leftmost path.
@@ -470,11 +579,21 @@ internal sealed class BTree
             }
 
             owned?.Dispose();
+            if (large is not null)
+            {
+                ArrayPool<byte>.Shared.Return(large);
+            }
         }
     }
 
-    private static int ReadLeaf(ReadOnlySpan<byte> leaf, ReadOnlySpan<byte> key, Span<byte> destination)
+    /// <summary>
+    /// Copies the value of <paramref name="key"/> if it is in the leaf itself. If it lives in overflow pages,
+    /// <paramref name="chain"/> says where and the caller reads them into the first bytes of the destination.
+    /// </summary>
+    /// <returns>The value length, <see cref="NotFound"/>, or a too-small result.</returns>
+    private static int ReadLeaf(ReadOnlySpan<byte> leaf, ReadOnlySpan<byte> key, Span<byte> destination, out PageNumber chain)
     {
+        chain = PageNumber.None;
         var index = BTreeNode.LowerBound(leaf, key, out var found);
         if (!found)
         {
@@ -482,15 +601,137 @@ internal sealed class BTree
         }
 
         var value = BTreeNode.LeafValue(leaf, index);
+        if (BTreeNode.IsOverflow(leaf, index))
+        {
+            BTreeNode.ReadOverflowReference(value, out var length, out var first);
+            if (length > destination.Length)
+            {
+                return NotFound - length;
+            }
+
+            chain = first;
+            return length;
+        }
+
         if (value.Length > destination.Length)
         {
-            throw new ArgumentException(
-                $"The value is {value.Length} bytes but the destination holds {destination.Length}.",
-                nameof(destination));
+            return NotFound - value.Length;
         }
 
         value.CopyTo(destination);
         return value.Length;
+    }
+
+    /// <summary>Fills <paramref name="destination"/> with a value from its overflow pages. Returns its length.</summary>
+    private static async ValueTask<int> ReadChainAsync(
+        IPageSource source, PageNumber first, Memory<byte> destination, CancellationToken cancellationToken)
+    {
+        var number = first;
+        var read = 0;
+        while (read < destination.Length)
+        {
+            if (number.IsNone)
+            {
+                throw new InvalidDataException("The overflow pages of a value end before the value does.");
+            }
+
+            if (!source.TryPin(number, out var page))
+            {
+                page = await source.PinAsync(number, cancellationToken).ConfigureAwait(false);
+            }
+
+            using (page)
+            {
+                var data = OverflowData(page, number);
+                var count = Math.Min(data.Length, destination.Length - read);
+                data[..count].CopyTo(destination.Span[read..]);
+                read += count;
+                number = NextInChain(page);
+            }
+        }
+
+        return read;
+    }
+
+    /// <summary>The bytes of the value in one overflow page, after checking that it is one.</summary>
+    private static ReadOnlySpan<byte> OverflowData(in PageLease page, PageNumber number) =>
+        page.Type == PageType.Overflow
+            ? page.Span[OverflowHeaderSize..]
+            : throw new InvalidDataException(
+                $"Page {number.Value} should hold part of a large value but is a {page.Type} page.");
+
+    private static PageNumber NextInChain(in PageLease page) =>
+        new(BinaryPrimitives.ReadUInt32LittleEndian(page.Span));
+
+    private static bool TryGetOverflow(ReadOnlySpan<byte> leaf, ReadOnlySpan<byte> key, out int length, out PageNumber first)
+    {
+        var index = BTreeNode.LowerBound(leaf, key, out var found);
+        if (found && BTreeNode.IsOverflow(leaf, index))
+        {
+            BTreeNode.ReadOverflowReference(BTreeNode.LeafValue(leaf, index), out length, out first);
+            return true;
+        }
+
+        length = 0;
+        first = PageNumber.None;
+        return false;
+    }
+
+    /// <summary>
+    /// Puts a value in pages of its own, each starting with the number of the next one, and returns the first.
+    /// </summary>
+    private static PageNumber WriteChain(WriteTransaction transaction, ReadOnlySpan<byte> value)
+    {
+        var first = PageNumber.None;
+        Span<byte> previous = default;
+        while (!value.IsEmpty)
+        {
+            var page = transaction.Allocate(PageType.Overflow, out var number).Span;
+            if (first.IsNone)
+            {
+                first = number;
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(previous, number.Value);
+            }
+
+            var count = Math.Min(value.Length, page.Length - OverflowHeaderSize);
+            value[..count].CopyTo(page[OverflowHeaderSize..]);
+            value = value[count..];
+            previous = page;
+        }
+
+        return first;
+    }
+
+    /// <summary>Frees the overflow pages of a value that the tree no longer reaches.</summary>
+    private static async ValueTask FreeChainAsync(
+        WriteTransaction transaction, PageNumber first, int length, CancellationToken cancellationToken)
+    {
+        var number = first;
+        for (var remaining = length; remaining > 0;)
+        {
+            if (number.IsNone)
+            {
+                throw new InvalidDataException("The overflow pages of a value end before the value does.");
+            }
+
+            if (!transaction.TryPin(number, out var page))
+            {
+                page = await transaction.PinAsync(number, cancellationToken).ConfigureAwait(false);
+            }
+
+            PageNumber next;
+            using (page)
+            {
+                remaining -= OverflowData(page, number).Length;
+                next = NextInChain(page);
+            }
+
+            transaction.Free(number);
+            number = next;
+        }
     }
 
     private static async ValueTask<int> GetSlowAsync(
@@ -505,16 +746,20 @@ internal sealed class BTree
             using var page = await source.PinAsync(number, cancellationToken).ConfigureAwait(false);
             if (BTreeNode.IsLeaf(page.Span))
             {
-                return ReadLeaf(page.Span, key.Span, destination.Span);
+                var length = ReadLeaf(page.Span, key.Span, destination.Span, out var chain);
+                return chain.IsNone
+                    ? length
+                    : await ReadChainAsync(source, chain, destination[..length], cancellationToken).ConfigureAwait(false);
             }
 
             number = BTreeNode.Child(page.Span, BTreeNode.FindChildIndex(page.Span, key.Span));
         }
     }
 
-    private static bool TryInsertLeaf(Span<byte> leaf, int index, ReadOnlySpan<byte> key, ReadOnlySpan<byte> value)
+    private static bool TryInsertLeaf(
+        Span<byte> leaf, int index, ReadOnlySpan<byte> key, ReadOnlySpan<byte> value, bool overflow)
     {
-        if (BTreeNode.TryInsertLeaf(leaf, index, key, value))
+        if (BTreeNode.TryInsertLeaf(leaf, index, key, value, overflow))
         {
             return true;
         }
@@ -525,7 +770,7 @@ internal sealed class BTree
         }
 
         BTreeNode.Compact(leaf);
-        return BTreeNode.TryInsertLeaf(leaf, index, key, value);
+        return BTreeNode.TryInsertLeaf(leaf, index, key, value, overflow);
     }
 
     /// <summary>
@@ -607,14 +852,19 @@ internal sealed class BTree
     }
 
     private void InsertIntoLeaf(
-        WriteTransaction transaction, int depth, ReadOnlySpan<byte> key, ReadOnlySpan<byte> value, bool rightmostPath)
+        WriteTransaction transaction,
+        int depth,
+        ReadOnlySpan<byte> key,
+        ReadOnlySpan<byte> value,
+        bool overflow,
+        bool rightmostPath)
     {
         var leaf = _pathPages[depth].Span;
         var index = BTreeNode.LowerBound(leaf, key, out var found);
         if (found)
         {
             BTreeNode.LeafValueRange(leaf, index, out var offset, out var length);
-            if (length == value.Length)
+            if (length == value.Length && BTreeNode.IsOverflow(leaf, index) == overflow)
             {
                 value.CopyTo(leaf[offset..]);
                 return;
@@ -623,7 +873,7 @@ internal sealed class BTree
             BTreeNode.RemoveSlot(leaf, index);
         }
 
-        if (TryInsertLeaf(leaf, index, key, value))
+        if (TryInsertLeaf(leaf, index, key, value, overflow))
         {
             return;
         }
@@ -634,7 +884,7 @@ internal sealed class BTree
         if (rightmostPath && index == BTreeNode.Count(leaf))
         {
             // Append: split 100/0. The full leaf stays full and the new key starts the next one.
-            Insert(right, 0, key, value);
+            Insert(right, 0, key, value, overflow);
             key.CopyTo(_separator);
             separatorLength = key.Length;
         }
@@ -644,11 +894,11 @@ internal sealed class BTree
             BTreeNode.SplitLeaf(leaf, right, splitAt);
             if (index <= splitAt)
             {
-                Insert(leaf, index, key, value);
+                Insert(leaf, index, key, value, overflow);
             }
             else
             {
-                Insert(right, index - splitAt, key, value);
+                Insert(right, index - splitAt, key, value, overflow);
             }
 
             var first = BTreeNode.Key(right, 0);
@@ -658,9 +908,9 @@ internal sealed class BTree
 
         InsertIntoParent(transaction, depth - 1, separatorLength, rightNumber, rightmostPath);
 
-        static void Insert(Span<byte> node, int at, ReadOnlySpan<byte> key, ReadOnlySpan<byte> value)
+        static void Insert(Span<byte> node, int at, ReadOnlySpan<byte> key, ReadOnlySpan<byte> value, bool overflow)
         {
-            if (!TryInsertLeaf(node, at, key, value))
+            if (!TryInsertLeaf(node, at, key, value, overflow))
             {
                 throw new InvalidDataException("A B+Tree leaf has no room for an entry after being split.");
             }

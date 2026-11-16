@@ -305,16 +305,23 @@ public abstract class PagerTests : DeviceBackedTests
             sum += ReadOnce(pager, number);
         }
 
-        var before = GC.GetAllocatedBytesForCurrentThread();
-        for (var i = 0; i < 10_000; i++)
+        // Un GC disparado por otra prueba hace que el contador del hilo salte unos kilobytes aunque aquí
+        // no se asigne nada, así que se mide varias veces: una asignación por lectura aparecería en todas
+        // (10 000 lecturas, al menos 240 000 bytes); el salto de un GC, sólo en alguna.
+        var allocated = long.MaxValue;
+        for (var attempt = 0; attempt < 5; attempt++)
         {
-            sum += ReadOnce(pager, number);
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < 10_000; i++)
+            {
+                sum += ReadOnce(pager, number);
+            }
+
+            allocated = Math.Min(allocated, GC.GetAllocatedBytesForCurrentThread() - before);
         }
 
-        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
-
         Assert.Equal(0, allocated);
-        Assert.Equal(10_100 * 0x44, sum);
+        Assert.Equal(50_100 * 0x44, sum);
 
         static int ReadOnce(Pager pager, PageNumber number)
         {

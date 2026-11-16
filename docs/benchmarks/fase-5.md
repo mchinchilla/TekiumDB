@@ -47,7 +47,7 @@ Se reproduce con `dotnet run -c Release --project tests/Tekium.Embedded.Benchmar
 
 ## Qué no cubre
 
-- **Filas grandes.** Una fila tiene que caber en un cuarto de página: unos 2 KiB con páginas de 8 KiB. Pasarse lanza `TkRowTooLargeException`. Las páginas de overflow del plan siguen sin hacerse y son lo primero que va a pedir un uso real. El mismo límite acota el esquema: del orden de cien columnas por tabla con páginas de 8 KiB.
+- **Filas grandes.** Resuelto después de cerrar la fase: ver [páginas de overflow](overflow.md). Ni las filas ni los esquemas tienen ya el límite de un cuarto de página.
 - **Claves.** Sólo `Guid`, `int`, `long`, `uint`, `ulong` y `string`, de una columna. La codificación ordenada de todos los tipos es de la Fase 6. La cadena vacía no puede ser clave.
 - **Consultas.** Sólo por clave y recorrido completo. Los rangos y los índices secundarios son de la Fase 6 en adelante.
 - **Borrar una tabla, o las versiones de esquema que ya no usa ninguna fila.** No hay operación para eso.

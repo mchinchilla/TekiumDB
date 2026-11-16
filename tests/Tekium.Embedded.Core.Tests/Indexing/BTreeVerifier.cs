@@ -33,6 +33,7 @@ internal static class BTreeVerifier
             bool leaf;
             byte[][] keys;
             PageNumber[] children;
+            var chains = new List<(int Length, PageNumber First)>();
             using (var page = await source.PinAsync(number, cancellationToken))
             {
                 var node = page.Span;
@@ -43,6 +44,11 @@ internal static class BTreeVerifier
                 for (var i = 0; i < count; i++)
                 {
                     keys[i] = BTreeNode.Key(node, i).ToArray();
+                    if (leaf && BTreeNode.IsOverflow(node, i))
+                    {
+                        BTreeNode.ReadOverflowReference(BTreeNode.LeafValue(node, i), out var length, out var first);
+                        chains.Add((length, first));
+                    }
                 }
 
                 children = new PageNumber[leaf ? 0 : count + 1];
@@ -68,6 +74,23 @@ internal static class BTreeVerifier
                 Assert.True(
                     upper is null || keys[i].AsSpan().SequenceCompareTo(upper) < 0,
                     $"Page {number.Value}: key {i} is at or above the range its parent gives it.");
+            }
+
+            // Las páginas de overflow de cada valor grande: exactamente las que su longitud pide, todas de
+            // ese tipo, y ninguna compartida.
+            foreach (var (length, first) in chains)
+            {
+                var next = first;
+                for (var remaining = length; remaining > 0;)
+                {
+                    Assert.False(next.IsNone, $"Page {number.Value}: a large value has fewer pages than its length needs.");
+                    Assert.True(visited.Add(next.Value), $"Overflow page {next.Value} is reachable twice.");
+                    using var overflow = await source.PinAsync(next, cancellationToken);
+                    Assert.Equal(PageType.Overflow, overflow.Type);
+                    remaining -= overflow.Span.Length - 4;
+                    next = new PageNumber(System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(overflow.Span));
+                    Assert.True(remaining > 0 || next.IsNone, $"Page {number.Value}: a large value has more pages than its length needs.");
+                }
             }
 
             if (leaf)

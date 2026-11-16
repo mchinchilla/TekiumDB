@@ -209,11 +209,6 @@ public abstract class TableTests : DatabaseTests
             async () => await notes.InsertAsync(writer, new Note { Slug = "a", Body = null! }, Ct));
         Assert.Equal("Body", missing.ParamName);
 
-        // Hasta que existan las páginas de overflow, una fila tiene que caber en un cuarto de página.
-        var tooLarge = await Assert.ThrowsAsync<TkRowTooLargeException>(
-            async () => await notes.InsertAsync(writer, new Note { Slug = "big", Body = new string('x', 5000) }, Ct));
-        Assert.Contains("notes", tooLarge.Message, StringComparison.Ordinal);
-
         // Texto que no es Unicode válido no se guarda a medias.
         await Assert.ThrowsAnyAsync<ArgumentException>(
             async () => await notes.InsertAsync(writer, new Note { Slug = "bad", Body = "\ud800" }, Ct));
@@ -227,6 +222,93 @@ public abstract class TableTests : DatabaseTests
         await writer.CommitAsync(Ct);
         Assert.Equal("b", (await notes.GetAsync("a", Ct))!.Body);
         await AssertNoLeaksAsync(database);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("large rows")]
+    public async Task Rows_far_larger_than_a_page_are_stored_replaced_and_deleted_like_any_other(string? password)
+    {
+        var device = NewDevice();
+        var body = string.Concat(Enumerable.Range(0, 60_000).Select(static i => (char)('a' + (i % 26)))) + " ñ \U0001F600";
+        var attachment = new byte[700_000];
+        new Random(8).NextBytes(attachment);
+        await using (var database = await OpenAsync(device, password))
+        {
+            var notes = database.Table<Note>();
+            await using (var writer = await database.BeginWriteAsync(Ct))
+            {
+                await notes.InsertAsync(writer, new Note { Slug = "small", Body = "s" }, Ct);
+                await notes.InsertAsync(writer, new Note { Slug = "large", Body = body, Attachment = attachment }, Ct);
+                await notes.InsertAsync(writer, new Note { Slug = "medium", Body = body[..3000] }, Ct);
+                await Assert.ThrowsAsync<TkDuplicateKeyException>(
+                    async () => await notes.InsertAsync(writer, new Note { Slug = "large", Body = "again" }, Ct));
+                await writer.CommitAsync(Ct);
+            }
+
+            await AssertNoLeaksAsync(database);
+        }
+
+        await using var reopened = await OpenAsync(device, password);
+        var reread = reopened.Table<Note>();
+        var large = await reread.GetAsync("large", Ct);
+        Assert.Equal(body, large!.Body);
+        Assert.Equal(attachment, large.Attachment);
+        var all = await ToListAsync(reread.ScanAsync(Ct));
+        Assert.Equal(["large", "medium", "small"], all.Select(static note => note.Slug));
+        Assert.Equal(body, all[0].Body);
+        Assert.Equal(attachment, all[0].Attachment);
+
+        var before = reopened.Pager.Current.PageCount;
+        await using (var writer = await reopened.BeginWriteAsync(Ct))
+        {
+            Assert.True(await reread.UpdateAsync(writer, new Note { Slug = "large", Body = "now small" }, Ct));
+            Assert.True(await reread.UpdateAsync(writer, new Note { Slug = "small", Body = body }, Ct));
+            Assert.True(await reread.DeleteAsync(writer, "medium", Ct));
+            await writer.CommitAsync(Ct);
+        }
+
+        Assert.Equal("now small", (await reread.GetAsync("large", Ct))!.Body);
+        Assert.Equal(body, (await reread.GetAsync("small", Ct))!.Body);
+        await AssertNoLeaksAsync(reopened);
+
+        // Reescribir la fila grande una y otra vez deja de hacer crecer el archivo: copy-on-write necesita
+        // sitio para la copia nueva mientras la anterior sigue reservada, pero lo liberado se reutiliza.
+        uint settled = 0;
+        for (var i = 0; i < 12; i++)
+        {
+            await using (var writer = await reopened.BeginWriteAsync(Ct))
+            {
+                await reread.UpsertAsync(writer, new Note { Slug = "large", Body = body, Attachment = attachment }, Ct);
+                await writer.CommitAsync(Ct);
+            }
+
+            settled = i == 5 ? reopened.Pager.Current.PageCount : settled;
+        }
+
+        Assert.True(
+            reopened.Pager.Current.PageCount <= settled + 8,
+            $"Rewriting a large row kept growing the file: {before} pages, then {settled}, then {reopened.Pager.Current.PageCount}.");
+        Assert.True(settled <= before * 4, $"A rewritten large row takes too much room: {before} pages became {settled}.");
+        await AssertNoLeaksAsync(reopened);
+    }
+
+    [Fact]
+    public async Task A_table_with_more_columns_than_fit_in_a_page_works()
+    {
+        var device = NewDevice();
+        await using (var database = await OpenAsync(device))
+        {
+            await using var writer = await database.BeginWriteAsync(Ct);
+            await database.Table<Wide>().InsertAsync(writer, new Wide { Id = 7, Last = 123 }, Ct);
+            await writer.CommitAsync(Ct);
+        }
+
+        // El esquema solo ya pasa de una página de 4 KiB; al reabrir se lee del catálogo.
+        await using var reopened = await OpenAsync(device);
+        var row = await reopened.Table<Wide>().GetAsync(7, Ct);
+        Assert.Equal((7, 123), (row!.Id, row.Last));
+        await AssertNoLeaksAsync(reopened);
     }
 
     [Fact]

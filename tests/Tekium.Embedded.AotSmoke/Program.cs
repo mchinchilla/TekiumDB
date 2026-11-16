@@ -58,6 +58,10 @@ static async Task<int> TypedRoundTripAsync()
     var at = new DateTimeOffset(2026, 11, 16, 9, 30, 0, TimeSpan.FromHours(-6));
     var first = Guid.CreateVersion7(at);
     var second = Guid.CreateVersion7(at.AddSeconds(1));
+
+    // Mucho más grande que una página: la fila sale a páginas de overflow.
+    var large = new byte[200_000];
+    new Random(11).NextBytes(large);
     try
     {
         var database = await TekiumDb.OpenAsync(options);
@@ -75,7 +79,7 @@ static async Task<int> TypedRoundTripAsync()
             var old = await events.GetAsync(first);
             await using (var writer = await database.BeginWriteAsync())
             {
-                await events.InsertAsync(writer, new EventV2 { Id = second, Title = "written as version 2", At = at, Place = "here", Cost = 12.50m, Mood = Mood.Busy, Attachment = [1, 2, 3], Weight = 0.5 });
+                await events.InsertAsync(writer, new EventV2 { Id = second, Title = "written as version 2", At = at, Place = "here", Cost = 12.50m, Mood = Mood.Busy, Attachment = large, Weight = 0.5 });
                 await writer.CommitAsync();
             }
 
@@ -89,7 +93,8 @@ static async Task<int> TypedRoundTripAsync()
             if (old is { Title: "written as version 1", Place: null, Cost: null, Mood: Mood.Calm, Weight: 0 }
                 && old.At == at
                 && old.At.Offset == at.Offset
-                && recent is { Place: "here", Cost: 12.50m, Mood: Mood.Busy, Attachment: [1, 2, 3], Weight: 0.5 }
+                && recent is { Place: "here", Cost: 12.50m, Mood: Mood.Busy, Weight: 0.5 }
+                && recent.Attachment.AsSpan().SequenceEqual(large)
                 && titles is ["written as version 1", "written as version 2"]
                 && database.IsEncrypted)
             {

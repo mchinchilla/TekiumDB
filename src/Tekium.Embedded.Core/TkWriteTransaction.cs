@@ -76,7 +76,7 @@ public sealed class TkWriteTransaction : TkTransaction
         {
             state.Root = found.Root;
             state.Schema = await CatalogStore.LoadSchemaAsync(
-                _inner, _inner.Root, tableKey, found.SchemaVersion, Database.Tree.MaxEntrySize, cancellationToken)
+                _inner, _inner.Root, tableKey, found.SchemaVersion, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -114,13 +114,6 @@ public sealed class TkWriteTransaction : TkTransaction
 
             var schema = new TableSchema((byte)version, T.Columns.ToArray(), T.KeyColumn);
             var size = schema.EncodedSize();
-            var limit = Database.Tree.MaxEntrySize - CatalogStore.SchemaKey(table.TableKey, schema.Version).Length;
-            if (size > limit)
-            {
-                throw new TkSchemaException(
-                    $"Table '{table.Name}': its columns take {size} bytes in the catalog and the limit is {limit}.");
-            }
-
             var buffer = ArrayPool<byte>.Shared.Rent(size);
             try
             {
