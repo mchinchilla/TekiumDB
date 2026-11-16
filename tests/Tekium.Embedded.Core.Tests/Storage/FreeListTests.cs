@@ -4,7 +4,7 @@ using Tekium.Embedded.Storage;
 
 namespace Tekium.Embedded.Tests.Storage;
 
-public sealed class FreeListTests
+public abstract class FreeListTests : DeviceBackedTests
 {
     private static readonly PagerOptions Options = new() { PageSize = PageSize.FromBytes(4096), CachePages = 32 };
 
@@ -13,7 +13,7 @@ public sealed class FreeListTests
     [Fact]
     public async Task Rewriting_the_same_pages_forever_does_not_grow_the_file()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
         var live = await AllocateAsync(pager, 50, fill: 1);
 
@@ -37,7 +37,7 @@ public sealed class FreeListTests
     public async Task Pages_freed_by_a_transaction_are_not_reused_by_the_next_one()
     {
         // El árbol anterior debe quedar intacto en disco un commit más: es el respaldo del slot de raíz alterno.
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
         var first = await AllocateAsync(pager, 10, fill: 1);
         var afterFirst = pager.Current.PageCount;
@@ -56,7 +56,7 @@ public sealed class FreeListTests
     [Fact]
     public async Task A_live_reader_keeps_every_page_of_its_snapshot_until_it_is_disposed()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
         var original = await AllocateAsync(pager, 40, fill: 7);
         var live = original;
@@ -84,7 +84,7 @@ public sealed class FreeListTests
     [Fact]
     public async Task The_free_list_survives_reopening()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         PageNumber[] live;
         uint settled;
         int freeBefore;
@@ -116,7 +116,7 @@ public sealed class FreeListTests
     [Fact]
     public async Task A_rolled_back_transaction_returns_the_free_pages_it_took()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
         var live = await AllocateAsync(pager, 20, fill: 1);
         for (var round = 0; round < 5; round++)
@@ -150,7 +150,7 @@ public sealed class FreeListTests
         // Modelo: página viva -> byte que contiene. Si la free-list entregara una página viva
         // (o una retenida por un lector), su contenido cambiaría y la verificación lo vería.
         var random = new Random(seed);
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         var model = new Dictionary<uint, byte>();
         var pager = await Pager.CreateAsync(device, Options, Ct);
         ReadSnapshot? reader = null;
@@ -297,4 +297,16 @@ public sealed class FreeListTests
                 $"Page {number} holds {page.Span[0]} but the model expects {fill}.");
         }
     }
+}
+
+public sealed class FreeListTests_File : FreeListTests
+{
+    // Estas pruebas hacen miles de commits. El flush real a disco (milisegundos cada uno, y ya cubierto
+    // por las pruebas del pager y del dispositivo) las llevaría a medio minuto sin probar nada nuevo.
+    private protected override TestDevice CreateDevice() => TestDevice.File(flushToDisk: false);
+}
+
+public sealed class FreeListTests_Memory : FreeListTests
+{
+    private protected override TestDevice CreateDevice() => TestDevice.Memory();
 }

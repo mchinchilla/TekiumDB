@@ -4,7 +4,11 @@ using Tekium.Embedded.Storage;
 
 namespace Tekium.Embedded.Tests.Storage;
 
-public sealed class PagerTests
+/// <summary>
+/// Las pruebas del pager. Son abstractas respecto al dispositivo: las clases derivadas las corren
+/// contra un archivo y contra memoria sin cambiar una línea (criterio de salida de la Fase 1.5).
+/// </summary>
+public abstract class PagerTests : DeviceBackedTests
 {
     private static readonly PagerOptions Options = new() { PageSize = PageSize.Default, CachePages = 64 };
 
@@ -16,7 +20,7 @@ public sealed class PagerTests
     [InlineData(32768)]
     public async Task Create_then_open_recovers_the_page_size_and_an_empty_snapshot(int pageSize)
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using (await Pager.CreateAsync(device, Options with { PageSize = PageSize.FromBytes(pageSize) }, Ct))
         {
         }
@@ -34,7 +38,7 @@ public sealed class PagerTests
     [Fact]
     public async Task Create_refuses_a_device_that_already_has_data()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await device.WriteAsync(0, new byte[1], Ct);
 
         await Assert.ThrowsAsync<IOException>(async () => await Pager.CreateAsync(device, Options, Ct));
@@ -43,7 +47,7 @@ public sealed class PagerTests
     [Fact]
     public async Task Open_rejects_a_file_that_is_not_a_database()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await device.WriteAsync(0, new byte[16384], Ct);
 
         await Assert.ThrowsAsync<InvalidDataException>(async () => await Pager.OpenAsync(device, Options, Ct));
@@ -52,7 +56,7 @@ public sealed class PagerTests
     [Fact]
     public async Task Committed_pages_survive_reopening()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         PageNumber number;
         await using (var pager = await Pager.CreateAsync(device, Options, Ct))
         {
@@ -73,7 +77,7 @@ public sealed class PagerTests
     [Fact]
     public async Task Each_commit_flushes_twice_pages_first_then_the_root_slot()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
         var flushesBefore = device.FlushCount;
 
@@ -98,7 +102,7 @@ public sealed class PagerTests
     [Fact]
     public async Task A_transaction_disposed_without_commit_rolls_back()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
         var before = pager.Current;
 
@@ -116,7 +120,7 @@ public sealed class PagerTests
     [Fact]
     public async Task A_commit_that_fails_before_the_root_slot_leaves_the_previous_state()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
         var first = await CommitOnePageAsync(pager, 0x11);
         var committed = pager.Current;
@@ -141,7 +145,7 @@ public sealed class PagerTests
     [Fact]
     public async Task The_writer_keeps_working_after_a_failed_commit()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
         device.FailOnWriteNumber = device.WriteCount + 1;
         await using (var tx = await pager.BeginWriteAsync(Ct))
@@ -162,7 +166,7 @@ public sealed class PagerTests
     [Fact]
     public async Task A_corrupt_newest_root_slot_falls_back_to_the_previous_commit()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         Snapshot previous;
         PageNumber previousRoot;
         await using (var pager = await Pager.CreateAsync(device, Options, Ct))
@@ -170,7 +174,7 @@ public sealed class PagerTests
             previousRoot = await CommitOnePageAsync(pager, 0x11);
             previous = pager.Current;
             await CommitOnePageAsync(pager, 0x22);
-            device.RawBytes[(int)FileHeader.SlotOffset(pager.Current.TransactionId, PageSize.Default) + 3] ^= 0xFF;
+            await device.CorruptAsync(FileHeader.SlotOffset(pager.Current.TransactionId, PageSize.Default) + 3);
         }
 
         await using var reopened = await Pager.OpenAsync(device, Options, Ct);
@@ -183,14 +187,14 @@ public sealed class PagerTests
     [Fact]
     public async Task Open_fails_cleanly_when_no_root_slot_is_valid()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using (var pager = await Pager.CreateAsync(device, Options, Ct))
         {
             await CommitOnePageAsync(pager, 0x11);
         }
 
-        device.RawBytes[(int)FileHeader.SlotOffset(new TransactionId(0), PageSize.Default)] ^= 0xFF;
-        device.RawBytes[(int)FileHeader.SlotOffset(new TransactionId(1), PageSize.Default)] ^= 0xFF;
+        await device.CorruptAsync(FileHeader.SlotOffset(new TransactionId(0), PageSize.Default));
+        await device.CorruptAsync(FileHeader.SlotOffset(new TransactionId(1), PageSize.Default));
 
         await Assert.ThrowsAsync<InvalidDataException>(async () => await Pager.OpenAsync(device, Options, Ct));
     }
@@ -198,21 +202,21 @@ public sealed class PagerTests
     [Fact]
     public async Task A_page_damaged_on_disk_is_reported_by_number_instead_of_returned()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         PageNumber number;
         await using (var pager = await Pager.CreateAsync(device, Options, Ct))
         {
             number = await CommitOnePageAsync(pager, 0x11);
         }
 
-        device.RawBytes[(int)(number.Value * 8192) + 1000] ^= 0x01;
+        await device.CorruptAsync((number.Value * 8192L) + 1000, mask: 0x01);
         await using var reopened = await Pager.OpenAsync(device, Options, Ct);
 
         var error = await Assert.ThrowsAsync<InvalidDataException>(async () => await reopened.PinAsync(number, Ct));
         Assert.Contains(number.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), error.Message, StringComparison.Ordinal);
 
         // El fallo no deja el marco tomado: reparar el byte permite leer la página.
-        device.RawBytes[(int)(number.Value * 8192) + 1000] ^= 0x01;
+        await device.CorruptAsync((number.Value * 8192L) + 1000, mask: 0x01);
         using var page = await reopened.PinAsync(number, Ct);
         Assert.Equal(0x11, page.Span[0]);
     }
@@ -220,7 +224,7 @@ public sealed class PagerTests
     [Fact]
     public async Task A_second_writer_waits_until_the_first_one_finishes()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
         var first = await pager.BeginWriteAsync(Ct);
 
@@ -235,7 +239,7 @@ public sealed class PagerTests
     [Fact]
     public async Task Reading_a_page_outside_the_database_is_reported_as_corruption()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
 
         await Assert.ThrowsAsync<InvalidDataException>(async () => await pager.PinAsync(new PageNumber(99), Ct));
@@ -245,7 +249,7 @@ public sealed class PagerTests
     [Fact]
     public async Task A_finished_transaction_cannot_be_used_again()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
         var tx = await pager.BeginWriteAsync(Ct);
         await tx.CommitAsync(Ct);
@@ -258,13 +262,13 @@ public sealed class PagerTests
     [Fact]
     public async Task Pages_written_in_one_transaction_are_read_back_through_a_cache_far_smaller_than_the_file()
     {
-        await WriteAndReadBackAsync(new InMemoryStorageDevice(), PageSize.FromBytes(4096), pages: 20_000, cachePages: 128);
+        await WriteAndReadBackAsync(NewDevice(), PageSize.FromBytes(4096), pages: 20_000, cachePages: 128);
     }
 
     [Fact]
     public async Task A_cached_page_is_read_without_allocating()
     {
-        var device = new InMemoryStorageDevice();
+        var device = NewDevice();
         await using var pager = await Pager.CreateAsync(device, Options, Ct);
         var number = await CommitOnePageAsync(pager, 0x44);
         long sum = 0;
@@ -299,26 +303,7 @@ public sealed class PagerTests
         }
     }
 
-    /// <summary>
-    /// Criterio de salida de la Fase 1: un millón de páginas escritas y leídas en un archivo real (4 GiB).
-    /// Explícita por tamaño y duración: <c>dotnet test --filter-method "*million*" -explicit on</c>.
-    /// </summary>
-    [Fact(Explicit = true)]
-    public async Task One_million_pages_are_written_and_read_back_from_a_real_file()
-    {
-        var path = Path.Combine(Path.GetTempPath(), $"tekium-million-{Guid.NewGuid():N}.tkdb");
-        try
-        {
-            await WriteAndReadBackAsync(
-                FileStorageDevice.Open(path, FileMode.CreateNew), PageSize.FromBytes(4096), pages: 1_000_000, cachePages: 4096);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
-
-    private static async Task WriteAndReadBackAsync(IStorageDevice device, PageSize pageSize, int pages, int cachePages)
+    internal static async Task WriteAndReadBackAsync(IStorageDevice device, PageSize pageSize, int pages, int cachePages)
     {
         var options = new PagerOptions { PageSize = pageSize, CachePages = cachePages };
         var numbers = new PageNumber[pages];
@@ -364,5 +349,37 @@ public sealed class PagerTests
         tx.Root = number;
         await tx.CommitAsync(Ct);
         return number;
+    }
+}
+
+public sealed class PagerTests_File : PagerTests
+{
+    private protected override TestDevice CreateDevice() => TestDevice.File();
+}
+
+public sealed class PagerTests_Memory : PagerTests
+{
+    private protected override TestDevice CreateDevice() => TestDevice.Memory();
+}
+
+public sealed class PagerScaleTests
+{
+    /// <summary>
+    /// Criterio de salida de la Fase 1: un millón de páginas escritas y leídas en un archivo real (4 GiB).
+    /// Explícita por tamaño y duración: <c>dotnet test --filter-method "*million*" -explicit on</c>.
+    /// </summary>
+    [Fact(Explicit = true)]
+    public async Task One_million_pages_are_written_and_read_back_from_a_real_file()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"tekium-million-{Guid.NewGuid():N}.tkdb");
+        try
+        {
+            await PagerTests.WriteAndReadBackAsync(
+                FileStorageDevice.Open(path, FileMode.CreateNew), PageSize.FromBytes(4096), pages: 1_000_000, cachePages: 4096);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 }

@@ -13,6 +13,7 @@ Base de datos embebida de archivo único (`.tkdb`), cifrada, async-first, B+Tree
   - Conceptos del dominio como objetos de valor (`PageSize`, `PageNumber`, `TransactionId`…): `readonly struct`, inmutables, sin estado inválido representable (incluido `default`), validados en la frontera.
   - Los patrones tácticos no pueden costar asignaciones en el camino caliente: nada de clases-entidad por página ni por fila.
 - **Layout:** `/src` código de producto, `/tests` pruebas unitarias, benchmarks y el smoke de AOT. El núcleo no referencia a `.Sql`, `.Linq` ni `.Vectors`, y no lleva dependencias NuGet en runtime.
+- **Pruebas sobre los dos dispositivos.** Lo que toque el pager se prueba heredando de `DeviceBackedTests`, que lo corre sobre archivo y sobre memoria. Un dispositivo nuevo hereda `StorageDeviceContractTests`. Las pruebas usan `TestDevice` (envuelve el dispositivo real, inyecta fallos y daña bytes), nunca un doble escrito aparte.
 - Código, identificadores y XML docs en inglés. Cada `.cs` lleva la cabecera de licencia (la exige `IDE0073`). Toda dependencia debe ser compatible con MIT.
 
 ## Comandos

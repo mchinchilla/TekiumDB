@@ -51,7 +51,7 @@ Todas forman parte del diseño. Hoy existen el pager y, en versión mínima, el 
 - B+Tree copy-on-write con MVCC: un escritor, lectores ilimitados sin bloqueo, cada uno sobre su snapshot inmutable.
 - Commit atómico por slots de raíz alternados. Si el proceso muere a mitad de un commit, la base abre en el estado anterior, sin recuperación.
 - Compresión Zstandard por página, opcional.
-- Modo en memoria para pruebas.
+- Modo en memoria para pruebas (el dispositivo ya existe; falta exponerlo en la API pública).
 
 **Seguridad**
 
@@ -140,7 +140,7 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 0 | Esqueleto de la solución, CI, BenchmarkDotNet, analizadores | Hecho en macOS; pendiente confirmar CI en Linux y Windows |
 | 0.5 | Spike de validación: pager y B+Tree mínimos medidos contra SQLite | Hecho: [dentro del criterio](docs/benchmarks/fase-0.5.md), se sigue |
 | 1 | Capa de E/S y pager: caché de páginas, checksums, free-list | Hecho en macOS: [criterio cumplido](docs/benchmarks/fase-1.md); pendiente confirmar CI en Linux y Windows |
-| 1.5 | Modo en memoria | Pendiente |
+| 1.5 | Modo en memoria | Hecho en macOS: las pruebas del pager corren sobre archivo y sobre memoria; pendiente confirmar CI en Linux y Windows |
 | 2 | Cifrado por página y derivación de clave | Pendiente |
 | 3 | B+Tree copy-on-write | Pendiente |
 | 4 | MVCC, transacciones y commit atómico | Pendiente |

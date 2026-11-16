@@ -123,7 +123,7 @@ public sealed class BTreeTests
     {
         var random = new Random(seed);
         var model = new SortedDictionary<byte[], byte[]>(ByteOrder);
-        var device = new InMemoryStorageDevice();
+        var device = TestDevice.Memory();
         var buffer = new byte[1024];
 
         await using (var pager = await Pager.CreateAsync(device, SmallPages, Ct))
@@ -266,7 +266,7 @@ public sealed class BTreeTests
     {
         // Split 100/0: 20 000 filas de 122 bytes (con su slot) caben en ~304 hojas de 8 KiB.
         // Con splits 50/50 serían cerca de 600.
-        var device = new InMemoryStorageDevice();
+        var device = TestDevice.Memory();
         await using var pager = await Pager.CreateAsync(device, new PagerOptions { CachePages = 64 }, Ct);
         var tree = new BTree(pager);
         var key = new byte[16];
@@ -389,7 +389,7 @@ public sealed class BTreeTests
     }
 
     private static async Task<Pager> NewPagerAsync() =>
-        await Pager.CreateAsync(new InMemoryStorageDevice(), SmallPages, Ct);
+        await Pager.CreateAsync(TestDevice.Memory(), SmallPages, Ct);
 
     // Entero con signo codificado de forma que el orden de bytes sea el orden numérico.
     private static byte[] Key(int value)
