@@ -1,6 +1,9 @@
 // Copyright (c) Tekium. Licensed under the MIT License.
 
 using System.Buffers;
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using Tekium.Embedded.Security;
 
 namespace Tekium.Embedded.Storage;
 
@@ -15,10 +18,18 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     private const int CommitBufferBytes = 1 << 20;
     private const int MaxSpareBuffers = 1024;
 
+    /// <summary>Transaction ids reserved on disk at a time when encrypting. One header write per this many transactions.</summary>
+    private const ulong ReservationBlock = 1UL << 20;
+
+    /// <summary>Bits of the random distance a session jumps ahead of the ids used before it.</summary>
+    private const int SessionGapBits = 40;
+
     private readonly IStorageDevice _device;
+    private readonly IPageProtector _protector;
+    private readonly PagerOptions _options;
     private readonly PageCache _cache;
     private readonly SemaphoreSlim _writerGate = new(1, 1);
-    private readonly byte[] _slotBuffer = new byte[FileHeader.SlotSize];
+    private readonly byte[] _recordBuffer = new byte[FileHeader.SlotSize];
 
     // State of the single writer, reused from one transaction to the next.
     private readonly Stack<byte[]> _spareBuffers = new();
@@ -26,81 +37,61 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     private readonly List<uint> _freed = [];
     private readonly List<SnapshotState> _retained = [];
     private SnapshotState _current;
+    private int _currentSlot;
+    private ulong _lastIssued;
+    private ulong _reservedThrough;
+    private int _reservationCopy;
+    private bool _sessionReserved;
 
-    private Pager(IStorageDevice device, PageSize pageSize, PagerOptions options, Snapshot current)
+    private Pager(
+        IStorageDevice device, PageSize pageSize, PagerOptions options, IPageProtector protector, Snapshot current, int slot)
     {
         _device = device;
+        _protector = protector;
+        _options = options;
         _cache = new PageCache(options.CachePages);
         _current = new SnapshotState(current);
+        _currentSlot = slot;
+        _lastIssued = current.TransactionId.Value;
         PageSize = pageSize;
         FreeList = FreeList.Empty(pageSize);
     }
 
     public PageSize PageSize { get; }
 
+    /// <summary>Gets a value indicating whether pages are encrypted on disk.</summary>
+    public bool IsEncrypted => _protector.Encrypts;
+
     /// <summary>Gets the latest committed state. To read from it safely, hold a <see cref="BeginRead"/>.</summary>
     public Snapshot Current => Volatile.Read(ref _current).Snapshot;
+
+    /// <summary>Gets the root slot that holds the latest committed state. The next commit writes the other one.</summary>
+    public int CurrentSlot => _currentSlot;
 
     /// <summary>Gets the number of free pages in the file, reusable or not yet.</summary>
     public int FreePageCount => FreeList.Count;
 
     internal FreeList FreeList { get; private set; }
 
-    public static async ValueTask<Pager> CreateAsync(
-        IStorageDevice device, PagerOptions options, CancellationToken cancellationToken)
-    {
-        if (device.Length != 0)
-        {
-            throw new IOException("Cannot create a database over a file that already has data.");
-        }
+    /// <summary>Creates an unencrypted database.</summary>
+    public static ValueTask<Pager> CreateAsync(
+        IStorageDevice device, PagerOptions options, CancellationToken cancellationToken) =>
+        CreateCoreAsync(device, options, null, cancellationToken);
 
-        var initial = new Snapshot(PageNumber.None, FileHeader.MetaPages, new TransactionId(0), PageNumber.None);
-        var meta = new byte[options.PageSize.Bytes * (int)FileHeader.MetaPages];
-        FileHeader.Write(meta, options.PageSize, initial);
-        await device.WriteAsync(0, meta, cancellationToken).ConfigureAwait(false);
-        await device.FlushAsync(cancellationToken).ConfigureAwait(false);
-        return new Pager(device, options.PageSize, options, initial);
-    }
+    /// <summary>Creates a database encrypted with a key derived from <paramref name="password"/>. An empty password means no encryption.</summary>
+    public static ValueTask<Pager> CreateAsync(
+        IStorageDevice device, PagerOptions options, ReadOnlySpan<char> password, CancellationToken cancellationToken) =>
+        CreateCoreAsync(device, options, PasswordBytes.From(password), cancellationToken);
 
-    public static async ValueTask<Pager> OpenAsync(
-        IStorageDevice device, PagerOptions options, CancellationToken cancellationToken)
-    {
-        if (device.Length < FileHeader.FixedSize)
-        {
-            throw new InvalidDataException("The file is not a TekiumDB database.");
-        }
+    /// <summary>Opens an unencrypted database.</summary>
+    public static ValueTask<Pager> OpenAsync(
+        IStorageDevice device, PagerOptions options, CancellationToken cancellationToken) =>
+        OpenCoreAsync(device, options, null, cancellationToken);
 
-        var header = ArrayPool<byte>.Shared.Rent(FileHeader.FixedSize * 2);
-        Pager pager;
-        try
-        {
-            var first = header.AsMemory(0, FileHeader.FixedSize);
-            var second = header.AsMemory(FileHeader.FixedSize, FileHeader.FixedSize);
-            await device.ReadAsync(0, first, cancellationToken).ConfigureAwait(false);
-            var pageSize = FileHeader.ReadPageSize(first.Span);
-            if (device.Length < pageSize.Bytes * (long)FileHeader.MetaPages)
-            {
-                throw new InvalidDataException("The database header is truncated.");
-            }
-
-            await device.ReadAsync(pageSize.Bytes, second, cancellationToken).ConfigureAwait(false);
-            var current = FileHeader.ReadCurrentSnapshot(first.Span, second.Span);
-            if (current.PageCount < FileHeader.MetaPages || (long)current.PageCount * pageSize.Bytes > device.Length)
-            {
-                throw new InvalidDataException("The database header points past the end of the file.");
-            }
-
-            pager = new Pager(device, pageSize, options, current);
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(header);
-        }
-
-        pager.FreeList = await FreeList.LoadAsync(pager, pager.PageSize, pager.Current.FreeList, cancellationToken)
-            .ConfigureAwait(false);
-        return pager;
-    }
+    /// <summary>Opens a database, deriving its key from <paramref name="password"/> if it is encrypted.</summary>
+    public static ValueTask<Pager> OpenAsync(
+        IStorageDevice device, PagerOptions options, ReadOnlySpan<char> password, CancellationToken cancellationToken) =>
+        OpenCoreAsync(device, options, PasswordBytes.From(password), cancellationToken);
 
     /// <summary>
     /// Pins the latest committed state. Never blocks and never allocates: while the reader holds it,
@@ -135,31 +126,68 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     public async ValueTask<WriteTransaction> BeginWriteAsync(CancellationToken cancellationToken)
     {
         await _writerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        var state = _current;
-
-        // A page freed by transaction F belongs to every state older than F. It may be reused only when
-        // (a) no reader holds a state older than F, and (b) F is not the latest commit, so that the
-        // previous state stays intact on disk as the fallback of the alternate root slot.
-        var horizon = (long)state.Snapshot.TransactionId.Value - 1;
-        for (var i = _retained.Count - 1; i >= 0; i--)
+        try
         {
-            // A state that is no longer current and has no readers can never get one again.
-            if (_retained[i].Readers == 0)
+            var state = _current;
+
+            // An id is never issued twice, not even after a commit that failed halfway: its pages may
+            // already be on disk, and when encrypting the id is half of the nonce that encrypted them.
+            var id = checked(Math.Max(_lastIssued, state.Snapshot.TransactionId.Value) + 1);
+            if (_protector.Encrypts && (!_sessionReserved || id > _reservedThrough))
             {
-                _retained.RemoveAt(i);
+                id = await ReserveTransactionIdsAsync(id, cancellationToken).ConfigureAwait(false);
             }
-            else
+
+            _lastIssued = id;
+
+            // A page freed by transaction F belongs to every state older than F. It may be reused only when
+            // (a) no reader holds a state older than F, and (b) F is not the latest commit, so that the
+            // previous state stays intact on disk as the fallback of the alternate root slot.
+            var horizon = checked((long)state.Snapshot.TransactionId.Value) - 1;
+            for (var i = _retained.Count - 1; i >= 0; i--)
             {
-                horizon = Math.Min(horizon, (long)_retained[i].Snapshot.TransactionId.Value);
+                // A state that is no longer current and has no readers can never get one again.
+                if (_retained[i].Readers == 0)
+                {
+                    _retained.RemoveAt(i);
+                }
+                else
+                {
+                    horizon = Math.Min(horizon, (long)_retained[i].Snapshot.TransactionId.Value);
+                }
             }
+
+            return new WriteTransaction(this, state.Snapshot, new TransactionId(id), horizon, _dirty, _freed);
+        }
+        catch
+        {
+            _writerGate.Release();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Re-wraps the file key under a new password. Only the header is rewritten, one copy and then the
+    /// other: if it is interrupted in between, the database opens with either password.
+    /// </summary>
+    public ValueTask ChangePasswordAsync(ReadOnlySpan<char> newPassword, CancellationToken cancellationToken)
+    {
+        if (_protector is not AesGcmPageProtector protector)
+        {
+            return ValueTask.FromException(
+                new InvalidOperationException("The database is not encrypted: there is no password to change."));
         }
 
-        return new WriteTransaction(this, state.Snapshot, horizon, _dirty, _freed);
+        // The core takes ownership of the password bytes and wipes them.
+        return newPassword.IsEmpty
+            ? ValueTask.FromException(new ArgumentException("The new password must not be empty.", nameof(newPassword)))
+            : ChangePasswordCoreAsync(protector, PasswordBytes.From(newPassword)!, cancellationToken);
     }
 
     public async ValueTask DisposeAsync()
     {
         _writerGate.Dispose();
+        _protector.Dispose();
         await _device.DisposeAsync().ConfigureAwait(false);
     }
 
@@ -204,7 +232,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         var next = new Snapshot(
             transaction.Root,
             transaction.PageCount,
-            current.TransactionId.Next(),
+            transaction.Id,
             freeList is null ? current.FreeList : freeList.Head);
 
         if (dirty.Count > 0)
@@ -213,12 +241,16 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
             await _device.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        FileHeader.EncodeSlot(_slotBuffer, next);
-        await _device.WriteAsync(FileHeader.SlotOffset(next.TransactionId, PageSize), _slotBuffer, cancellationToken)
+        // The slot that does not hold the current state, whatever the transaction id is.
+        var slot = (_currentSlot + 1) % FileHeader.SlotCount;
+        FileHeader.EncodeSlot(_recordBuffer, next, _protector);
+        await _device.WriteAsync(
+            FileHeader.SlotOffset(slot, PageSize), _recordBuffer.AsMemory(0, FileHeader.SlotSize), cancellationToken)
             .ConfigureAwait(false);
         await _device.FlushAsync(cancellationToken).ConfigureAwait(false);
 
         // Durable. From here on nothing can fail: publish to readers.
+        _currentSlot = slot;
         foreach (var (number, page) in dirty)
         {
             if (_cache.TryClaim(out var frame))
@@ -249,6 +281,152 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         Volatile.Write(ref _current, new SnapshotState(next));
     }
 
+    private static async ValueTask<Pager> CreateCoreAsync(
+        IStorageDevice device, PagerOptions options, PasswordBytes? password, CancellationToken cancellationToken)
+    {
+        using (password)
+        {
+            if (device.Length != 0)
+            {
+                throw new IOException("Cannot create a database over a file that already has data.");
+            }
+
+            var pageBytes = options.PageSize.Bytes;
+            var meta = new byte[pageBytes * (int)FileHeader.MetaPages];
+            FileHeader.WriteFixed(meta, options.PageSize, encrypted: password is not null);
+
+            IPageProtector protector = ChecksumPageProtector.Instance;
+            if (password is not null)
+            {
+                // Checked here so that a bad option is an argument error, not a "corrupt file" one.
+                ArgumentOutOfRangeException.ThrowIfGreaterThan(
+                    options.KeyDerivation.MemoryKiB, KeyEnvelope.MaxMemoryKiB, nameof(options));
+
+                // The key derivation is deliberately expensive: it runs off the caller's thread.
+                protector = await Task.Run(
+                    () =>
+                    {
+                        Span<byte> fileKey = stackalloc byte[AesGcmPageProtector.KeySize];
+                        RandomNumberGenerator.Fill(fileKey);
+                        try
+                        {
+                            var first = meta.AsSpan(0, FileHeader.FixedSize);
+                            KeyEnvelope.Seal(first, password.Span, options.KeyDerivation, fileKey);
+                            FileHeader.CopyKeyEnvelope(first, meta.AsSpan(pageBytes, FileHeader.FixedSize));
+                            return new AesGcmPageProtector(fileKey);
+                        }
+                        finally
+                        {
+                            CryptographicOperations.ZeroMemory(fileKey);
+                        }
+                    },
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            try
+            {
+                var initial = new Snapshot(PageNumber.None, FileHeader.MetaPages, new TransactionId(0), PageNumber.None);
+                FileHeader.EncodeSlot(meta.AsSpan((int)FileHeader.SlotOffset(0, options.PageSize)), initial, protector);
+                await device.WriteAsync(0, meta, cancellationToken).ConfigureAwait(false);
+                await device.FlushAsync(cancellationToken).ConfigureAwait(false);
+                return new Pager(device, options.PageSize, options, protector, initial, slot: 0);
+            }
+            catch
+            {
+                protector.Dispose();
+                throw;
+            }
+        }
+    }
+
+    private static async ValueTask<Pager> OpenCoreAsync(
+        IStorageDevice device, PagerOptions options, PasswordBytes? password, CancellationToken cancellationToken)
+    {
+        using (password)
+        {
+            if (device.Length < FileHeader.FixedSize)
+            {
+                throw new InvalidDataException("The file is not a TekiumDB database.");
+            }
+
+            var first = new byte[FileHeader.FixedSize];
+            var second = new byte[FileHeader.FixedSize];
+            await device.ReadAsync(0, first, cancellationToken).ConfigureAwait(false);
+            var pageSize = FileHeader.ReadPageSize(first);
+            if (device.Length < pageSize.Bytes * (long)FileHeader.MetaPages)
+            {
+                throw new InvalidDataException("The database header is truncated.");
+            }
+
+            await device.ReadAsync(pageSize.Bytes, second, cancellationToken).ConfigureAwait(false);
+
+            IPageProtector protector = ChecksumPageProtector.Instance;
+            if (FileHeader.IsEncrypted(first))
+            {
+                if (password is null)
+                {
+                    throw new CryptographicException("The database is encrypted: a password is required to open it.");
+                }
+
+                protector = await Task.Run(() => Unlock(first, second, password), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else if (password is not null)
+            {
+                throw new CryptographicException("A password was given, but the database is not encrypted.");
+            }
+
+            Pager pager;
+            try
+            {
+                var current = FileHeader.ReadCurrentSnapshot(first, second, protector, out var slot);
+                if (current.PageCount < FileHeader.MetaPages || (long)current.PageCount * pageSize.Bytes > device.Length)
+                {
+                    throw new InvalidDataException("The database header points past the end of the file.");
+                }
+
+                pager = new Pager(device, pageSize, options, protector, current, slot);
+
+                // Take the larger copy as the truth and overwrite the other one first.
+                var reservedFirst = FileHeader.ReadReservation(first, protector);
+                var reservedSecond = FileHeader.ReadReservation(second, protector);
+                pager._reservedThrough = Math.Max(reservedFirst, reservedSecond);
+                pager._reservationCopy = reservedFirst <= reservedSecond ? 0 : 1;
+            }
+            catch
+            {
+                protector.Dispose();
+                throw;
+            }
+
+            pager.FreeList = await FreeList.LoadAsync(pager, pager.PageSize, pager.Current.FreeList, cancellationToken)
+                .ConfigureAwait(false);
+            return pager;
+        }
+    }
+
+    /// <summary>Recovers the file key from either copy of the header.</summary>
+    private static AesGcmPageProtector Unlock(byte[] first, byte[] second, PasswordBytes password)
+    {
+        Span<byte> fileKey = stackalloc byte[AesGcmPageProtector.KeySize];
+        try
+        {
+            // The copies differ only if a password change was interrupted between writing one and the other.
+            if (KeyEnvelope.TryOpen(first, password.Span, fileKey)
+                || (!FileHeader.HaveSameKeyEnvelope(first, second) && KeyEnvelope.TryOpen(second, password.Span, fileKey)))
+            {
+                return new AesGcmPageProtector(fileKey);
+            }
+
+            throw new CryptographicException(
+                "The password is incorrect, or the key data in the database header is damaged.");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(fileKey);
+        }
+    }
+
     private static long GrowTo(long length, long required)
     {
         length = Math.Max(length, 1);
@@ -260,7 +438,76 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         return length;
     }
 
-    /// <summary>Seals and writes the pages in file order, one write per run of consecutive pages.</summary>
+    /// <summary>
+    /// Makes sure the next ids this session issues were never used before, and records on disk how far
+    /// they may go before any page is written with them.
+    /// </summary>
+    /// <remarks>
+    /// Copy-on-write alone does not make (page, transaction id) unique. A commit that crashes after
+    /// writing pages leaves ciphertext on disk under an id that was never committed, and the next session
+    /// would start from the same id. And two copies of one file, each written on its own, would both
+    /// continue from the same id with the same key. So: ids are reserved durably in blocks, a session
+    /// never starts inside a block an earlier session reserved, and it starts a random distance ahead,
+    /// which keeps independent copies of the file apart.
+    /// </remarks>
+    private async ValueTask<ulong> ReserveTransactionIdsAsync(ulong id, CancellationToken cancellationToken)
+    {
+        if (!_sessionReserved)
+        {
+            Span<byte> random = stackalloc byte[sizeof(ulong)];
+            RandomNumberGenerator.Fill(random);
+            var gap = BinaryPrimitives.ReadUInt64LittleEndian(random) >> (64 - SessionGapBits);
+            id = checked(Math.Max(id, _reservedThrough + 1) + gap);
+        }
+
+        var through = checked(id + ReservationBlock);
+        FileHeader.EncodeReservation(_recordBuffer, through, _protector);
+        await _device.WriteAsync(
+            FileHeader.ReservationOffsetOf(_reservationCopy, PageSize),
+            _recordBuffer.AsMemory(0, FileHeader.ReservationSize),
+            cancellationToken).ConfigureAwait(false);
+        await _device.FlushAsync(cancellationToken).ConfigureAwait(false);
+
+        _reservationCopy ^= 1;
+        _reservedThrough = through;
+        _sessionReserved = true;
+        return id;
+    }
+
+    private async ValueTask ChangePasswordCoreAsync(
+        AesGcmPageProtector protector, PasswordBytes password, CancellationToken cancellationToken)
+    {
+        using (password)
+        {
+            // The writer slot: commits write the same pages of the file.
+            await _writerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                var sealedHeader = new byte[FileHeader.FixedSize];
+                var copy = new byte[FileHeader.FixedSize];
+                await _device.ReadAsync(0, sealedHeader, cancellationToken).ConfigureAwait(false);
+                await Task.Run(
+                    () => protector.SealEnvelope(sealedHeader, password.Span, _options.KeyDerivation),
+                    cancellationToken).ConfigureAwait(false);
+
+                for (var page = 0; page < FileHeader.MetaPages; page++)
+                {
+                    // Each copy keeps its own root slot and reservation; only the envelope changes.
+                    var offset = page * (long)PageSize.Bytes;
+                    await _device.ReadAsync(offset, copy, cancellationToken).ConfigureAwait(false);
+                    FileHeader.CopyKeyEnvelope(sealedHeader, copy);
+                    await _device.WriteAsync(offset, copy, cancellationToken).ConfigureAwait(false);
+                    await _device.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                _writerGate.Release();
+            }
+        }
+    }
+
+    /// <summary>Protects and writes the pages in file order, one write per run of consecutive pages.</summary>
     private async ValueTask WritePagesAsync(
         Dictionary<uint, byte[]> pages, uint pageCount, CancellationToken cancellationToken)
     {
@@ -286,9 +533,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
                 var filled = 0;
                 do
                 {
-                    var page = pages[numbers[i]];
-                    PageLayout.Seal(page);
-                    page.CopyTo(buffer.AsSpan(filled * pageBytes));
+                    _protector.Protect(pages[numbers[i]], buffer.AsSpan(filled * pageBytes, pageBytes));
                     filled++;
                     i++;
                 }
@@ -318,7 +563,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
             frame.Buffer ??= GC.AllocateUninitializedArray<byte>(PageSize.Bytes);
             await _device.ReadAsync(number.Value * (long)PageSize.Bytes, frame.Buffer, cancellationToken)
                 .ConfigureAwait(false);
-            PageLayout.Verify(frame.Buffer, number);
+            _protector.Unprotect(frame.Buffer, number);
         }
         catch
         {

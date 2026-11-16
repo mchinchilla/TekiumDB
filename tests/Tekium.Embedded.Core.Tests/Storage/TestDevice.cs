@@ -36,6 +36,9 @@ internal sealed class TestDevice : IStorageDevice
     /// <summary>Gets or sets the ordinal of the write (1-based, counted from creation) that throws.</summary>
     public int? FailOnWriteNumber { get; set; }
 
+    /// <summary>Gets or sets an observer of every write that reaches the storage: offset and bytes.</summary>
+    public Action<long, ReadOnlyMemory<byte>>? OnWrite { get; set; }
+
     private IStorageDevice Inner => _inner ??= _open();
 
     /// <summary>Un dispositivo en memoria del motor. Los datos viven mientras viva este objeto.</summary>
@@ -59,9 +62,13 @@ internal sealed class TestDevice : IStorageDevice
     public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> source, CancellationToken cancellationToken)
     {
         WriteCount++;
-        return WriteCount == FailOnWriteNumber
-            ? ValueTask.FromException(new IOException("Injected write failure."))
-            : Inner.WriteAsync(offset, source, cancellationToken);
+        if (WriteCount == FailOnWriteNumber)
+        {
+            return ValueTask.FromException(new IOException("Injected write failure."));
+        }
+
+        OnWrite?.Invoke(offset, source);
+        return Inner.WriteAsync(offset, source, cancellationToken);
     }
 
     public void SetLength(long length) => Inner.SetLength(length);
@@ -80,6 +87,26 @@ internal sealed class TestDevice : IStorageDevice
         one[0] ^= mask;
         await Inner.WriteAsync(offset, one, CancellationToken.None);
     }
+
+    /// <summary>Lee todo el contenido tal como está almacenado.</summary>
+    public async ValueTask<byte[]> ReadAllAsync()
+    {
+        var bytes = new byte[Inner.Length];
+        await Inner.ReadAsync(0, bytes, CancellationToken.None);
+        return bytes;
+    }
+
+    /// <summary>Una copia independiente en memoria: lo que pasa cuando alguien copia el archivo.</summary>
+    public async ValueTask<TestDevice> CloneAsync()
+    {
+        var clone = Memory();
+        await clone.Inner.WriteAsync(0, await ReadAllAsync(), CancellationToken.None);
+        return clone;
+    }
+
+    /// <summary>Sobrescribe bytes directamente en el almacenamiento, sin pasar por el motor.</summary>
+    public ValueTask OverwriteAsync(long offset, ReadOnlyMemory<byte> bytes) =>
+        Inner.WriteAsync(offset, bytes, CancellationToken.None);
 
     public async ValueTask DisposeAsync()
     {

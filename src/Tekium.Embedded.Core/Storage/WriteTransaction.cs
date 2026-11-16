@@ -15,7 +15,7 @@ internal sealed class WriteTransaction : IPageSource, IAsyncDisposable
     private bool _disposed;
 
     internal WriteTransaction(
-        Pager pager, Snapshot basis, long horizon, Dictionary<uint, byte[]> dirty, List<uint> freed)
+        Pager pager, Snapshot basis, TransactionId id, long horizon, Dictionary<uint, byte[]> dirty, List<uint> freed)
     {
         _pager = pager;
         _horizon = horizon;
@@ -24,7 +24,7 @@ internal sealed class WriteTransaction : IPageSource, IAsyncDisposable
         Freed = freed;
         PageCount = basis.PageCount;
         Root = basis.Root;
-        Id = basis.TransactionId.Next();
+        Id = id;
     }
 
     public TransactionId Id { get; }

@@ -90,8 +90,8 @@ public abstract class PagerTests : DeviceBackedTests
     public async Task Consecutive_commits_write_their_root_slots_to_different_pages()
     {
         // Una escritura rota del slot nuevo no puede alcanzar al slot vigente: viven en páginas distintas.
-        var first = FileHeader.SlotOffset(new TransactionId(4), PageSize.Default);
-        var second = FileHeader.SlotOffset(new TransactionId(5), PageSize.Default);
+        var first = FileHeader.SlotOffset(0, PageSize.Default);
+        var second = FileHeader.SlotOffset(1, PageSize.Default);
 
         Assert.NotEqual(first / 8192, second / 8192);
         Assert.InRange(first, 0, (2 * 8192) - FileHeader.SlotSize);
@@ -174,7 +174,7 @@ public abstract class PagerTests : DeviceBackedTests
             previousRoot = await CommitOnePageAsync(pager, 0x11);
             previous = pager.Current;
             await CommitOnePageAsync(pager, 0x22);
-            await device.CorruptAsync(FileHeader.SlotOffset(pager.Current.TransactionId, PageSize.Default) + 3);
+            await device.CorruptAsync(FileHeader.SlotOffset(pager.CurrentSlot, PageSize.Default) + 3);
         }
 
         await using var reopened = await Pager.OpenAsync(device, Options, Ct);
@@ -193,8 +193,8 @@ public abstract class PagerTests : DeviceBackedTests
             await CommitOnePageAsync(pager, 0x11);
         }
 
-        await device.CorruptAsync(FileHeader.SlotOffset(new TransactionId(0), PageSize.Default));
-        await device.CorruptAsync(FileHeader.SlotOffset(new TransactionId(1), PageSize.Default));
+        await device.CorruptAsync(FileHeader.SlotOffset(0, PageSize.Default));
+        await device.CorruptAsync(FileHeader.SlotOffset(1, PageSize.Default));
 
         await Assert.ThrowsAsync<InvalidDataException>(async () => await Pager.OpenAsync(device, Options, Ct));
     }
@@ -219,6 +219,33 @@ public abstract class PagerTests : DeviceBackedTests
         await device.CorruptAsync((number.Value * 8192L) + 1000, mask: 0x01);
         using var page = await reopened.PinAsync(number, Ct);
         Assert.Equal(0x11, page.Span[0]);
+    }
+
+    [Fact]
+    public async Task A_transaction_id_is_never_issued_twice_even_after_failures_and_rollbacks()
+    {
+        var device = NewDevice();
+        await using var pager = await Pager.CreateAsync(device, Options, Ct);
+        var seen = new HashSet<ulong>();
+
+        for (var i = 0; i < 12; i++)
+        {
+            await using var tx = await pager.BeginWriteAsync(Ct);
+            Assert.True(seen.Add(tx.Id.Value), "A transaction id was issued twice.");
+            Assert.True(tx.Id.Value > pager.Current.TransactionId.Value);
+            tx.Allocate(PageType.BTreeLeaf, out var number);
+            tx.Root = number;
+            if (i % 3 == 0)
+            {
+                device.FailOnWriteNumber = device.WriteCount + 2;
+                await Assert.ThrowsAsync<IOException>(async () => await tx.CommitAsync(Ct));
+            }
+            else if (i % 3 == 1)
+            {
+                await tx.CommitAsync(Ct);
+                Assert.Equal(tx.Id, pager.Current.TransactionId);
+            }
+        }
     }
 
     [Fact]
