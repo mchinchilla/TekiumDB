@@ -83,12 +83,18 @@ public sealed class TkField<TRow, TValue>
     /// <returns>The condition.</returns>
     public TkFilter<TRow> IsNotNull() => Filter(Lowest, true, Highest, false);
 
+    /// <summary>Accepts the rows whose encoded value is from <paramref name="low"/> up to, not including, <paramref name="high"/>.</summary>
+    internal TkFilter<TRow> Span(byte[]? low, byte[]? high) =>
+        Filter(low is null ? Lowest : Present(low), true, high is null ? Highest : Present(high), false);
+
     private byte[]? Lowest => _isNullable ? FirstPresent : null;
 
     private byte[]? Highest => _isNullable ? PastPresent : null;
 
     private TkFilter<TRow> Filter(byte[]? low, bool lowInclusive, byte[]? high, bool highInclusive) =>
         new(_ordinal, new KeyRange(low, lowInclusive, high, highInclusive));
+
+    private byte[] Present(byte[] encoded) => _isNullable ? [.. FirstPresent, .. encoded] : encoded;
 
     private byte[] Encode(TValue value)
     {

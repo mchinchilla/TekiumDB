@@ -183,9 +183,19 @@ static async Task<int> TypedRoundTripAsync()
                     counted += row.Title.StartsWith("loaded", StringComparison.Ordinal) ? 1 : 0;
                 }
 
+                // Lo creado en un lapso es un rango de la clave UUID v7: las filas cargadas son una por minuto.
+                var created = EventV2.Fields.Id.CreatedBetween(at.AddMinutes(1), at.AddMinutes(100));
+                var inSpan = 0;
+                await foreach (var row in events.QueryAsync(created))
+                {
+                    inSpan += row.Title.StartsWith("loaded", StringComparison.Ordinal) ? 1 : 0;
+                }
+
                 // Un rango de fechas de varias ventanas va por el zone map; dentro de una, por el índice.
                 if (loaded != 3000
                     || counted != 3000
+                    || inSpan != 100
+                    || await events.ExplainAsync(created) is not { Access: TkAccess.KeyRange }
                     || await events.ExplainAsync(EventV2.Fields.At.GreaterThan(at.AddHours(1))) is not { Access: TkAccess.ZoneScan, Index: "zone_At" }
                     || await events.ExplainAsync(EventV2.Fields.At.EqualTo(at)) is not { Access: TkAccess.IndexScan, Index: "At" }
                     || await events.ExplainAsync(EventV2.Fields.Title.EqualTo("loaded 7")) is not { Access: TkAccess.UniqueLookup }

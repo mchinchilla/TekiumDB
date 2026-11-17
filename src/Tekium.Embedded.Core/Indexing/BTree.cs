@@ -402,15 +402,18 @@ internal sealed class BTree
             await FreeChainAsync(transaction, oldFirst, oldLength, cancellationToken).ConfigureAwait(false);
         }
 
-        if (key.Length + value.Length > _maxEntrySize)
+        var large = key.Length + value.Length > _maxEntrySize;
+        if (large)
         {
             // Too large for a leaf: the value goes to its own pages and the leaf keeps where they start.
             BTreeNode.WriteOverflowReference(_reference, value.Length, WriteChain(transaction, value.Span));
-            InsertIntoLeaf(transaction, depth, key.Span, _reference, overflow: true, rightmostPath);
         }
-        else
+
+        var stored = large ? _reference : value;
+        if (!CanSpill(depth, key.Span, stored.Length)
+            || !await SpillAsync(transaction, depth, key, stored, large, cancellationToken).ConfigureAwait(false))
         {
-            InsertIntoLeaf(transaction, depth, key.Span, value.Span, overflow: false, rightmostPath);
+            InsertIntoLeaf(transaction, depth, key.Span, stored.Span, large, rightmostPath);
         }
 
         return _root;
@@ -1028,6 +1031,129 @@ internal sealed class BTree
         transaction.Free(_pathNumbers[0]);
     }
 
+    /// <summary>
+    /// Whether a full leaf is the one just before the last leaf of the tree, and the key is new. Keys that
+    /// grow with time but arrive slightly out of order (UUID v7 of the same millisecond) land there.
+    /// </summary>
+    private bool CanSpill(int depth, ReadOnlySpan<byte> key, int storedLength)
+    {
+        if (depth == 0)
+        {
+            return false;
+        }
+
+        var leaf = _pathPages[depth].Span;
+        if (BTreeNode.FreeSpace(leaf) + BTreeNode.Garbage(leaf) >= BTreeNode.LeafEntrySize(key.Length, storedLength)
+            || _pathIndexes[depth - 1] != BTreeNode.Count(_pathPages[depth - 1].Span) - 1)
+        {
+            return false;
+        }
+
+        for (var level = 0; level < depth - 1; level++)
+        {
+            if (_pathIndexes[level] != BTreeNode.Count(_pathPages[level].Span))
+            {
+                return false;
+            }
+        }
+
+        _ = BTreeNode.LowerBound(leaf, key, out var found);
+        return !found;
+    }
+
+    /// <summary>
+    /// Makes room in a full leaf by passing its highest entries to the last leaf of the tree, instead of
+    /// splitting it in two halves that would never fill up. Returns whether the entry was inserted.
+    /// </summary>
+    private async ValueTask<bool> SpillAsync(
+        WriteTransaction transaction,
+        int depth,
+        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> stored,
+        bool overflow,
+        CancellationToken cancellationToken)
+    {
+        var slot = _pathIndexes[depth - 1];
+        var number = BTreeNode.Child(_pathPages[depth - 1].Span, slot + 1);
+        if (!transaction.TryGetWritable(number, out var sibling))
+        {
+            if (!transaction.TryPin(number, out var committed))
+            {
+                committed = await transaction.PinAsync(number, cancellationToken).ConfigureAwait(false);
+            }
+
+            using (committed)
+            {
+                sibling = transaction.CopyForWrite(committed, number, out number);
+            }
+
+            BTreeNode.SetChild(_pathPages[depth - 1].Span, slot + 1, number);
+        }
+
+        return TrySpill(_pathPages[depth].Span, sibling.Span, _pathPages[depth - 1].Span, slot, key.Span, stored.Span, overflow);
+    }
+
+    private static bool TrySpill(
+        Span<byte> leaf,
+        Span<byte> sibling,
+        Span<byte> parent,
+        int slot,
+        ReadOnlySpan<byte> key,
+        ReadOnlySpan<byte> stored,
+        bool overflow)
+    {
+        // Decide everything before moving anything: the fewest entries from the end that make room.
+        var index = BTreeNode.LowerBound(leaf, key, out _);
+        var needed = BTreeNode.LeafEntrySize(key.Length, stored.Length);
+        var room = BTreeNode.FreeSpace(leaf) + BTreeNode.Garbage(leaf);
+        var count = BTreeNode.Count(leaf);
+        var from = count;
+        var moved = 0;
+        while (room + moved < needed && from > index)
+        {
+            from--;
+            moved += BTreeNode.LeafEntrySize(BTreeNode.Key(leaf, from).Length, BTreeNode.LeafValue(leaf, from).Length);
+        }
+
+        // Nothing above the key is left to move and it still does not fit: the key goes across too.
+        var across = room + moved < needed;
+        var first = across ? key : BTreeNode.Key(leaf, from);
+        if (moved + (across ? needed : 0) > BTreeNode.FreeSpace(sibling) + BTreeNode.Garbage(sibling)
+            || first.Length - BTreeNode.Key(parent, slot).Length > BTreeNode.FreeSpace(parent) + BTreeNode.Garbage(parent))
+        {
+            return false;
+        }
+
+        // The key between the two leaves becomes the first one of the sibling.
+        var left = BTreeNode.Child(parent, slot);
+        BTreeNode.RemoveSlot(parent, slot);
+        if (!BTreeNode.TryInsertInternal(parent, slot, left, first))
+        {
+            BTreeNode.Compact(parent);
+            if (!BTreeNode.TryInsertInternal(parent, slot, left, first))
+            {
+                throw new InvalidDataException("A B+Tree node has no room for a key it had room for.");
+            }
+        }
+
+        for (var i = count - 1; i >= from; i--)
+        {
+            Insert(sibling, 0, BTreeNode.Key(leaf, i), BTreeNode.LeafValue(leaf, i), BTreeNode.IsOverflow(leaf, i));
+            BTreeNode.RemoveSlot(leaf, i);
+        }
+
+        Insert(across ? sibling : leaf, across ? 0 : index, key, stored, overflow);
+        return true;
+
+        static void Insert(Span<byte> node, int at, ReadOnlySpan<byte> key, ReadOnlySpan<byte> value, bool overflow)
+        {
+            if (!TryInsertLeaf(node, at, key, value, overflow))
+            {
+                throw new InvalidDataException("A B+Tree leaf has no room for an entry it had room for.");
+            }
+        }
+    }
+
     private void InsertIntoLeaf(
         WriteTransaction transaction,
         int depth,
@@ -1067,9 +1193,17 @@ internal sealed class BTree
         }
         else
         {
+            // Near the end of the last leaf (UUID v7 of one millisecond arrive in any order): split where
+            // the key goes. What is before it will not grow any more, so it stays, nearly full.
             var splitAt = BTreeNode.ChooseSplitIndex(leaf);
+            var atKey = rightmostPath && index > splitAt;
+            if (atKey)
+            {
+                splitAt = index;
+            }
+
             BTreeNode.SplitLeaf(leaf, right, splitAt);
-            if (index <= splitAt)
+            if (index <= splitAt && !atKey)
             {
                 Insert(leaf, index, key, value, overflow);
             }

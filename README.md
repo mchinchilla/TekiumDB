@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 7 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices especializados ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 8 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay búsqueda vectorial ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -61,7 +61,7 @@ Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy
 **Índices**
 
 - Temporal: zone maps por ventana de tiempo y split 100/0 para series de tiempo (ya existe: ver [Fechas y series de tiempo](#fechas-y-series-de-tiempo)).
-- UUID v7: localidad temporal aprovechada, hojas llenas en inserción secuencial.
+- UUID v7: las hojas quedan llenas aunque los de un mismo milisegundo lleguen en desorden, y "todo lo creado entre X e Y" es un rango de la clave (ya existe: ver [Claves UUID v7](#claves-uuid-v7)).
 - Vectorial: HNSW persistido, con métricas coseno, L2 y producto interno, y cuantización `int8` opcional.
 - Secundarios genéricos, sobre expresiones y parciales (ya existen: ver [Índices y consultas](#índices-y-consultas)).
 
@@ -200,6 +200,29 @@ await foreach (var reading in readings.QueryAsync(lastDay))    // ZoneScan, "zon
 | Precisión | Ventanas enteras: lee algunas filas de más y las descarta | Exacta |
 
 Se pueden declarar los dos sobre la misma columna: el planificador usa el zone map para rangos de varias ventanas y el índice para una fecha exacta o un rango corto. `BucketMinutes` cambia el tamaño de la ventana. Borrar filas no achica las ventanas.
+
+### Claves UUID v7
+
+Un UUID v7 empieza por el milisegundo en que se creó. Con `Guid.CreateVersion7()` como clave, las filas quedan en orden de creación y "todo lo creado entre X e Y" es un rango de la clave: no hace falta una columna de fecha ni un índice sobre ella.
+
+```csharp
+var lastHour = Order.Fields.Id.CreatedBetween(now.AddHours(-1), now);   // KeyRange
+await foreach (var order in orders.QueryAsync(lastHour))
+    Process(order);
+
+Order.Fields.Id.CreatedSince(monday);      // desde un momento
+Order.Fields.Id.CreatedBefore(monday);     // antes de un momento
+```
+
+Los momentos se cortan al milisegundo, igual que el UUID. Las mismas condiciones sirven sobre cualquier columna `Guid` (por su índice, si lo tiene); en una columna que no guarde UUID v7 comparan los mismos bytes, que no dicen nada de la fecha.
+
+| Cómo llegan las claves | Ocupación de las hojas |
+| --- | ---: |
+| UUID v7, hasta unas decenas por milisegundo (lo normal: uno por operación) | 96–99 % |
+| UUID v7 creados en un bucle cerrado, cientos por milisegundo | 68 %, como al azar: dentro de un milisegundo no tienen orden |
+| UUID v4 | 69 %, y seis veces más lento de insertar |
+
+Para cargar muchas filas de una vez, la [carga masiva](#carga-masiva) ordena las claves y deja las hojas llenas vengan como vengan. Detalle en [docs/benchmarks/fase-8.md](docs/benchmarks/fase-8.md).
 
 ### Restricciones
 
@@ -349,7 +372,8 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 6.7 | Change feed post-commit | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.7.md); Windows sin verificar |
 | 6.8 | Carga masiva: el B+Tree construido de abajo hacia arriba | Hecho en macOS y Linux, [medido](docs/benchmarks/fase-6.8.md): 3× más rápida que insertar fila por fila en una sola transacción, con la novena parte de la memoria; no es el orden de magnitud del criterio, que sólo se alcanza contra insertar con un commit cada mil filas (58×) |
 | 7 | Índice temporal con zone maps y split 100/0 | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-7.md); Windows sin verificar |
-| 8 – 9 | Índices UUID v7 y vectorial HNSW | Pendiente |
+| 8 | Índice UUID v7 | Hecho en macOS y Linux, [medido](docs/benchmarks/fase-8.md): criterio cumplido con hasta decenas de UUID por milisegundo (96–99 % de ocupación); no con cientos por milisegundo creados en un bucle (68 %); Windows sin verificar |
+| 9 | Índice vectorial HNSW | Pendiente |
 | 10 – 10.6 | Herramientas, backup en caliente, verificación y viaje en el tiempo | Pendiente |
 | 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |
 | 13 – 14 | Funciones y procedimientos: C# por generador y PL/Tk | Pendiente |
