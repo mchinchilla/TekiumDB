@@ -565,6 +565,12 @@ internal sealed class SqlEngine
                 $"Column '{old.Name}' of table '{table.Name}' cannot change its type while FOREIGN KEY '{user}' is on it: it is of the type of the key it refers to. Drop the constraint first.");
         }
 
+        if (replacement.Type is not (TkColumnType.Json or TkColumnType.Jsonb)
+            && table.Indexes.Find(index => index.Columns.Where((at, i) => at == column && index.Paths[i] is not null).Any()) is { } byPath)
+        {
+            throw new TkSqlException($"Column '{old.Name}' of table '{table.Name}' cannot stop being a JSON column: index '{byPath.Name}' reads a value at a path of it.");
+        }
+
         if (table.Indexes.Find(index => index.Where.Any(condition => condition.Column == column)) is { } partial && replacement != old)
         {
             throw new TkSqlException($"Column '{old.Name}' of table '{table.Name}' cannot change: the condition of partial index '{partial.Name}' is written for it as it is.");
@@ -1208,6 +1214,8 @@ internal sealed class SqlEngine
         TkColumnType.TimeOnly => "a TIME",
         TkColumnType.TimeSpan => "an INTERVAL",
         TkColumnType.Bytes => "a BLOB",
+        TkColumnType.Json => "a JSON",
+        TkColumnType.Jsonb => "a JSONB",
         _ => $"of type {type}",
     };
 
@@ -1225,7 +1233,41 @@ internal sealed class SqlEngine
         }
 
         var fields = create.Columns.Select(name => table.Column(name) is >= 0 and var at ? at : throw new TkSqlException($"Table '{table.Name}' has no column '{name}'.")).ToArray();
-        if (fields.Distinct().Count() != fields.Length)
+        var paths = new (TkJsonPath Path, TkColumnType Type)?[fields.Length];
+        for (var i = 0; i < fields.Length; i++)
+        {
+            var column = table.Columns[fields[i]];
+            var isJson = column.Type is TkColumnType.Json or TkColumnType.Jsonb;
+            if (create.Paths?[i] is not { } path)
+            {
+                if (isJson)
+                {
+                    throw new TkSqlException(
+                        $"Column '{column.Name}' of table '{table.Name}' cannot be indexed: a JSON document has no order of its own. Index a value at a path of it.");
+                }
+
+                continue;
+            }
+
+            if (!isJson)
+            {
+                throw new TkSqlException($"Column '{column.Name}' of table '{table.Name}' is not a JSON column: only a JSON column has values at paths.");
+            }
+
+            if (path.Type is not (TkColumnType.Text or TkColumnType.F64))
+            {
+                throw new TkSqlException($"Index '{create.Name}': a value at a path is indexed as TEXT or DOUBLE.");
+            }
+
+            if (!path.Path.StartsWith('$') || !TkJsonPath.TryParse(path.Path, out var parsed))
+            {
+                throw new TkSqlException(path.Path.StartsWith('$') ? $"'{path.Path}' is not a JSON path." : $"'{path.Path}' is not a JSON path: a path must start with $.");
+            }
+
+            paths[i] = (parsed, path.Type);
+        }
+
+        if (fields.Select((field, i) => (field, paths[i]?.Path.Text)).Distinct().Count() != fields.Length)
         {
             throw new TkSqlException($"Index '{create.Name}' names a column twice.");
         }
@@ -1240,9 +1282,13 @@ internal sealed class SqlEngine
             throw new TkSqlException($"Index '{create.Name}' cannot have that name: {invalid.Message}", invalid);
         }
 
-        var index = StoredIndex.Create(create.Name, table.Columns, fields, create.Unique);
+        var index = StoredIndex.Create(create.Name, table.Columns, fields, create.Unique, paths);
         index.Entry = new TkWriteTransaction.IndexEntry(catalogKey, index.Definition) { Dirty = true };
         var state = await writer.TableAsync(table.Name, table.TableKey, cancellationToken).ConfigureAwait(false);
+
+        // A row type that already wrote the table in this transaction must look at its indexes again.
+        state.IndexedAs = null;
+        state.Bound = [];
         (await writer.IndexesAsync(state, cancellationToken).ConfigureAwait(false)).Add(create.Name, index.Entry);
         table.Indexes.Add(index);
         try

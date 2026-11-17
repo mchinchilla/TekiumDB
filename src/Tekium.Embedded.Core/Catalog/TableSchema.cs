@@ -89,7 +89,7 @@ internal sealed class TableSchema
             var flags = source[position + 1];
             var length = source[position + 2];
             position += 3;
-            if (type is <= TkColumnType.None or > TkColumnType.Bytes
+            if (type is <= TkColumnType.None or > TkColumnType.Jsonb
                 || flags > NullableFlag
                 || length == 0
                 || length > TkColumn.MaxNameBytes

@@ -177,6 +177,16 @@ public sealed partial record Everything
     public string? NullableString { get; set; }
 
     public Priority? NullableEnum { get; set; }
+
+    [TkJsonText]
+    public TkJson Json { get; set; }
+
+    public TkJson Jsonb { get; set; }
+
+    [TkJsonText]
+    public TkJson? NullableJson { get; set; }
+
+    public TkJson? NullableJsonb { get; set; }
 }
 
 /// <summary>Los arreglos de bytes aparte: un record los compara por referencia.</summary>

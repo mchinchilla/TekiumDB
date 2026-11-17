@@ -25,8 +25,29 @@ public readonly struct TkExpression : IEquatable<TkExpression>
         IsNullable = isNullable;
     }
 
-    /// <summary>Gets the name of the property.</summary>
+    /// <summary>
+    /// Initializes a new instance of the <see cref="TkExpression"/> struct for a value at a path of a JSON
+    /// column, which SQL computes as well. It may have no value.
+    /// </summary>
+    /// <param name="column">The name of the JSON column.</param>
+    /// <param name="type">The kind of value: <see cref="TkColumnType.Text"/> or <see cref="TkColumnType.F64"/>.</param>
+    /// <param name="path">The path.</param>
+    public TkExpression(string column, TkColumnType type, TkJsonPath path)
+        : this(column, type, true, (path ?? throw new ArgumentNullException(nameof(path))).Text)
+    {
+        if (type is not (TkColumnType.Text or TkColumnType.F64))
+        {
+            throw new ArgumentOutOfRangeException(nameof(type), type, "A value at a path is indexed as TEXT or DOUBLE.");
+        }
+
+        JsonPath = path;
+    }
+
+    /// <summary>Gets the name of the property, or of the JSON column for a value at a path.</summary>
     public string Name => _name ?? string.Empty;
+
+    /// <summary>Gets the path, for a value at a path of a JSON column; null for an expression of the row type.</summary>
+    public TkJsonPath? JsonPath { get; }
 
     /// <summary>Gets the type of the value.</summary>
     public TkColumnType Type { get; }

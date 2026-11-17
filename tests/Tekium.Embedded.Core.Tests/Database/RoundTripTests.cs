@@ -1,5 +1,6 @@
 // Copyright (c) Tekium. Licensed under the MIT License.
 
+using System.Text.Json;
 using CsCheck;
 using Tekium.Embedded.Tests.Storage;
 
@@ -33,6 +34,17 @@ public abstract class RoundTripTests : DatabaseTests
 
     private static readonly Gen<Priority> AnyPriority = Gen.Int[0, 3].Select(static index => Priorities[index]);
 
+    // Documentos JSON escritos con espacios y orden propios: la columna de texto los devuelve tal cual.
+    private static readonly Gen<TkJson> AnyJson =
+        Gen.Select(Text, Gen.Int, Gen.Bool, Gen.Int[0, 3])
+            .Select(static (text, number, flag, shape) => TkJson.Parse(shape switch
+            {
+                0 => $" {{ \"z\" : {number} , \"a\": [ {(flag ? "true" : "null")} , 1.50 ] }}",
+                1 => JsonSerializer.Serialize(text),
+                2 => $"[{number}, {number}e3]",
+                _ => "{}",
+            }));
+
     private static readonly Gen<Everything> AnyRow =
         from id in Gen.Long
         from numbers in Gen.Select(Gen.Bool, Gen.Byte, Gen.SByte, Gen.Short, Gen.UShort, Gen.Int, Gen.UInt)
@@ -43,6 +55,7 @@ public abstract class RoundTripTests : DatabaseTests
         from nullableWide in Gen.Select(Gen.Long.Nullable(), Gen.ULong.Nullable(), Gen.Float.Nullable(), Gen.Double.Nullable(), Gen.Decimal.Nullable(), Gen.Char.Nullable(), Gen.Guid.Nullable())
         from nullableTimes in Gen.Select(AnyDateTime.Nullable(), AnyDateTimeOffset.Nullable(), Gen.TimeSpan.Nullable(), Gen.DateOnly.Nullable(), Gen.TimeOnly.Nullable())
         from nullableOthers in Gen.Select(Text.Null(), AnyPriority.Nullable())
+        from json in Gen.Select(AnyJson, AnyJson, AnyJson.Nullable(), AnyJson.Nullable())
         select new Everything
         {
             Id = id,
@@ -89,6 +102,10 @@ public abstract class RoundTripTests : DatabaseTests
             NullableTimeOnly = nullableTimes.Item5,
             NullableString = nullableOthers.Item1,
             NullableEnum = nullableOthers.Item2,
+            Json = json.Item1,
+            Jsonb = json.Item2,
+            NullableJson = json.Item3,
+            NullableJsonb = json.Item4,
         };
 
     [Fact]
@@ -216,6 +233,13 @@ public abstract class RoundTripTests : DatabaseTests
         Assert.Equal(expected.NullableDateTime?.Kind, actual.NullableDateTime?.Kind);
         Assert.Equal(expected.DateTimeOffset.Offset, actual.DateTimeOffset.Offset);
         Assert.Equal(expected.NullableDateTimeOffset?.Offset, actual.NullableDateTimeOffset?.Offset);
+
+        // Un json vuelve con el mismo texto; un jsonb, en su forma binaria, que dice lo mismo.
+        Assert.Equal(expected.Json.ToString(), actual.Json.ToString());
+        Assert.Equal(expected.NullableJson?.ToString(), actual.NullableJson?.ToString());
+        Assert.Equal(TkJsonFormat.Text, actual.Json.Format);
+        Assert.Equal(TkJsonFormat.Binary, actual.Jsonb.Format);
+        Assert.Equal(expected.Jsonb.ToBinary().ToString(), actual.Jsonb.ToString());
     }
 }
 

@@ -25,3 +25,6 @@ TK0020 | TekiumDB | Error | A SQL function uses a type SQL has no value for
 TK0021 | TekiumDB | Error | A vectorized function takes spans in and a span out
 TK0022 | TekiumDB | Error | A procedure takes a TkContext first and returns a task
 TK0023 | TekiumDB | Error | Two SQL routines have the same name
+TK0024 | TekiumDB | Error | A JSON document is not indexed whole
+TK0025 | TekiumDB | Error | [TkJsonText] goes on a TkJson property
+TK0026 | TekiumDB | Error | [TkJsonIndex] indexes a TEXT or DOUBLE value at a path of a TkJson property

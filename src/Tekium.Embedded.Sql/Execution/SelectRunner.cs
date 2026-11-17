@@ -753,8 +753,10 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
     /// </summary>
     private async ValueTask<(IAsyncEnumerable<object?[]> Rows, PlanNode Node)> ChooseAsync(SqlTable table, Source source, SqlExpr? where)
     {
-        // What the WHERE fixes for each column, from the conditions that compare a column with a value.
+        // What the WHERE fixes for each column, from the conditions that compare a column with a value; and
+        // what it says of a value at a path of a JSON column, kept as written until an index says its kind.
         var bounds = new Dictionary<int, Bound>();
+        var atPaths = new Dictionary<(int Column, string Path), List<(string Op, object Value)>>();
         foreach (var conjunct in Conjuncts(where))
         {
             var parts = conjunct switch
@@ -765,6 +767,20 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
             };
             foreach (var (op, left, right) in parts)
             {
+                var (path, other, flipped) = (JsonTerm(left), right, op);
+                if (path is null && JsonTerm(right) is { } reversed)
+                {
+                    (path, other, flipped) = (reversed, left, op switch { "<" => ">", "<=" => ">=", ">" => "<", ">=" => "<=", _ => op });
+                }
+
+                if (path is var (jsonColumn, jsonPath) && !Binder.ReadsColumns(other) && Resolve(jsonColumn) is var at
+                    && at >= source.Offset && at < source.Offset + table.Columns.Length && Binder.Constant(other, parameters) is { } compared)
+                {
+                    var pathKey = (at - source.Offset, jsonPath.Text);
+                    (atPaths.TryGetValue(pathKey, out var known) ? known : atPaths[pathKey] = []).Add((flipped, compared));
+                    continue;
+                }
+
                 var (column, value, comparison) = (left, right) switch
                 {
                     (ColumnRef c, _) when !Binder.ReadsColumns(right) => (c, right, op),
@@ -833,23 +849,25 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
                 continue;
             }
 
+            var fieldBounds = Enumerable.Range(0, index.Columns.Length).Select(i => BoundOf(index, i)).ToArray();
             var equal = 0;
-            while (equal < index.Columns.Length && bounds.TryGetValue(index.Columns[equal], out var fixedTo) && fixedTo.Equal is not null)
+            while (equal < index.Columns.Length && fieldBounds[equal] is { Equal: not null })
             {
                 equal++;
             }
 
-            var range = equal < index.Columns.Length && bounds.TryGetValue(index.Columns[equal], out var next) && next.Equal is null ? next : null;
+            var range = equal < index.Columns.Length ? fieldBounds[equal] : null;
+            range = range is { Equal: null } ? range : null;
             if (equal == 0 && range is null)
             {
                 continue;
             }
 
-            var values = Enumerable.Range(0, equal).Select(i => bounds[index.Columns[i]].Equal).ToArray();
+            var values = Enumerable.Range(0, equal).Select(i => fieldBounds[i]!.Equal).ToArray();
             var prefix = SqlTable.IndexPrefix(index, values, equal);
             byte[] start;
             byte[] end;
-            var described = string.Join(", ", Enumerable.Range(0, equal).Select(i => $"{table.Columns[index.Columns[i]].Name} = {SqlValues.Show(values[i])}"));
+            var described = string.Join(", ", Enumerable.Range(0, equal).Select(i => $"{FieldName(index, i)} = {SqlValues.Show(values[i])}"));
             if (range is null)
             {
                 (start, end) = (prefix, SqlTable.After(prefix));
@@ -862,7 +880,7 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
                 var high = range.High is null ? null : SqlTable.IndexPrefix(index, [.. values, range.High], equal + 1);
                 start = low is null ? (nullable ? [.. prefix, 1] : prefix) : range.LowInclusive ? low : SqlTable.After(low);
                 end = high is null ? (nullable ? [.. prefix, 2] : SqlTable.After(prefix)) : range.HighInclusive ? SqlTable.After(high) : high;
-                described += (described.Length > 0 ? ", " : string.Empty) + range.Describe(table.Columns[index.Columns[equal]].Name);
+                described += (described.Length > 0 ? ", " : string.Empty) + range.Describe(FieldName(index, equal));
             }
 
             var estimate = await table.EstimateAsync(index.CurrentRoot, start, end, cancellationToken).ConfigureAwait(false);
@@ -875,6 +893,58 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
 
         var best = candidates.OrderBy(static candidate => candidate.Estimate).ThenBy(static candidate => candidate.Rank).First();
         return (best.Rows(), new PlanNode(best.Text, best.Estimate));
+
+        string FieldName(StoredIndex index, int field) =>
+            index.Paths[field] is { } path ? $"{table.Columns[index.Columns[field]].Name} at {path.Text}" : table.Columns[index.Columns[field]].Name;
+
+        // What the WHERE says of a field of an index: its column, or the value at a path, in the kind the index holds.
+        Bound? BoundOf(StoredIndex index, int field)
+        {
+            if (index.Paths[field] is not { } path)
+            {
+                return bounds.GetValueOrDefault(index.Columns[field]);
+            }
+
+            if (!atPaths.TryGetValue((index.Columns[field], path.Text), out var conditions))
+            {
+                return null;
+            }
+
+            Bound? bound = null;
+            foreach (var (op, value) in conditions)
+            {
+                // Text is compared with text. A number is held as the nearest DOUBLE, which may round: the bounds
+                // are made inclusive, so that the index gives what might match and the WHERE decides.
+                object? typed = (index.Types[field], value) switch
+                {
+                    (TkColumnType.Text, string text) => text,
+                    (TkColumnType.F64, _) when SqlValues.IsNumber(value) => Convert.ToDouble(value, CultureInfo.InvariantCulture),
+                    _ => null,
+                };
+                if (typed is null)
+                {
+                    continue;
+                }
+
+                bound ??= new Bound();
+                bound.Add(index.Types[field] == TkColumnType.F64 ? op switch { ">" => ">=", "<" => "<=", _ => op } : op, typed);
+            }
+
+            return bound;
+        }
+    }
+
+    /// <summary>A value at a path of a column, as SQL reads it: <c>column -&gt;&gt; 'path'</c>, <c>JSON_VALUE</c> or <c>JSON_EXTRACT</c>.</summary>
+    private static (ColumnRef Column, TkJsonPath Path)? JsonTerm(SqlExpr expression)
+    {
+        var (column, path) = expression switch
+        {
+            Binary { Op: "->>", Left: ColumnRef c, Right: Literal { Value: string text } } => (c, text.StartsWith('$') ? text : "$.\"" + text.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal) + "\""),
+            Binary { Op: "->>", Left: ColumnRef c, Right: Literal { Value: long position and >= 0 and <= int.MaxValue } } => (c, $"$[{position.ToString(CultureInfo.InvariantCulture)}]"),
+            Call { Name: "JSON_VALUE" or "JSON_EXTRACT", Arguments: [ColumnRef c, Literal { Value: string text }] } when text.StartsWith('$') => (c, text),
+            _ => ((ColumnRef?)null, (string?)null),
+        };
+        return column is not null && TkJsonPath.TryParse(path!, out var parsed) ? (column, parsed) : null;
     }
 
     private async IAsyncEnumerable<object?[]> One(SqlTable table, byte[] key)

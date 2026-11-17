@@ -169,6 +169,14 @@ public ref struct TkRowWriter
         _position += value.Length;
     }
 
+    /// <summary>Writes a <c>json</c> column: the text of the document, as it was written (canonical if it was binary).</summary>
+    /// <param name="value">The document.</param>
+    public void WriteJson(TkJson value) => WriteBytes(value.ToText().Bytes);
+
+    /// <summary>Writes a <c>jsonb</c> column: the binary form of the document.</summary>
+    /// <param name="value">The document.</param>
+    public void WriteJsonb(TkJson value) => WriteBytes(value.ToBinary().Bytes);
+
     private static void ThrowTooLarge() =>
         throw new TkRowTooLargeException("The row does not fit in the space a row may take.");
 

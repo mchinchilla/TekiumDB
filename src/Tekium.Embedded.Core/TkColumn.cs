@@ -17,7 +17,7 @@ public readonly struct TkColumn : IEquatable<TkColumn>
     public TkColumn(string name, TkColumnType type, bool isNullable)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);
-        if (type is <= TkColumnType.None or > TkColumnType.Bytes)
+        if (type is <= TkColumnType.None or > TkColumnType.Jsonb)
         {
             throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown column type.");
         }

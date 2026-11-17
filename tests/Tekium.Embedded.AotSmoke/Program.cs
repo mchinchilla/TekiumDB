@@ -50,6 +50,7 @@ failures += await MaintenanceAsync();
 failures += await SqlAsync();
 failures += await RoutinesAsync();
 failures += await AdaptersAsync();
+failures += await JsonAsync();
 
 await Console.Out.WriteLineAsync(
     $"TekiumDB AOT smoke: {(failures == 0 ? "OK" : "FAILED")} " +
@@ -58,6 +59,39 @@ await Console.Out.WriteLineAsync(
 return failures;
 
 // Fase 15: la caché distribuida y el health check, cada uno desde su paquete, bajo Native AOT.
+// Fase 19: un documento JSON guardado por la API tipada, buscado por su índice desde LINQ y leído por ruta desde SQL.
+static async Task<int> JsonAsync()
+{
+    await using var database = await TekiumDb.OpenAsync(new DbOptions { InMemory = true });
+    var parcels = database.Table<Parcel>();
+    await using (var writer = await database.BeginWriteAsync())
+    {
+        for (var i = 0; i < 50; i++)
+        {
+            var label = TkJson.Parse($$"""{"to":{"city":"{{(i % 2 == 0 ? "Lima" : "Quito")}}","zip":{{1000 + i}}},"kg":{{i / 4.0}}}""");
+            await parcels.InsertAsync(writer, new Parcel { Id = i, Label = label }, default);
+        }
+
+        await writer.CommitAsync();
+    }
+
+    var lima = await Tekium.Embedded.Linq.TkLinq.Where(parcels, static p => p.Label.TextAt("$.to.city") == "Lima").CountAsync();
+    var plan = await Tekium.Embedded.Linq.TkLinq.Where(parcels, static p => p.Label.TextAt("$.to.city") == "Lima").ExplainAsync();
+    await using var connection = new TkConnection(database);
+    await using var command = connection.CreateCommand();
+    command.CommandText = "SELECT COUNT(*), MAX(Label ->> '$.to.zip'), SUM(JSON_VALUE(Label, '$.kg')) FROM parcels WHERE JSON_VALUE(Label, '$.to.city') = 'Quito'";
+    await using var reader = await command.ExecuteReaderAsync();
+    await reader.ReadAsync();
+    var (count, zip, kg) = (reader.GetInt64(0), reader.GetInt64(1), reader.GetDecimal(2));
+    if (lima == 25 && plan.Index == "by_city" && count == 25 && zip == 1049 && kg == 156.25m)
+    {
+        return 0;
+    }
+
+    await Console.Error.WriteLineAsync($"JSON failed: {lima} {plan} {count} {zip} {kg}");
+    return 1;
+}
+
 static async Task<int> AdaptersAsync()
 {
     await using var database = await TekiumDb.OpenAsync(new DbOptions { InMemory = true });

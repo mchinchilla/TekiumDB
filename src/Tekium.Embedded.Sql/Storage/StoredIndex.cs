@@ -20,6 +20,9 @@ internal sealed class StoredIndex
     private const byte UniqueFormat = 2;
     private const byte ZoneFormat = 3;
 
+    /// <summary>The kind of field that is the value at a path of a JSON column, as <c>IndexDefinition</c> writes it.</summary>
+    private const byte PathField = 2;
+
     private StoredIndex(string name, byte[] definition)
     {
         Name = name;
@@ -49,6 +52,9 @@ internal sealed class StoredIndex
 
     public bool[] Nullable { get; private set; } = [];
 
+    /// <summary>Gets, for each field, the path of its JSON column it indexes the value at; null for a column indexed as it is.</summary>
+    public TkJsonPath?[] Paths { get; private set; } = [];
+
     /// <summary>Gets the conditions of a partial index: a column of the current schema, how it is encoded, and the range it must be in.</summary>
     public (int Column, TkColumnType Type, bool Nullable, KeyRange Range)[] Where { get; private set; } = [];
 
@@ -56,21 +62,25 @@ internal sealed class StoredIndex
     public string? Unmaintainable { get; private set; }
 
     /// <summary>The definition of an index over plain columns.</summary>
-    public static StoredIndex Create(string name, ReadOnlySpan<TkColumn> columns, int[] fields, bool unique)
+    public static StoredIndex Create(string name, ReadOnlySpan<TkColumn> columns, int[] fields, bool unique, (TkJsonPath Path, TkColumnType Type)?[]? paths = null)
     {
         var encoded = new ArrayBufferWriter<byte>();
         Put(encoded, unique ? UniqueFormat : PlainFormat);
         Put(encoded, (byte)fields.Length);
-        foreach (var field in fields)
+        for (var i = 0; i < fields.Length; i++)
         {
-            var column = columns[field];
-            Put(encoded, (byte)column.Type);
-            Put(encoded, column.IsNullable ? (byte)1 : (byte)0);
-            Put(encoded, 0);
+            // As the row type writes it: a value at a path is named after its column, nullable, with the canonical path as its text.
+            var column = columns[fields[i]];
+            var path = paths?[i];
+            var text = path?.Path.Text ?? string.Empty;
+            Put(encoded, (byte)(path?.Type ?? column.Type));
+            Put(encoded, path is not null || column.IsNullable ? (byte)1 : (byte)0);
+            Put(encoded, path is null ? (byte)0 : PathField);
             Put(encoded, (byte)Encoding.UTF8.GetByteCount(column.Name));
             Encoding.UTF8.GetBytes(column.Name, encoded);
-            BinaryPrimitives.WriteInt32LittleEndian(encoded.GetSpan(sizeof(int)), 0);
+            BinaryPrimitives.WriteInt32LittleEndian(encoded.GetSpan(sizeof(int)), Encoding.UTF8.GetByteCount(text));
             encoded.Advance(sizeof(int));
+            Encoding.UTF8.GetBytes(text, encoded);
         }
 
         Put(encoded, 0);
@@ -131,11 +141,12 @@ internal sealed class StoredIndex
             var name = Encoding.UTF8.GetString(definition, position + 4, nameLength);
             var afterName = position + 4 + nameLength;
             var end = afterName + sizeof(int) + BinaryPrimitives.ReadInt32LittleEndian(definition.AsSpan(afterName));
-            if (isExpression == 0 && changes.TryGetValue(name, out var column))
+            if (isExpression is 0 or PathField && changes.TryGetValue(name, out var column))
             {
-                Put(copy, (byte)column.Type);
-                Put(copy, column.IsNullable ? (byte)1 : (byte)0);
-                Put(copy, 0);
+                // A value at a path keeps its kind: only the name of its column changes.
+                Put(copy, isExpression == PathField ? type : (byte)column.Type);
+                Put(copy, isExpression == PathField ? nullable : column.IsNullable ? (byte)1 : (byte)0);
+                Put(copy, isExpression);
                 Put(copy, (byte)Encoding.UTF8.GetByteCount(column.Name));
                 Encoding.UTF8.GetBytes(column.Name, copy);
                 copy.Write(definition.AsSpan(afterName, end - afterName));
@@ -180,16 +191,22 @@ internal sealed class StoredIndex
             index.Columns = new int[count];
             index.Types = new TkColumnType[count];
             index.Nullable = new bool[count];
+            index.Paths = new TkJsonPath?[count];
             for (var i = 0; i < count; i++)
             {
-                (index.Columns[i], index.Types[i], index.Nullable[i]) = Field(definition, ref position, columns, index);
+                (index.Columns[i], index.Types[i], index.Nullable[i], index.Paths[i]) = Field(definition, ref position, columns, index);
             }
 
             var conditions = definition[position++];
             index.Where = new (int, TkColumnType, bool, KeyRange)[conditions];
             for (var i = 0; i < conditions; i++)
             {
-                var (column, type, nullable) = Field(definition, ref position, columns, index);
+                var (column, type, nullable, path) = Field(definition, ref position, columns, index);
+                if (path is not null)
+                {
+                    index.Unmaintainable ??= "the condition of a partial index is on a value at a path, which this version does not keep";
+                }
+
                 var flags = definition[position++];
                 var low = Bound(definition, ref position);
                 var high = Bound(definition, ref position);
@@ -204,31 +221,49 @@ internal sealed class StoredIndex
         return index;
     }
 
-    private static (int Column, TkColumnType Type, bool Nullable) Field(byte[] definition, ref int position, ReadOnlySpan<TkColumn> columns, StoredIndex index)
+    private static (int Column, TkColumnType Type, bool Nullable, TkJsonPath? Path) Field(byte[] definition, ref int position, ReadOnlySpan<TkColumn> columns, StoredIndex index)
     {
         var type = (TkColumnType)definition[position++];
         var nullable = definition[position++] != 0;
-        var isExpression = definition[position++] != 0;
+        var kind = definition[position++];
         var nameLength = definition[position++];
         var name = Encoding.UTF8.GetString(definition, position, nameLength);
         position += nameLength;
-        position += sizeof(int) + BinaryPrimitives.ReadInt32LittleEndian(definition.AsSpan(position));
-        if (isExpression)
+        var textLength = BinaryPrimitives.ReadInt32LittleEndian(definition.AsSpan(position));
+        var text = Encoding.UTF8.GetString(definition, position + sizeof(int), textLength);
+        position += sizeof(int) + textLength;
+        if (kind == PathField)
+        {
+            // A value at a path: its column must still be a JSON column, and the path one SQL reads the same.
+            for (var i = 0; i < columns.Length; i++)
+            {
+                if (string.Equals(columns[i].Name, name, StringComparison.Ordinal) && columns[i].Type is TkColumnType.Json or TkColumnType.Jsonb
+                    && type is TkColumnType.Text or TkColumnType.F64 && nullable && TkJsonPath.TryParse(text, out var path) && path.Text == text)
+                {
+                    return (i, type, nullable, path);
+                }
+            }
+
+            index.Unmaintainable ??= $"it indexes a value at a path of column '{name}', which the table no longer has as a JSON column";
+            return (-1, type, nullable, null);
+        }
+
+        if (kind != 0)
         {
             index.Unmaintainable ??= $"it indexes the expression '{name}', which only the row type that declares it can compute";
-            return (-1, type, nullable);
+            return (-1, type, nullable, null);
         }
 
         for (var i = 0; i < columns.Length; i++)
         {
             if (string.Equals(columns[i].Name, name, StringComparison.Ordinal) && columns[i].Type == type && columns[i].IsNullable == nullable)
             {
-                return (i, type, nullable);
+                return (i, type, nullable, null);
             }
         }
 
         index.Unmaintainable ??= $"it indexes column '{name}', which the table no longer has as it was";
-        return (-1, type, nullable);
+        return (-1, type, nullable, null);
     }
 
     private static byte[] Bound(byte[] definition, ref int position)

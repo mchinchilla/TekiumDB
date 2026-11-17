@@ -67,3 +67,14 @@ internal sealed partial class Venue
     [TkKey]
     public string Name { get; set; } = string.Empty;
 }
+
+/// <summary>Un documento JSON en su forma binaria, indexado por una ruta.</summary>
+[TkTable("parcels")]
+internal sealed partial class Parcel
+{
+    [TkKey]
+    public int Id { get; set; }
+
+    [TkJsonIndex("$.to.city", Name = "by_city")]
+    public TkJson Label { get; set; }
+}

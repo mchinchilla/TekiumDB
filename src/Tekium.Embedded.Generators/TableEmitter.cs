@@ -192,8 +192,9 @@ internal static class TableEmitter
             source.AppendLine("    {");
             foreach (var computed in table.Computed)
             {
-                source.AppendLine(
-                    $"        new {Root}TkExpression({Literal(computed.ColumnName)}, {Root}TkColumnType.{computed.StoreType}, {(computed.IsNullable ? "true" : "false")}, {Literal(computed.Expression)}),");
+                source.AppendLine(computed.JsonPath.Length > 0
+                    ? $"        new {Root}TkExpression({Literal(computed.ColumnName)}, {Root}TkColumnType.{computed.StoreType}, {Root}TkJsonPath.Parse({Literal(computed.JsonPath)})),"
+                    : $"        new {Root}TkExpression({Literal(computed.ColumnName)}, {Root}TkColumnType.{computed.StoreType}, {(computed.IsNullable ? "true" : "false")}, {Literal(computed.Expression)}),");
             }
 
             source.AppendLine("    };");
@@ -229,6 +230,20 @@ internal static class TableEmitter
             var field = fields[i];
             var access = "row." + field.Property;
             source.AppendLine($"            case {i.ToString(CultureInfo.InvariantCulture)}:");
+            if (field.JsonPath.Length > 0)
+            {
+                source.AppendLine($"                {Root}TkJsonIndexing.Write(ref writer, row.{field.JsonProperty}, __tkExpressions[{(i - table.Columns.Count).ToString(CultureInfo.InvariantCulture)}].JsonPath!, {Root}TkColumnType.{field.StoreType});");
+                source.AppendLine("                break;");
+                continue;
+            }
+
+            if (field.StoreType is "Json" or "Jsonb")
+            {
+                // A document has no order of its own: the generator refuses an index on it, so this is never reached.
+                source.AppendLine("                throw new global::System.NotSupportedException(\"A JSON document has no order of its own.\");");
+                continue;
+            }
+
             if (field.IsNullable)
             {
                 var local = "__f" + i.ToString(CultureInfo.InvariantCulture);

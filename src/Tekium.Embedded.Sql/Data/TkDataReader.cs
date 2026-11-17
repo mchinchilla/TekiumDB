@@ -138,6 +138,9 @@ public sealed class TkDataReader : DbDataReader, IEnumerable<System.Data.IDataRe
             : type == typeof(TimeOnly) ? typeof(TimeOnly)
             : type == typeof(string) ? typeof(string)
             : type == typeof(byte[]) ? typeof(byte[])
+
+            // A JSON document reads as its text, which is what a string property or Dapper expects; GetFieldValue<TkJson> gives the document.
+            : type == typeof(TkJson) ? typeof(string)
             : typeof(object);
     }
 
@@ -175,7 +178,18 @@ public sealed class TkDataReader : DbDataReader, IEnumerable<System.Data.IDataRe
     };
 
     /// <inheritdoc/>
-    public override object GetValue(int ordinal) => Row()[ordinal] ?? DBNull.Value;
+    public override object GetValue(int ordinal) => Row()[ordinal] switch
+    {
+        null => DBNull.Value,
+        TkJson json => json.ToString(),
+        var value => value,
+    };
+
+    /// <inheritdoc/>
+    public override T GetFieldValue<T>(int ordinal) =>
+        typeof(T) == typeof(TkJson) && Row()[ordinal] is TkJson json ? (T)(object)json
+        : typeof(T) == typeof(TkJson) && Row()[ordinal] is string text ? (T)(object)TkJson.Parse(text)
+        : base.GetFieldValue<T>(ordinal);
 
     /// <inheritdoc/>
     public override int GetValues(object[] values)

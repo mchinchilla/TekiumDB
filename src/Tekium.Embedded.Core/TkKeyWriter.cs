@@ -334,6 +334,8 @@ public ref struct TkKeyWriter
             case TkColumnType.Bytes when typeof(TValue) == typeof(byte[]):
                 writer.Write(Unsafe.As<TValue, byte[]>(ref value));
                 return;
+            case TkColumnType.Json or TkColumnType.Jsonb:
+                throw new ArgumentException("A JSON document has no order of its own: index or compare a value at a path of it.", nameof(value));
             default:
                 throw new ArgumentException($"The field is a {type}, which a {typeof(TValue).Name} cannot be compared with.", nameof(value));
         }

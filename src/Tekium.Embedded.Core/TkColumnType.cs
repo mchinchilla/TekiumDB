@@ -72,4 +72,10 @@ public enum TkColumnType
 
     /// <summary>A byte array: length prefix and the bytes.</summary>
     Bytes = 21,
+
+    /// <summary>A JSON document kept as its text (<see cref="TkJson"/>): length prefix and the UTF-8 text, as it was written.</summary>
+    Json = 22,
+
+    /// <summary>A JSON document in its binary form (<see cref="TkJson"/>): length prefix and the bytes of <c>JsonBinary</c>.</summary>
+    Jsonb = 23,
 }

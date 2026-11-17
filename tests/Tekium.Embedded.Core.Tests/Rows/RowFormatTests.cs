@@ -90,6 +90,8 @@ public sealed class RowFormatTests
         writer.WriteTimeOnly(new TimeOnly(12, 0));
         writer.WriteString(new string('s', 200));
         writer.WriteBytes([1, 2, 3]);
+        writer.WriteJson(TkJson.Parse(" [1, {\"a\": 2}] "));
+        writer.WriteJsonb(TkJson.Parse("{\"b\":1,\"a\":[true]}"));
         writer.WriteInt32(424242);
 
         // El tipo que lee sólo conserva la última columna: todas las demás se saltan por su tipo guardado.

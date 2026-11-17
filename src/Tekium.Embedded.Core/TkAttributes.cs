@@ -93,6 +93,39 @@ public sealed class TkCheckAttribute : Attribute
 }
 
 /// <summary>
+/// Indexes a value at a path of the <see cref="TkJson"/> property it is on. The index holds the rows
+/// whose value there is of the kind of the index: a string (or the text of an array or object) for
+/// <see cref="TkColumnType.Text"/>, a number for <see cref="TkColumnType.F64"/>. SQL declares the same
+/// index with <c>CREATE INDEX … ON t (JSON_VALUE(column, 'path') [AS DOUBLE])</c>, and keeps it alike.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = true)]
+public sealed class TkJsonIndexAttribute : Attribute
+{
+    /// <summary>Initializes a new instance of the <see cref="TkJsonIndexAttribute"/> class.</summary>
+    /// <param name="path">The path, starting with <c>$</c>.</param>
+    public TkJsonIndexAttribute(string path) => Path = path;
+
+    /// <summary>Gets the path.</summary>
+    public string Path { get; }
+
+    /// <summary>Gets or sets the kind of value indexed: <see cref="TkColumnType.Text"/> (the default) or <see cref="TkColumnType.F64"/>.</summary>
+    public TkColumnType Type { get; set; } = TkColumnType.Text;
+
+    /// <summary>Gets or sets the name of the index. By default, the property and the last name of the path.</summary>
+    public string? Name { get; set; }
+
+    /// <summary>Gets or sets a value indicating whether two rows may not have the same value there. Rows with none are exempt.</summary>
+    public bool Unique { get; set; }
+}
+
+/// <summary>
+/// Keeps a <see cref="TkJson"/> column as the text of the document, as it was written (a <c>json</c>
+/// column). Without it the column keeps the binary form (<c>jsonb</c>): keys sorted and not repeated.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class TkJsonTextAttribute : Attribute;
+
+/// <summary>
 /// Declares a FOREIGN KEY constraint: the column it is on holds the key of a row of another table, which
 /// must exist. A nullable column may hold no value. A row cannot be deleted while others refer to it.
 /// </summary>

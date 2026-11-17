@@ -19,6 +19,8 @@ internal static class TableParser
     internal const string ZoneMapAttribute = "Tekium.Embedded.TkZoneMapAttribute";
     internal const string ForeignKeyAttribute = "Tekium.Embedded.TkForeignKeyAttribute";
     internal const string KeyAttributeName = KeyAttribute;
+    internal const string JsonTextAttribute = "Tekium.Embedded.TkJsonTextAttribute";
+    internal const string JsonIndexAttribute = "Tekium.Embedded.TkJsonIndexAttribute";
 
     private static readonly SymbolDisplayFormat FullyQualified =
         SymbolDisplayFormat.FullyQualifiedFormat.WithMiscellaneousOptions(
@@ -67,6 +69,17 @@ internal static class TableParser
                 diagnostics.Add(DiagnosticModel.Create(
                     "TK0004", propertyLocation, property.Name, property.Type.ToDisplayString()));
                 continue;
+            }
+
+            if (Has(property, JsonTextAttribute))
+            {
+                if (column.StoreType != "Jsonb")
+                {
+                    diagnostics.Add(DiagnosticModel.Create("TK0025", propertyLocation, property.Name));
+                    continue;
+                }
+
+                column = column with { StoreType = "Json", Method = "Json" };
             }
 
             if (columns.Any(existing => existing.ColumnName == column.ColumnName))
@@ -302,6 +315,7 @@ internal static class TableParser
             "System.TimeSpan" => ("TimeSpan", "TimeSpan"),
             "System.DateOnly" => ("DateOnly", "DateOnly"),
             "System.TimeOnly" => ("TimeOnly", "TimeOnly"),
+            "Tekium.Embedded.TkJson" => ("Jsonb", "Jsonb"),
             _ => null,
         };
     }

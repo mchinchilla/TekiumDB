@@ -17,7 +17,8 @@ namespace Tekium.Embedded.Catalog;
 /// declared one is never read, and is rebuilt by the next write. Layout: a format byte (2 if the index is unique); the number of
 /// fields and each field; the number of conditions and, for each, its field, a byte of flags (1 has a
 /// low bound, 2 it is inclusive, 4 has a high bound, 8 it is inclusive) and the two bounds, each with a
-/// two-byte length. A field is its type, whether it is nullable, whether it is an expression, its name
+/// two-byte length. A field is its type, whether it is nullable, whether it is an expression (1) or a
+/// value at a path of a JSON column (2, named after the column, with the path as its text), its name
 /// with a one-byte length, and the text of the expression with a four-byte length.
 /// </remarks>
 internal sealed class IndexDefinition
@@ -222,7 +223,8 @@ internal sealed class IndexDefinition
 
         Write(encoded, (byte)type);
         Write(encoded, isNullable ? (byte)1 : (byte)0);
-        Write(encoded, isExpression ? (byte)1 : (byte)0);
+        // 1 for an expression only the row type computes; 2 for a value at a path of a JSON column, which SQL computes too.
+        Write(encoded, !isExpression ? (byte)0 : T.Expressions[field - columns.Length].JsonPath is null ? (byte)1 : (byte)2);
 
         // A column name is at most 128 bytes, which a column checks when it is built.
         Write(encoded, (byte)Encoding.UTF8.GetByteCount(name));

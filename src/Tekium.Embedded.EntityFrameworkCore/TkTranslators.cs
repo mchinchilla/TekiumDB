@@ -1,5 +1,8 @@
 // Copyright (c) Tekium. Licensed under the MIT License.
 
+using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using System.Text.Json;
 using System.Linq.Expressions;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
@@ -19,7 +22,28 @@ public sealed class TkMethodCallTranslatorProvider : RelationalMethodCallTransla
         : base(dependencies)
     {
         ArgumentNullException.ThrowIfNull(dependencies);
-        AddTranslators([new StringMethods(dependencies.SqlExpressionFactory)]);
+        AddTranslators([new StringMethods(dependencies.SqlExpressionFactory), new JsonMethods(dependencies.SqlExpressionFactory)]);
+    }
+
+    /// <summary><see cref="TkDbFunctionsExtensions.JsonValue(DbFunctions, TkJson, string)"/> and <c>JsonExists</c>: JSON_VALUE and JSON_EXISTS.</summary>
+    private sealed class JsonMethods(ISqlExpressionFactory factory) : IMethodCallTranslator
+    {
+        public SqlExpression? Translate(
+            SqlExpression? instance, MethodInfo method, IReadOnlyList<SqlExpression> arguments, IDiagnosticsLogger<DbLoggerCategory.Query> logger)
+        {
+            if (method.DeclaringType != typeof(TkDbFunctionsExtensions))
+            {
+                return null;
+            }
+
+            var exists = method.Name == nameof(TkDbFunctionsExtensions.JsonExists);
+            return factory.Function(
+                exists ? "JSON_EXISTS" : "JSON_VALUE",
+                [arguments[1], factory.ApplyDefaultTypeMapping(arguments[2])],
+                nullable: true,
+                argumentsPropagateNullability: [true, true],
+                exists ? typeof(bool) : typeof(string));
+        }
     }
 
     /// <summary>StartsWith, EndsWith and Contains (comparing characters, as in .NET), ToLower and ToUpper.</summary>
@@ -152,6 +176,32 @@ public sealed class TkTypeMappingSource(TypeMappingSourceDependencies dependenci
     /// <inheritdoc/>
     protected override RelationalTypeMapping? FindMapping(in RelationalTypeMappingInfo mappingInfo)
     {
+        // A JSON column holds a document: as text, a TkJson or a JsonElement. A TkJson goes to JSONB unless the column says JSON.
+        var named = mappingInfo.StoreTypeName?.ToUpperInvariant();
+        if (named is "JSON" or "JSONB" || mappingInfo.ClrType == typeof(TkJson) || mappingInfo.ClrType == typeof(JsonElement))
+        {
+            var json = named is "JSON" or "JSONB" ? named : "JSONB";
+            if (mappingInfo.ClrType == typeof(TkJson))
+            {
+                return (RelationalTypeMapping)new StringTypeMapping(json, System.Data.DbType.String).WithComposedConverter(
+                    json == "JSONB"
+                        ? new ValueConverter<TkJson, string>(static document => document.ToString(), static text => TkJson.Parse(text).ToBinary())
+                        : new ValueConverter<TkJson, string>(static document => document.ToString(), static text => TkJson.Parse(text)));
+            }
+
+            if (mappingInfo.ClrType == typeof(JsonElement))
+            {
+                return (RelationalTypeMapping)new StringTypeMapping(json, System.Data.DbType.String).WithComposedConverter(
+                    new ValueConverter<JsonElement, string>(static element => element.GetRawText(), static text => Element(text)),
+                    new ValueComparer<JsonElement>(static (a, b) => a.GetRawText() == b.GetRawText(), static element => element.GetRawText().GetHashCode(StringComparison.Ordinal), static element => element.Clone()));
+            }
+
+            if (mappingInfo.ClrType is null || mappingInfo.ClrType == typeof(string))
+            {
+                return new StringTypeMapping(json, System.Data.DbType.String);
+            }
+        }
+
         if (mappingInfo.ClrType is { } type && ByType.TryGetValue(type, out var mapping))
         {
             return mapping;
@@ -163,6 +213,12 @@ public sealed class TkTypeMappingSource(TypeMappingSourceDependencies dependenci
         }
 
         return base.FindMapping(mappingInfo);
+    }
+
+    private static JsonElement Element(string text)
+    {
+        using var document = JsonDocument.Parse(text);
+        return document.RootElement.Clone();
     }
 
     /// <summary>A date or a time: written in SQL as a text in quotes, which TekiumDB reads as the type it is compared with.</summary>

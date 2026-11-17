@@ -147,7 +147,7 @@ The source generator writes the serializer of `Document` at compile time: there 
 
 | What | How |
 | --- | --- |
-| Column types | `bool`, signed and unsigned integers of 8 to 64 bits, `float`, `double`, `decimal`, `char`, `string`, `byte[]`, `Guid`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `DateOnly`, `TimeOnly`, enums, and the nullable form of all of them |
+| Column types | `bool`, signed and unsigned integers of 8 to 64 bits, `float`, `double`, `decimal`, `char`, `string`, `byte[]`, `Guid`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `DateOnly`, `TimeOnly`, enums, `TkJson` (JSON documents), and the nullable form of all of them |
 | Key | One property with `[TkKey]`: `Guid`, `int`, `long`, `uint`, `ulong` or `string` |
 | Operations | `InsertAsync`, `UpdateAsync`, `UpsertAsync`, `DeleteAsync`, `GetAsync`, `ScanAsync`, `QueryAsync`, `ExplainAsync`, `BulkInsertAsync` |
 | Other attributes | `[TkColumn("name")]` stores the property under another name; `[TkIgnore]` leaves it out |
@@ -300,7 +300,7 @@ var busy = await shop.Blogs
 | Keys | One column. An `int` or `long` key is assigned by the database; a `Guid` one by EF Core |
 | Foreign keys | Created in the database and checked by it: a reference to a missing row is not saved. They only refuse: whatever `OnDelete` says, the database deletes nothing in cascade. EF Core still deletes the dependents it has loaded; with dependents it has not loaded, the delete fails where SQLite would cascade. One column, referring to a primary key |
 | Migrations | `MigrateAsync`, with its history table and each run in one transaction: create, rename and drop tables; add, rename, change and drop columns; create, rename and drop indexes; add and drop foreign keys; seed data. The operations EF Core's model differ writes for a renamed column or table, a changed type or nullability and a removed property are checked against SQLite. A change the rows do not fit fails before anything is written, and the migration is not recorded. `dotnet ef database update` does not work, because it is synchronous; the other `dotnet ef` commands have not been tried against this provider |
-| Types | `bool`, `byte`, `short`, `int`, `long`, `float`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `TimeSpan`, `byte[]`, enums, and their nullable forms. Dates with an offset compare and sort as instants, which SQLite cannot do |
+| Types | `bool`, `byte`, `short`, `int`, `long`, `float`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `TimeSpan`, `byte[]`, enums, `TkJson`, `JsonElement`, and their nullable forms. Dates with an offset compare and sort as instants, which SQLite cannot do |
 | Text | `StartsWith`, `EndsWith` and `Contains` compare characters, as in .NET: case matters |
 | Not there | Keys of several columns; cascading deletes in the database; column defaults kept by the database (`HasDefaultValue`); changing the primary key; idempotent scripts; savepoints; `Union`; and what EF Core cannot translate fails saying so |
 | Native AOT | Not this package: EF Core builds its queries with reflection and code generated at run time |
@@ -372,6 +372,43 @@ var archived = await connection.ExecuteScalarAsync<int>("CALL archive_orders(@be
 | Checked when created | Unknown variables and functions, a `RETURN` with a value in a procedure that returns nothing, a variable with the same name as a column of a table its statement uses |
 | A damaged program | Is verified before it runs: it is either refused, saying why, or runs within the same limits. It cannot make the engine read outside its own registers and code |
 | C# or stored? | Work over data costs about the same either way (2–9 % more when stored): the time goes to the data, not to the interpreter ([measured](docs/benchmarks/fase-14.md)). Stored ones need no redeploy and are visible to every application that opens the file; C# ones are faster at pure computation and can use any library |
+
+### JSON documents
+
+Two column types for a document, as in PostgreSQL. `json` keeps the text as it was written, checked to be strict JSON. `jsonb` keeps a binary form: keys sorted and not repeated (the last one wins), each number written once and exactly. In C# both are a `TkJson`, an immutable value; `[TkJsonText]` makes the column `json`.
+
+```csharp
+[TkTable("products")]
+public sealed partial record Product
+{
+    [TkKey] public int Id { get; set; }
+
+    [TkJsonIndex("$.sku", Unique = true)]
+    [TkJsonIndex("$.price", Type = TkColumnType.F64)]
+    public TkJson Attributes { get; set; }                       // jsonb
+}
+
+await products.InsertAsync(tx, new Product { Id = 1, Attributes = TkJson.Parse("""{"sku":"a-1","price":12.5}""") });
+var one = await products.Where(p => p.Attributes.TextAt("$.sku") == "a-1").FirstOrDefaultAsync();   // by its index
+var cheap = await products.Where(p => p.Attributes.NumberAt("$.price") < 20).ToListAsync();
+```
+
+```sql
+CREATE TABLE products (id INT PRIMARY KEY, attributes JSONB NOT NULL);
+CREATE UNIQUE INDEX by_sku ON products (JSON_VALUE(attributes, '$.sku'));
+SELECT id, attributes ->> 'sku', attributes -> 'size' FROM products WHERE JSON_VALUE(attributes, '$.price') < 20;
+```
+
+| | |
+| --- | --- |
+| Reading by path | `JSON_EXTRACT` and `->>` give the SQL value at a path; `->` gives it as a document; `JSON_VALUE` only scalars, `JSON_QUERY` only arrays and objects; `JSON_EXISTS` and `JSON_TYPE`. Checked against SQLite's `json_extract`, `->` and `->>` on the same documents. A `json` column gives a repeated key its first value, as SQLite; a `jsonb` one keeps the last, as PostgreSQL |
+| Paths | `$`, `.name`, `."any name"`, `[2]`, `[#-1]` for the last. After `->` and `->>` a name or a position alone is a path, as in SQLite |
+| Indexes on a path | `[TkJsonIndex]` or `CREATE INDEX … (JSON_VALUE(column, 'path') [AS DOUBLE])`: the same index, byte for byte, kept alike by SQL and by the row type. A TEXT index holds strings (and the text of arrays and objects), a DOUBLE one numbers; the WHERE is checked again on every row it gives |
+| Whole documents | Equal when they say the same, in any form. They sort by their canonical text, a fixed order, not a meaningful one. A document is never a key or indexed whole |
+| Entity Framework Core | A `TkJson` or `JsonElement` property maps to `jsonb`, a `string` one to `json` or `jsonb` with `HasColumnType`; `EF.Functions.JsonValue` and `JsonExists` |
+| Native AOT | Yes. Values of the application go in and out with `TkJson.Serialize` and `Deserialize` and a `JsonTypeInfo` |
+
+The binary form reads a value at a path without parsing the document: about 50 to 110 ns against 0.3 to 3 µs for the text. It takes about twice the space of the compact text ([measurements](docs/benchmarks/fase-19.md)).
 
 ### Dates and time series
 

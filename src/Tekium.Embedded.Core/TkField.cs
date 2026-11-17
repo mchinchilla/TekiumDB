@@ -83,6 +83,9 @@ public sealed class TkField<TRow, TValue> : TkField<TRow>
         _isNullable = isNullable;
     }
 
+    /// <summary>Gets the position of the field: a column, or past the columns, an expression.</summary>
+    public int Ordinal => _ordinal;
+
     /// <summary>Accepts the rows whose field is this value.</summary>
     /// <param name="value">The value.</param>
     /// <returns>The condition.</returns>

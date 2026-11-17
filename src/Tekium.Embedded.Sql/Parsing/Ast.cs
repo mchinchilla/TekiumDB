@@ -108,7 +108,12 @@ internal sealed record RenameIndexAction(string Name, string NewName) : AlterAct
 /// </summary>
 internal sealed record AlterColumnAction(string Name, TkColumnType Type, bool? NotNull, bool HasDefault, object? Default) : AlterAction;
 
-internal sealed record CreateIndexStatement(string Name, string Table, IReadOnlyList<string> Columns, bool Unique, bool IfNotExists) : SqlStatement;
+/// <summary>CREATE INDEX. A field with a path is the value at that path of a JSON column, as TEXT or DOUBLE.</summary>
+internal sealed record CreateIndexStatement(string Name, string Table, IReadOnlyList<string> Columns, bool Unique, bool IfNotExists) : SqlStatement
+{
+    /// <summary>Gets, for each column, the path and kind of value indexed; null for a column indexed as it is.</summary>
+    public IReadOnlyList<(string Path, TkColumnType Type)?>? Paths { get; init; }
+}
 
 internal sealed record CreateViewStatement(string Name, SelectStatement Query, string Text, bool OrReplace) : SqlStatement;
 

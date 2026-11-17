@@ -77,6 +77,11 @@ internal sealed class IndexParser
                     diagnostics.Add(DiagnosticModel.Create("TK0010", location, name, member));
                     valid = false;
                 }
+                else if (parser.IsJson(field))
+                {
+                    diagnostics.Add(DiagnosticModel.Create("TK0024", location, member));
+                    valid = false;
+                }
 
                 fields.Add(field);
             }
@@ -131,6 +136,40 @@ internal sealed class IndexParser
                     {
                         checkModels.Add(new CheckModel(name, Escaped(property.Name), body.NormalizeWhitespace(eol: "\n").ToFullString()));
                     }
+                }
+                else if (kind == TableParser.JsonIndexAttribute)
+                {
+                    var path = attribute.ConstructorArguments is { Length: 1 } arguments ? arguments[0].Value as string ?? string.Empty : string.Empty;
+                    var valueType = attribute.NamedArguments.FirstOrDefault(static argument => argument.Key == "Type").Value.Value is int given ? given : 20;
+                    var column = parser.ColumnOf(property.Name);
+                    if (column < 0 || !parser.IsJson(column))
+                    {
+                        diagnostics.Add(DiagnosticModel.Create("TK0026", location, property.Name, "it is not a TkJson column"));
+                        continue;
+                    }
+
+                    if (path.Length == 0 || path[0] != '$')
+                    {
+                        diagnostics.Add(DiagnosticModel.Create("TK0026", location, path, "a path starts with $"));
+                        continue;
+                    }
+
+                    if (valueType is not (20 or 11))
+                    {
+                        diagnostics.Add(DiagnosticModel.Create("TK0026", location, property.Name, "a value at a path is indexed as TEXT or DOUBLE"));
+                        continue;
+                    }
+
+                    var name = Named(attribute, "Name") is { Length: > 0 } named ? named : property.Name + "_" + LastName(path);
+                    if (indexes.Any(existing => existing.Name == name))
+                    {
+                        diagnostics.Add(DiagnosticModel.Create("TK0011", location, type.Name, name));
+                        continue;
+                    }
+
+                    var field = parser.PathField(column, path, valueType == 11, name);
+                    var unique = attribute.NamedArguments.Any(static argument => argument.Key == "Unique" && argument.Value.Value is true);
+                    indexes.Add(new IndexModel(name, new EquatableArray<int>(ImmutableArray.Create(field)), null, unique));
                 }
                 else if (kind == TableParser.ZoneMapAttribute)
                 {
@@ -248,6 +287,50 @@ internal sealed class IndexParser
 
     private static string Plain(string identifier) => identifier.TrimStart('@');
 
+    /// <summary>The last name in a path, made fit for an identifier: what names an index on it by default.</summary>
+    private static string LastName(string path)
+    {
+        var name = new System.Text.StringBuilder();
+        foreach (var character in path.Substring(path.LastIndexOf('.') + 1))
+        {
+            name.Append(char.IsLetterOrDigit(character) ? character : '_');
+        }
+
+        return name.Length == 0 ? "path" : name.ToString();
+    }
+
+    /// <summary>A field that is the value at a path of a JSON column, named after its index so that conditions can be written with it.</summary>
+    private int PathField(int column, string path, bool isNumber, string index)
+    {
+        var json = _columns[column];
+        var property = new System.Text.StringBuilder();
+        foreach (var character in index)
+        {
+            property.Append(char.IsLetterOrDigit(character) || character == '_' ? character : '_');
+        }
+
+        var name = char.IsDigit(property[0]) ? "_" + property : property.ToString();
+        while (_columns.Any(existing => Plain(existing.Property) == name) || _computed.Any(existing => Plain(existing.Property) == name))
+        {
+            name += "_";
+        }
+
+        _computed.Add(new ColumnModel(
+            name,
+            json.ColumnName,
+            isNumber ? "F64" : "Text",
+            isNumber ? "Double" : "String",
+            isNumber ? "double" : "string",
+            isNumber ? "double" : "string",
+            true,
+            isNumber,
+            false,
+            string.Empty,
+            path,
+            json.Property));
+        return _columns.Count + _computed.Count - 1;
+    }
+
     private static string? Literal(object value)
     {
         switch (value)
@@ -274,7 +357,7 @@ internal sealed class IndexParser
     }
 
     /// <summary>The position of the column a property is stored in, or -1 if it is not a column.</summary>
-    private int ColumnOf(string propertyName)
+    internal int ColumnOf(string propertyName)
     {
         for (var i = 0; i < _columns.Count; i++)
         {
@@ -286,6 +369,9 @@ internal sealed class IndexParser
 
         return -1;
     }
+
+    /// <summary>Whether a field is a JSON document, which has no order of its own.</summary>
+    internal bool IsJson(int field) => Model(field).StoreType is "Json" or "Jsonb";
 
     private ColumnModel Model(int field) => field < _columns.Count ? _columns[field] : _computed[field - _columns.Count];
 

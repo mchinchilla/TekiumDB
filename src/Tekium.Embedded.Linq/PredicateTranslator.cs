@@ -125,7 +125,64 @@ internal static class PredicateTranslator<TRow>
             expression = inner;
         }
 
+        if (expression is MethodCallExpression { Method.Name: nameof(TkJson.TextAt) or nameof(TkJson.NumberAt), Object: { } document, Arguments: [var path] } call
+            && call.Method.DeclaringType == typeof(TkJson))
+        {
+            return PathField(document, path, call.Method.Name == nameof(TkJson.NumberAt) ? TkColumnType.F64 : TkColumnType.Text, row);
+        }
+
         return expression is MemberExpression { Expression: { } target } member && target == row ? TRow.FindField(member.Member.Name) : null;
+    }
+
+    /// <summary>
+    /// The field of <c>row.Document.TextAt(path)</c> or <c>NumberAt(path)</c>: the one an index on that path
+    /// declares with <c>[TkJsonIndex]</c>, of that kind. Without one there is nothing to compare, and it is refused.
+    /// </summary>
+    private static TkField<TRow> PathField(Expression document, Expression pathExpression, TkColumnType kind, ParameterExpression row)
+    {
+        if (document is MemberExpression { Member.Name: "Value", Expression: { } inner } && Nullable.GetUnderlyingType(inner.Type) is not null)
+        {
+            document = inner;
+        }
+
+        if (document is not MemberExpression { Expression: { } target } member || target != row || TRow.FindField(member.Member.Name) is not { } column)
+        {
+            throw new NotSupportedException($"A value at a path is read from a JSON property of {typeof(TRow).Name} itself; '{document}' is not one.");
+        }
+
+        if (DependsOn(pathExpression, row))
+        {
+            throw new NotSupportedException($"The condition on '{member.Member.Name}' cannot be translated: the path depends on the row, and an index is on one path.");
+        }
+
+        var text = pathExpression switch
+        {
+            ConstantExpression { Value: string written } => written,
+            MemberExpression { Member: FieldInfo variable, Expression: ConstantExpression { Value: var closure } } => variable.GetValue(closure) as string,
+            _ => null,
+        };
+        var path = TkJsonPath.Parse(text ?? throw new NotSupportedException("A path is written as text, or a variable that holds it, starting with $."));
+        var columnName = TRow.Columns[column.Accept(new Ordinal())].Name;
+        var expressions = TRow.Expressions;
+        for (var i = 0; i < expressions.Length; i++)
+        {
+            if (expressions[i].JsonPath is { } declared && declared.Equals(path) && expressions[i].Type == kind
+                && string.Equals(expressions[i].Name, columnName, StringComparison.Ordinal))
+            {
+                var ordinal = TRow.Columns.Length + i;
+                return kind == TkColumnType.F64 ? new TkField<TRow, double>(ordinal, kind, true) : new TkField<TRow, string>(ordinal, kind, true);
+            }
+        }
+
+        throw new NotSupportedException(
+            $"No [TkJsonIndex] of {typeof(TRow).Name} declares {path.Text} of '{member.Member.Name}' as {(kind == TkColumnType.F64 ? "a number" : "text")}: "
+            + "the engine compares a value at a path only through its index, and does not read the documents in memory.");
+    }
+
+    /// <summary>The position of a field.</summary>
+    private sealed class Ordinal : ITkFieldVisitor<TRow, int>
+    {
+        public int Visit<TValue>(TkField<TRow, TValue> field) => field.Ordinal;
     }
 
     /// <summary>The field of <c>row.Property.HasValue</c>. Null if the expression is not that.</summary>

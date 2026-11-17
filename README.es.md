@@ -147,7 +147,7 @@ El generador de código escribe el serializador de `Document` al compilar: no ha
 
 | Qué | Cómo |
 | --- | --- |
-| Tipos de columna | `bool`, enteros de 8 a 64 bits con y sin signo, `float`, `double`, `decimal`, `char`, `string`, `byte[]`, `Guid`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `DateOnly`, `TimeOnly`, enums, y la forma anulable de todos |
+| Tipos de columna | `bool`, enteros de 8 a 64 bits con y sin signo, `float`, `double`, `decimal`, `char`, `string`, `byte[]`, `Guid`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `DateOnly`, `TimeOnly`, enums, `TkJson` (documentos JSON), y la forma anulable de todos |
 | Clave | Una propiedad con `[TkKey]`: `Guid`, `int`, `long`, `uint`, `ulong` o `string` |
 | Operaciones | `InsertAsync`, `UpdateAsync`, `UpsertAsync`, `DeleteAsync`, `GetAsync`, `ScanAsync`, `QueryAsync`, `ExplainAsync`, `BulkInsertAsync` |
 | Otros atributos | `[TkColumn("nombre")]` guarda la propiedad con otro nombre; `[TkIgnore]` la deja fuera |
@@ -300,7 +300,7 @@ var busy = await shop.Blogs
 | Claves | De una columna. Una clave `int` o `long` la asigna la base; una `Guid`, EF Core |
 | Claves foráneas | Se crean en la base y la base las comprueba: una referencia a una fila que no existe no se guarda. Sólo impiden: diga lo que diga `OnDelete`, la base no borra nada en cascada. EF Core sigue borrando los dependientes que tiene cargados; con dependientes sin cargar, el borrado falla donde SQLite borraría en cascada. De una columna, referida a una clave primaria |
 | Migraciones | `MigrateAsync`, con su tabla de historial y cada corrida en una transacción: crear, renombrar y borrar tablas; agregar, renombrar, cambiar y quitar columnas; crear, renombrar y borrar índices; agregar y quitar claves foráneas; datos sembrados. Las operaciones que el comparador de modelos de EF Core escribe para una columna o tabla renombrada, un cambio de tipo o de nulabilidad y una propiedad quitada están comprobadas contra SQLite. Un cambio que no cabe en las filas falla antes de escribir nada, y la migración no queda anotada. `dotnet ef database update` no funciona, porque es síncrono; los demás comandos de `dotnet ef` no se han probado contra este proveedor |
-| Tipos | `bool`, `byte`, `short`, `int`, `long`, `float`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `TimeSpan`, `byte[]`, enumeraciones, y sus formas anulables. Las fechas con zona se comparan y ordenan como instantes, cosa que SQLite no sabe hacer |
+| Tipos | `bool`, `byte`, `short`, `int`, `long`, `float`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `TimeSpan`, `byte[]`, enumeraciones, `TkJson`, `JsonElement`, y sus formas anulables. Las fechas con zona se comparan y ordenan como instantes, cosa que SQLite no sabe hacer |
 | Texto | `StartsWith`, `EndsWith` y `Contains` comparan caracteres, como en .NET: las mayúsculas cuentan |
 | Lo que no hay | Claves de varias columnas; borrado en cascada en la base; valores por omisión guardados por la base (`HasDefaultValue`); cambiar la clave primaria; scripts idempotentes; puntos de guardado; `Union`; y lo que EF Core no sabe traducir falla diciéndolo |
 | Native AOT | Este paquete no: EF Core arma sus consultas con reflexión y código generado en ejecución |
@@ -372,6 +372,43 @@ var archived = await connection.ExecuteScalarAsync<int>("CALL archive_orders(@be
 | Se comprueba al crearlo | Variables y funciones desconocidas, un `RETURN` con valor en un procedimiento que no devuelve nada, una variable que se llama igual que una columna de una tabla que su sentencia usa |
 | Un programa dañado | Se verifica antes de correr: o se rechaza diciendo por qué, o corre dentro de los mismos límites. No puede hacer que el motor lea fuera de sus propios registros y código |
 | ¿C# o almacenado? | El trabajo sobre datos cuesta casi lo mismo de las dos formas (entre 2 y 9 % más el almacenado): el tiempo se va en los datos, no en el intérprete ([medido](docs/benchmarks/fase-14.md)). Los almacenados no piden redesplegar y los ve toda aplicación que abra el archivo; los de C# son más rápidos en cálculo puro y pueden usar cualquier biblioteca |
+
+### Documentos JSON
+
+Dos tipos de columna para un documento, como en PostgreSQL. `json` guarda el texto tal como se escribió, comprobado como JSON estricto. `jsonb` guarda una forma binaria: claves ordenadas y sin repetir (gana la última), cada número escrito una sola vez y exacto. En C# los dos son un `TkJson`, un valor inmutable; `[TkJsonText]` hace la columna `json`.
+
+```csharp
+[TkTable("products")]
+public sealed partial record Product
+{
+    [TkKey] public int Id { get; set; }
+
+    [TkJsonIndex("$.sku", Unique = true)]
+    [TkJsonIndex("$.price", Type = TkColumnType.F64)]
+    public TkJson Attributes { get; set; }                       // jsonb
+}
+
+await products.InsertAsync(tx, new Product { Id = 1, Attributes = TkJson.Parse("""{"sku":"a-1","price":12.5}""") });
+var one = await products.Where(p => p.Attributes.TextAt("$.sku") == "a-1").FirstOrDefaultAsync();   // por su índice
+var cheap = await products.Where(p => p.Attributes.NumberAt("$.price") < 20).ToListAsync();
+```
+
+```sql
+CREATE TABLE products (id INT PRIMARY KEY, attributes JSONB NOT NULL);
+CREATE UNIQUE INDEX by_sku ON products (JSON_VALUE(attributes, '$.sku'));
+SELECT id, attributes ->> 'sku', attributes -> 'size' FROM products WHERE JSON_VALUE(attributes, '$.price') < 20;
+```
+
+| | |
+| --- | --- |
+| Leer por ruta | `JSON_EXTRACT` y `->>` dan el valor de SQL en una ruta; `->`, el valor como documento; `JSON_VALUE` sólo escalares, `JSON_QUERY` sólo arreglos y objetos; `JSON_EXISTS` y `JSON_TYPE`. Comprobado contra `json_extract`, `->` y `->>` de SQLite sobre los mismos documentos. Una columna `json` da a una clave repetida su primer valor, como SQLite; una `jsonb` guarda el último, como PostgreSQL |
+| Rutas | `$`, `.nombre`, `."cualquier nombre"`, `[2]`, `[#-1]` para el último. Después de `->` y `->>`, un nombre o una posición sola es una ruta, como en SQLite |
+| Índices sobre una ruta | `[TkJsonIndex]` o `CREATE INDEX … (JSON_VALUE(columna, 'ruta') [AS DOUBLE])`: el mismo índice, byte por byte, que SQL y el tipo de fila mantienen igual. Uno TEXT guarda textos (y el texto de arreglos y objetos), uno DOUBLE números; el WHERE se vuelve a comprobar en cada fila que da |
+| Documentos enteros | Iguales cuando dicen lo mismo, en cualquier forma. Se ordenan por su texto canónico, un orden fijo, no uno con sentido. Un documento nunca es clave ni se indexa entero |
+| Entity Framework Core | Una propiedad `TkJson` o `JsonElement` va a `jsonb`, una `string` a `json` o `jsonb` con `HasColumnType`; `EF.Functions.JsonValue` y `JsonExists` |
+| Native AOT | Sí. Los valores de la aplicación entran y salen con `TkJson.Serialize` y `Deserialize` y un `JsonTypeInfo` |
+
+La forma binaria lee un valor en una ruta sin analizar el documento: unos 50 a 110 ns contra 0,3 a 3 µs del texto. Ocupa más o menos el doble que el texto compacto ([mediciones](docs/benchmarks/fase-19.md)).
 
 ### Fechas y series de tiempo
 

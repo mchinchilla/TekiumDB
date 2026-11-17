@@ -35,6 +35,7 @@ internal static class SqlValues
         TkColumnType.DateOnly => typeof(DateOnly),
         TkColumnType.TimeOnly => typeof(TimeOnly),
         TkColumnType.Text => typeof(string),
+        TkColumnType.Json or TkColumnType.Jsonb => typeof(TkJson),
         _ => typeof(byte[]),
     };
 
@@ -62,6 +63,13 @@ internal static class SqlValues
             throw new TkSqlException($"The value {Show(value)} cannot be stored in column '{column}', which would hold {to}.", exception);
         }
 
+        // A JSON document says the same as text, in its binary form or as a column of the other kind; text
+        // that is not a document was refused above. (A repeated key keeps its last value in the binary form.)
+        if (from is TkColumnType.Json or TkColumnType.Jsonb || to is TkColumnType.Json or TkColumnType.Jsonb)
+        {
+            return changed;
+        }
+
         return Compare(back, value) == 0 && (to != TkColumnType.Text || from != TkColumnType.Text)
             ? changed
             : throw new TkSqlException($"The value {Show(value)} cannot be kept as it is in column '{column}', which would hold {to}: it would become {Show(changed)}.");
@@ -76,6 +84,7 @@ internal static class SqlValues
         static object AsText(object value) => value switch
         {
             string text => text,
+            TkJson json => json.ToString(),
             DateTimeOffset moment => moment.ToString("O", CultureInfo.InvariantCulture),
             DateTime moment => moment.ToString("O", CultureInfo.InvariantCulture),
             IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
@@ -157,8 +166,18 @@ internal static class SqlValues
                     Guid id => id.ToString(),
                     _ => throw new InvalidCastException(),
                 },
+                TkColumnType.Json or TkColumnType.Jsonb => value switch
+                {
+                    TkJson json => json.As(type == TkColumnType.Jsonb ? TkJsonFormat.Binary : TkJsonFormat.Text),
+                    string text => TkJson.Parse(text).As(type == TkColumnType.Jsonb ? TkJsonFormat.Binary : TkJsonFormat.Text),
+                    _ => throw new InvalidCastException(),
+                },
                 _ => value is byte[] ? value : throw new InvalidCastException(),
             };
+        }
+        catch (FormatException invalid) when (type is TkColumnType.Json or TkColumnType.Jsonb)
+        {
+            throw new TkSqlException($"The value {Show(value)} cannot be stored in column '{column}', which holds {type}: {invalid.Message}", invalid);
         }
         catch (Exception exception) when (exception is InvalidCastException or FormatException or OverflowException)
         {
@@ -168,7 +187,7 @@ internal static class SqlValues
         static object Number(object value) => value switch
         {
             bool flag => flag ? 1 : 0,
-            string or Guid or DateTime or DateTimeOffset or byte[] => throw new InvalidCastException(),
+            string or Guid or DateTime or DateTimeOffset or byte[] or TkJson => throw new InvalidCastException(),
             _ => value,
         };
     }
@@ -178,6 +197,7 @@ internal static class SqlValues
     {
         null => "NULL",
         string text => $"'{text}'",
+        TkJson json => $"'{json}'",
         byte[] bytes => $"x'{System.Convert.ToHexString(bytes)}'",
         IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
         _ => value.ToString() ?? string.Empty,
@@ -202,6 +222,9 @@ internal static class SqlValues
             (char a, string b) => CompareText(a.ToString(), b),
             (string a, char b) => CompareText(a, b.ToString()),
             (byte[] a, byte[] b) => a.AsSpan().SequenceCompareTo(b),
+
+            // Equal when they say the same; otherwise in the order of their canonical text, which is a fixed order, not a meaningful one.
+            (TkJson a, TkJson b) => a == b ? 0 : string.CompareOrdinal(a.ToBinary().ToString(), b.ToBinary().ToString()),
             (Guid a, Guid b) => a.ToByteArray(bigEndian: true).AsSpan().SequenceCompareTo(b.ToByteArray(bigEndian: true)),
             (DateTimeOffset a, DateTimeOffset b) => a.UtcTicks.CompareTo(b.UtcTicks),
             (DateTimeOffset a, DateTime b) => a.UtcTicks.CompareTo(((DateTimeOffset)Convert(b, TkColumnType.DateTimeOffset, "value")).UtcTicks),
@@ -234,6 +257,8 @@ internal static class SqlValues
         TkColumnType.DateOnly => default(DateOnly),
         TkColumnType.TimeOnly => default(TimeOnly),
         TkColumnType.Text => string.Empty,
+        TkColumnType.Json => TkJson.Null,
+        TkColumnType.Jsonb => TkJson.Null.ToBinary(),
         _ => Array.Empty<byte>(),
     };
 
@@ -261,6 +286,7 @@ internal static class SqlValues
         TimeOnly => TkColumnType.TimeOnly,
         string => TkColumnType.Text,
         byte[] => TkColumnType.Bytes,
+        TkJson json => json.Format == TkJsonFormat.Binary ? TkColumnType.Jsonb : TkColumnType.Json,
         _ => null,
     };
 
@@ -332,6 +358,7 @@ internal static class SqlValues
             case TkColumnType.DateOnly: writer.Write((DateOnly)value!); break;
             case TkColumnType.TimeOnly: writer.Write((TimeOnly)value!); break;
             case TkColumnType.Text: writer.Write((string)value!); break;
+            case TkColumnType.Json or TkColumnType.Jsonb: throw new TkSqlException("A JSON document has no order of its own: index or compare a value at a path of it.");
             default: writer.Write((byte[])value!); break;
         }
     }
@@ -347,6 +374,7 @@ internal static class SqlValues
                 null => 0,
                 string text => 5 + Encoding.UTF8.GetByteCount(text),
                 byte[] bytes => 5 + bytes.Length,
+                TkJson json => 5 + (columns[i].Type == TkColumnType.Jsonb ? json.GetBinary().Length : Encoding.UTF8.GetByteCount(json.ToString())),
                 _ => 24,
             };
         }
@@ -384,6 +412,8 @@ internal static class SqlValues
                 case TkColumnType.DateOnly: writer.WriteDateOnly((DateOnly)value); break;
                 case TkColumnType.TimeOnly: writer.WriteTimeOnly((TimeOnly)value); break;
                 case TkColumnType.Text: writer.WriteString((string)value); break;
+                case TkColumnType.Json: writer.WriteJson((TkJson)value); break;
+                case TkColumnType.Jsonb: writer.WriteJsonb((TkJson)value); break;
                 default: writer.WriteBytes((byte[])value); break;
             }
         }
@@ -425,6 +455,8 @@ internal static class SqlValues
                 TkColumnType.DateOnly => reader.ReadDateOnly(),
                 TkColumnType.TimeOnly => reader.ReadTimeOnly(),
                 TkColumnType.Text => reader.ReadString(),
+                TkColumnType.Json => reader.ReadJson(),
+                TkColumnType.Jsonb => reader.ReadJsonb(),
                 _ => reader.ReadBytes(),
             };
         }

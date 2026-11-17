@@ -118,6 +118,13 @@ public sealed class TableGeneratorTests
     [InlineData("TK0007", "[TkTable] public partial class T<X> { [TkKey] public int Id { get; set; } }", "'T' cannot be a table")]
     [InlineData("TK0008", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkColumn(\"Id\")] public int Other { get; set; } }", "column 'Id'")]
     [InlineData("TK0009", "[TkTable] public partial class T { public int Id => 1; }", "no property that can be stored")]
+    [InlineData("TK0005", "[TkTable] public partial class T { [TkKey] public TkJson Id { get; set; } }", "'Id'")]
+    [InlineData("TK0024", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkIndex] public TkJson Doc { get; set; } }", "'Doc' is a JSON document")]
+    [InlineData("TK0024", "[TkTable][TkIndex(nameof(Doc), nameof(Id))] public partial class T { [TkKey] public int Id { get; set; } public TkJson Doc { get; set; } }", "'Doc'")]
+    [InlineData("TK0026", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkJsonIndex(\"$.a\")] public string Doc { get; set; } = \"\"; }", "'Doc'")]
+    [InlineData("TK0026", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkJsonIndex(\"a\")] public TkJson Doc { get; set; } }", "'a'")]
+    [InlineData("TK0026", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkJsonIndex(\"$.a\", Type = TkColumnType.I32)] public TkJson Doc { get; set; } }", "TEXT or DOUBLE")]
+    [InlineData("TK0025", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkJsonText] public string Doc { get; set; } = \"\"; }", "'Doc' is not a TkJson")]
     public void What_cannot_be_a_table_is_reported_as_an_error_and_generates_nothing(string id, string source, string says)
     {
         var (diagnostics, generated) = Run("#nullable enable\nusing Tekium.Embedded;\n" + source, mustCompile: false);

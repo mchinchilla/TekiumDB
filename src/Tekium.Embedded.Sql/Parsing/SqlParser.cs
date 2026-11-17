@@ -198,7 +198,13 @@ internal sealed partial class SqlParser
             else
             {
                 var two = i + 1 < text.Length ? text.Substring(i, 2) : string.Empty;
-                if (two is "<>" or "!=" or "<=" or ">=" or "||")
+                if (two == "->")
+                {
+                    var arrow = i + 2 < text.Length && text[i + 2] == '>' ? "->>" : "->";
+                    tokens.Add(new Token(Kind.Symbol, arrow, i));
+                    i += arrow.Length;
+                }
+                else if (two is "<>" or "!=" or "<=" or ">=" or "||")
                 {
                     tokens.Add(new Token(Kind.Symbol, two == "!=" ? "<>" : two, i));
                     i += 2;
@@ -531,13 +537,46 @@ internal sealed partial class SqlParser
             var table = Name("a table name");
             Expect("(");
             var columns = new List<string>();
+            var paths = new List<(string Path, TkColumnType Type)?>();
             do
             {
-                columns.Add(Name("a column name"));
+                // A column, or the value at a path of a JSON column: JSON_VALUE(column, 'path') or column ->> 'path', AS TEXT or DOUBLE.
+                (string Path, TkColumnType Type)? path = null;
+                string column;
+                if (Is("JSON_VALUE") && Peek(1) == "(")
+                {
+                    _position += 2;
+                    column = Name("a column name");
+                    Expect(",");
+                    path = (PathText(), TkColumnType.Text);
+                    Expect(")");
+                }
+                else if (IsName() && Peek(1) is "->>")
+                {
+                    column = Name("a column name");
+                    _position++;
+                    path = (PathText(), TkColumnType.Text);
+                }
+                else if (IsName() && Peek(1) is "," or ")")
+                {
+                    column = Name("a column name");
+                }
+                else
+                {
+                    throw Error("a column or JSON_VALUE(column, 'path')");
+                }
+
+                if (path is { } found && Accept("AS"))
+                {
+                    path = (found.Path, ColumnType());
+                }
+
+                columns.Add(column);
+                paths.Add(path);
             }
             while (Accept(","));
             Expect(")");
-            return new CreateIndexStatement(name, table, columns, unique, ifNotExists);
+            return new CreateIndexStatement(name, table, columns, unique, ifNotExists) { Paths = paths.Exists(static path => path is not null) ? paths : null };
         }
 
         if (unique)
@@ -831,6 +870,19 @@ internal sealed partial class SqlParser
         throw Error("ADD, DROP, RENAME or ALTER");
     }
 
+    /// <summary>A path written as text in a statement: it must start with $, and is kept as written for the engine to read.</summary>
+    private string PathText()
+    {
+        var token = Current;
+        if (token.Kind != Kind.Text)
+        {
+            throw Error("a JSON path in quotes");
+        }
+
+        _position++;
+        return token.Text;
+    }
+
     /// <summary>COLUMN is optional before a column name, and may also be the name of the column.</summary>
     private void SkipColumnWord()
     {
@@ -939,6 +991,8 @@ internal sealed partial class SqlParser
             "TIME" => TkColumnType.TimeOnly,
             "INTERVAL" => TkColumnType.TimeSpan,
             "BLOB" or "BYTEA" or "VARBINARY" or "BINARY" => TkColumnType.Bytes,
+            "JSON" => TkColumnType.Json,
+            "JSONB" => TkColumnType.Jsonb,
             _ => throw new TkSqlException($"Unknown column type '{token.Text}' at position {token.Position + 1}."),
         };
         if (name == "DOUBLE" && Is("PRECISION"))
@@ -1070,8 +1124,22 @@ internal sealed partial class SqlParser
 
     private SqlExpr Multiplicative()
     {
-        var left = Primary();
+        var left = JsonAccess();
         while (Current.Kind == Kind.Symbol && Current.Text is "*" or "/" or "%")
+        {
+            var op = Current.Text;
+            _position++;
+            left = new Binary(op, left, JsonAccess());
+        }
+
+        return left;
+    }
+
+    /// <summary><c>doc -&gt; path</c> and <c>doc -&gt;&gt; path</c>, which bind tighter than arithmetic and read left to right.</summary>
+    private SqlExpr JsonAccess()
+    {
+        var left = Primary();
+        while (Current.Kind == Kind.Symbol && Current.Text is "->" or "->>")
         {
             var op = Current.Text;
             _position++;
@@ -1172,7 +1240,9 @@ internal sealed partial class SqlParser
                 }
 
                 _position++;
-                if (token.Kind == Kind.Word && Accept("("))
+
+                // A function may be named in quotes, as Entity Framework writes the functions an application maps.
+                if (Accept("("))
                 {
                     if (token.Text.Equals("CAST", StringComparison.OrdinalIgnoreCase))
                     {

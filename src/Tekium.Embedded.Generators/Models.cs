@@ -60,7 +60,9 @@ internal sealed record ColumnModel(
     bool IsNullable,
     bool IsValueType,
     bool IsEnum,
-    string Expression = "");
+    string Expression = "",
+    string JsonPath = "",
+    string JsonProperty = "");
 
 /// <summary>A diagnostic to report, kept as plain data so that the model stays comparable.</summary>
 internal sealed record DiagnosticModel(string Id, string Argument0, string Argument1, string FilePath, TextSpan Span, LinePositionSpan LineSpan)

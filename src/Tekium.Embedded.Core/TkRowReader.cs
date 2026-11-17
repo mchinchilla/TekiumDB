@@ -219,6 +219,14 @@ public ref struct TkRowReader
     /// <returns>The value, in a new array.</returns>
     public byte[] ReadBytes() => Take(ReadLength()).ToArray();
 
+    /// <summary>Reads a <c>json</c> column, checked to be a document.</summary>
+    /// <returns>The document, kept as text.</returns>
+    public TkJson ReadJson() => TkJson.FromStored(Take(ReadLength()), TkJsonFormat.Text);
+
+    /// <summary>Reads a <c>jsonb</c> column, checked whole.</summary>
+    /// <returns>The document, kept as binary.</returns>
+    public TkJson ReadJsonb() => TkJson.FromStored(Take(ReadLength()), TkJsonFormat.Binary);
+
     private static void ThrowCorrupt() =>
         throw new InvalidDataException("A stored row does not match the schema it claims to have been written with.");
 
@@ -267,7 +275,7 @@ public ref struct TkRowReader
                 or TkColumnType.TimeSpan or TkColumnType.TimeOnly => 8,
             TkColumnType.DateTimeOffset => 10,
             TkColumnType.Numeric or TkColumnType.Uuid => 16,
-            TkColumnType.Text or TkColumnType.Bytes => ReadLength(),
+            TkColumnType.Text or TkColumnType.Bytes or TkColumnType.Json or TkColumnType.Jsonb => ReadLength(),
             _ => -1,
         };
         if (size < 0)

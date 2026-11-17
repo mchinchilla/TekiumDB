@@ -135,9 +135,13 @@ internal sealed class SqlTable
         return table;
     }
 
-    /// <summary>Whether a FOREIGN KEY can be checked with an index: it holds every row, and starts with a column.</summary>
+    /// <summary>Whether a FOREIGN KEY can be checked with an index: it holds every row, and starts with a column as it is.</summary>
     public static bool CanCheck(StoredIndex index) =>
-        index.Unmaintainable is null && !index.IsZoneMap && index.Where.Length == 0 && index.Columns.Length > 0 && index.Columns[0] >= 0;
+        index.Unmaintainable is null && !index.IsZoneMap && index.Where.Length == 0 && index.Columns.Length > 0 && index.Columns[0] >= 0 && index.Paths[0] is null;
+
+    /// <summary>The value a field of an index holds for a row: its column, or the value at a path of a JSON column, as the row type computes it.</summary>
+    public static object? FieldValue(StoredIndex index, int field, object?[] row) =>
+        index.Paths[field] is { } path ? TkJsonIndexing.Value(row[index.Columns[field]] as TkJson?, path, index.Types[field]) : row[index.Columns[field]];
 
     /// <summary>The name of a table as the catalog has it: the one given, or one that differs only in case. Null if there is none.</summary>
     public static async ValueTask<string?> ResolveAsync(TkTransaction transaction, string name, CancellationToken cancellationToken)
@@ -654,12 +658,12 @@ internal sealed class SqlTable
         var writer = new TkKeyWriter(buffer);
         for (var i = 0; i < index.Columns.Length; i++)
         {
-            if (row[index.Columns[i]] is null)
+            if (FieldValue(index, i, row) is not { } value)
             {
                 return null;
             }
 
-            SqlValues.WriteField(ref writer, row[index.Columns[i]], index.Types[i], index.Nullable[i]);
+            SqlValues.WriteField(ref writer, value, index.Types[i], index.Nullable[i]);
         }
 
         return buffer.AsSpan(0, writer.Length).ToArray();
@@ -686,8 +690,9 @@ internal sealed class SqlTable
         var writer = new TkKeyWriter(buffer);
         for (var i = 0; i < index.Columns.Length; i++)
         {
-            hasNull |= index.Nullable[i] && row[index.Columns[i]] is null;
-            SqlValues.WriteField(ref writer, row[index.Columns[i]], index.Types[i], index.Nullable[i]);
+            var value = FieldValue(index, i, row);
+            hasNull |= index.Nullable[i] && value is null;
+            SqlValues.WriteField(ref writer, value, index.Types[i], index.Nullable[i]);
         }
 
         prefix = writer.Length;

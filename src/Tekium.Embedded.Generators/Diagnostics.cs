@@ -123,6 +123,21 @@ internal static class Diagnostics
         "Two SQL routines have the same name",
         "The assembly declares more than one SQL routine named '{0}'");
 
+    public static readonly DiagnosticDescriptor JsonIndexed = Error(
+        "TK0024",
+        "A JSON document is not indexed whole",
+        "'{0}' is a JSON document, which has no order of its own: index a value at a path of it with [TkJsonIndex]");
+
+    public static readonly DiagnosticDescriptor JsonTextMisplaced = Error(
+        "TK0025",
+        "[TkJsonText] goes on a TkJson property",
+        "'{0}' is not a TkJson: [TkJsonText] says how a JSON document is kept, and only a TkJson property is one");
+
+    public static readonly DiagnosticDescriptor JsonIndexMisplaced = Error(
+        "TK0026",
+        "[TkJsonIndex] indexes a TEXT or DOUBLE value at a path of a TkJson property",
+        "[TkJsonIndex] on '{0}' cannot be: {1}");
+
     public static DiagnosticDescriptor? Find(string id) => id switch
     {
         "TK0001" => NotPartial,
@@ -148,6 +163,9 @@ internal static class Diagnostics
         "TK0021" => VectorShape,
         "TK0022" => ProcedureShape,
         "TK0023" => DuplicateRoutine,
+        "TK0024" => JsonIndexed,
+        "TK0025" => JsonTextMisplaced,
+        "TK0026" => JsonIndexMisplaced,
         _ => null,
     };
 

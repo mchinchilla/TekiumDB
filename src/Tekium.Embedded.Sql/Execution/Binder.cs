@@ -149,6 +149,9 @@ internal static class Binder
                 var op = comparison.Op;
                 return row => compareLeft(row) is { } left && compareRight(row) is { } right ? Satisfies(op, Compare(left, right)) : null;
 
+            case Binary { Op: "->" or "->>" } arrow:
+                return SqlJson.Arrow(Bind(arrow.Left, resolve, parameters, special), Bind(arrow.Right, resolve, parameters, special), arrow.Right, arrow.Op == "->>");
+
             case Binary { Op: "||" } concat:
                 var (textLeft, textRight) = (Bind(concat.Left, resolve, parameters, special), Bind(concat.Right, resolve, parameters, special));
                 return row => textLeft(row) is { } left && textRight(row) is { } right ? Text(left) + Text(right) : null;
@@ -341,6 +344,8 @@ internal static class Binder
                 return row => arguments[0](row) is { } text && arguments[1](row) is { } part ? Text(text).Contains(Text(part), StringComparison.Ordinal) : null;
             case "CAST" when arguments.Length == 2 && call.Arguments[1] is Literal { Value: string name } && Enum.TryParse<TkColumnType>(name, out var target):
                 return row => arguments[0](row) is { } value ? Cast(value, target) : null;
+            case "JSON" or "JSONB" or "JSON_EXTRACT" or "JSON_VALUE" or "JSON_QUERY" or "JSON_EXISTS" or "JSON_TYPE" when SqlJson.Function(call.Name, arguments, call.Arguments) is { } json:
+                return json;
             case "COALESCE" when arguments.Length > 0:
                 return row =>
                 {
@@ -365,7 +370,7 @@ internal static class Binder
         if (!context.Routines.TryGetValue(call.Name, out var routine))
         {
             throw new TkSqlException(
-                $"Unknown function {call.Name} with {arguments.Length} arguments. There are LOWER, UPPER, LENGTH, ABS, COALESCE, CAST, STARTSWITH, ENDSWITH and CONTAINS, the aggregates COUNT, SUM, MIN, MAX and AVG, and the functions the application registers.");
+                $"Unknown function {call.Name} with {arguments.Length} arguments. There are LOWER, UPPER, LENGTH, ABS, COALESCE, CAST, STARTSWITH, ENDSWITH, CONTAINS, JSON, JSONB, JSON_EXTRACT, JSON_VALUE, JSON_QUERY, JSON_EXISTS and JSON_TYPE, the aggregates COUNT, SUM, MIN, MAX and AVG, and the functions the application registers.");
         }
 
         if (routine.Procedure is not null)
