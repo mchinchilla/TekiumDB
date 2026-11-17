@@ -49,12 +49,50 @@ failures += await VectorRoundTripAsync();
 failures += await MaintenanceAsync();
 failures += await SqlAsync();
 failures += await RoutinesAsync();
+failures += await AdaptersAsync();
 
 await Console.Out.WriteLineAsync(
     $"TekiumDB AOT smoke: {(failures == 0 ? "OK" : "FAILED")} " +
     $"(dynamic code supported: {RuntimeFeature.IsDynamicCodeSupported})");
 
 return failures;
+
+// Fase 15: la caché distribuida y el health check, cada uno desde su paquete, bajo Native AOT.
+static async Task<int> AdaptersAsync()
+{
+    await using var database = await TekiumDb.OpenAsync(new DbOptions { InMemory = true });
+    var cache = new Tekium.Embedded.Caching.TkDistributedCache(database);
+    var options = new Microsoft.Extensions.Caching.Distributed.DistributedCacheEntryOptions { SlidingExpiration = TimeSpan.FromMinutes(5) };
+    await cache.SetAsync("session", [1, 2, 3], options);
+    var hit = await cache.GetAsync("session");
+    await cache.RemoveAsync("session");
+    var miss = await cache.GetAsync("session");
+
+    var check = new Tekium.Embedded.HealthChecks.TkHealthCheck(database, new Tekium.Embedded.HealthChecks.TkHealthCheckOptions { Verify = true });
+    var context = new Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckContext
+    {
+        Registration = new Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckRegistration("tekiumdb", check, null, null),
+    };
+    var health = await check.CheckHealthAsync(context);
+
+    // Las claves de Data Protection: guardadas, escritas al archivo y leídas por otro repositorio.
+    int keys;
+    await using (var repository = await Tekium.Embedded.DataProtection.TkXmlRepository.CreateAsync(database))
+    {
+        repository.StoreElement(new System.Xml.Linq.XElement("key", new System.Xml.Linq.XAttribute("id", "1")), "key-1");
+        await repository.FlushAsync();
+        await using var other = await Tekium.Embedded.DataProtection.TkXmlRepository.CreateAsync(database);
+        keys = other.GetAllElements().Count;
+    }
+
+    if (hit is [1, 2, 3] && miss is null && health.Status == Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Healthy && keys == 1)
+    {
+        return 0;
+    }
+
+    await Console.Error.WriteLineAsync($"Adapters failed: cache hit {hit?.Length}, miss {miss?.Length}, health {health.Status}: {health.Description}, {keys} keys.");
+    return 1;
+}
 
 // Criterio de salida de la Fase 13: una función escalar y una vectorizada escritas en C# corren desde SQL
 // bajo Native AOT, y un procedimiento. El generador escribió el código que las llama: no hay reflexión.

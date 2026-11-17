@@ -671,7 +671,8 @@ Estrictamente secuenciales. Cada fase termina con su criterio de salida cumplido
 | 12 | Capa SQL y proveedor ADO.NET | Dapper corre contra el proveedor sin adaptador; una vista anidada en otra se resuelve y un ciclo se rechaza al crearla; EXPLAIN imprime el plan elegido con cardinalidad estimada contra real |
 | 13 | Funciones y procedimientos en C# por generador de código | Un UDF escalar y uno vectorizado corren bajo PublishAot, sin reflexión ni Expression.Compile |
 | 14 | PL/Tk: parser, compilador a bytecode y máquina virtual | Un procedimiento con bucle y SQL embebido corre; el límite de instrucciones corta un bucle infinito |
-| 15 | Adaptadores de ecosistema: EF Core, IDistributedCache, Data Protection, HealthChecks | Cada adaptador en su propio paquete; el núcleo no gana ni una dependencia nueva |
+| 15 | Adaptadores de ecosistema: IDistributedCache, Data Protection, HealthChecks | Cada adaptador en su propio paquete; el núcleo no gana ni una dependencia nueva |
+| 16 | Proveedor de EF Core (separado de la 15 el 2026-11-17: necesita antes LEFT JOIN, subconsultas y ALTER TABLE en la capa SQL, y decidir qué hacer con las rutas síncronas de ADO.NET) | Por fijar al empezar la fase |
 
 Las fases 0 a 4 son el riesgo real del proyecto. Si esas cuatro quedan sólidas, el resto es trabajo conocido.
 

@@ -22,6 +22,7 @@ public sealed class TekiumDb : IAsyncDisposable
     // The retained commits, oldest first. Only the writer touches it, and only after its commit is durable.
     private readonly Queue<ulong> _history = new();
     private readonly int _retention;
+    private bool _closed;
 
     // Whether the catalog says the history does not go back to the creation of the database.
     private bool _historyIncomplete;
@@ -59,6 +60,16 @@ public sealed class TekiumDb : IAsyncDisposable
     /// <see cref="WatchAsync{T}"/> gets the changes made from now on.
     /// </summary>
     public ulong LastTransactionId => Pager.Current.TransactionId.Value;
+
+    /// <summary>
+    /// Gets a value indicating whether the database still accepts writes. It stops for good when a commit
+    /// fails while its result is being made durable: which state survived is only known by reopening.
+    /// Reads keep working.
+    /// </summary>
+    public bool AcceptsWrites => Pager.AcceptsWrites;
+
+    /// <summary>Gets a value indicating whether the database is still open: <see cref="DisposeAsync"/> has not been called.</summary>
+    public bool IsOpen => !Volatile.Read(ref _closed);
 
     internal Pager Pager { get; }
 
@@ -389,6 +400,7 @@ public sealed class TekiumDb : IAsyncDisposable
     /// <returns>A task that completes when the file is closed.</returns>
     public ValueTask DisposeAsync()
     {
+        Volatile.Write(ref _closed, true);
         Diagnostics?.Dispose();
         return Pager.DisposeAsync();
     }

@@ -78,6 +78,7 @@ Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (subconsultas,
 - Change feed: lo que cada commit cambió, para auditoría, cachés y replicación propia.
 - Carga masiva con memoria acotada.
 - Contadores por `System.Diagnostics.Metrics`, opcionales.
+- Adaptadores para ASP.NET Core: caché distribuida, claves de Data Protection y health checks, cada uno en su paquete.
 - `tkdb`: inspeccionar, compactar, reparar y cambiar la contraseña desde la línea de comandos.
 
 **Ecosistema**
@@ -94,6 +95,9 @@ Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (subconsultas,
 | `Tekium.Embedded.Sql` | SQL y proveedor ADO.NET |
 | `Tekium.Embedded.Linq` | Consultas con predicados de C# |
 | `Tekium.Embedded.Vectors` | Búsqueda vectorial |
+| `Tekium.Embedded.Caching` | `IDistributedCache` en un archivo local |
+| `Tekium.Embedded.DataProtection` | Las claves de Data Protection de ASP.NET Core en la base |
+| `Tekium.Embedded.HealthChecks` | El estado de la base en los health checks de la aplicación |
 
 Mientras no haya paquetes publicados, se referencian los proyectos de `src/` (ver [Compilar y probar](#compilar-y-probar)).
 
@@ -557,6 +561,27 @@ Con `Diagnostics = true`, la base publica contadores por un `Meter` llamado `Tek
 
 Sin esa opción no se crea ningún `Meter` y no se cuenta nada: medido, la lectura puntual tarda lo mismo. [Mediciones y detalle](docs/benchmarks/fase-10.4.md).
 
+### Adaptadores para ASP.NET Core
+
+Tres paquetes pequeños, cada uno sólo con la dependencia a la que se adapta. El núcleo no gana ninguna.
+
+```csharp
+await using var db = await TekiumDb.OpenAsync(new DbOptions { Path = "app.tkdb", Password = password.AsMemory() });
+var keys = await TkXmlRepository.CreateAsync(db);                       // Tekium.Embedded.DataProtection
+
+builder.Services.AddTekiumDistributedCache(_ => db);                    // Tekium.Embedded.Caching
+builder.Services.AddDataProtection().PersistKeysToTekiumDb(keys);
+builder.Services.AddHealthChecks().AddTekiumDb(_ => db);                // Tekium.Embedded.HealthChecks
+```
+
+| Adaptador | Qué hace | Conviene saber |
+| --- | --- | --- |
+| `TkDistributedCache` | Un `IDistributedCache` que sobrevive a los reinicios, sin servidor. Vencimiento absoluto y deslizante | Sólo funcionan los métodos `…Async`; los síncronos lanzan, porque TekiumDB no hace E/S síncrona. Cada `SetAsync` es un commit durable. Leer una entrada deslizante la renueva (una escritura) sólo pasada una décima de su ventana. Lo vencido nunca se devuelve, y sale del archivo durante una escritura posterior: no hay hilo en segundo plano |
+| `TkXmlRepository` | Guarda el anillo de claves de Data Protection en la base: cifrado en reposo si la base lo está | La interfaz de Data Protection es síncrona, así que las claves se leen una vez al arrancar y se sirven desde memoria, y una clave nueva se escribe al archivo justo después de guardarse, sin bloquear. Si el proceso muere en esos milisegundos, la clave nueva se pierde. `FlushAsync` espera la escritura e informa si falló |
+| `TkHealthCheck` | Sano cuando la base está abierta y acepta escrituras. No hace E/S | Con `Verify = true` además lee y verifica cada página en uso: el daño es "unhealthy", las advertencias "degraded". Su costo crece con el archivo: para correrlo de vez en cuando, no cada pocos segundos |
+
+No hay proveedor de Entity Framework Core.
+
 ## Herramientas
 
 `tkdb` es una herramienta de línea de comandos para archivos `.tkdb` cerrados. Ninguno de sus comandos cambia el archivo que recibe, salvo `passwd`.
@@ -713,6 +738,7 @@ Lo que conviene saber antes de adoptarla:
 - **LINQ traduce o rechaza:** sin `||`, `!=`, ordenar ni agrupar.
 - **Sin triggers, vistas materializadas, replicación ni borrado en cascada.** En su lugar: restricciones declarativas, índices sobre expresiones y change feed.
 - **El índice vectorial** no recupera el espacio de los vectores borrados hasta eliminarlo, y no se consulta desde SQL.
+- **Sin proveedor de Entity Framework Core.** Se usa la API tipada, LINQ, o SQL por ADO.NET y Dapper.
 - **Formato de archivo sin estabilizar** hasta la primera versión publicada.
 
 ## Compilar y probar
@@ -744,6 +770,9 @@ src/
   Tekium.Embedded.Sql/           SQL, proveedor ADO.NET, rutinas de C# y procedimientos almacenados
   Tekium.Embedded.Linq/          Consultas con predicados de C#
   Tekium.Embedded.Vectors/       Búsqueda vectorial HNSW
+  Tekium.Embedded.Caching/       IDistributedCache
+  Tekium.Embedded.DataProtection/ Almacén de claves de Data Protection
+  Tekium.Embedded.HealthChecks/  Health check
   Tekium.Embedded.Cli/           tkdb
 tests/                           Pruebas, benchmarks y el programa de verificación de Native AOT
 docs/benchmarks/                 Mediciones, con sus condiciones

@@ -619,6 +619,9 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     /// <summary>The time, only if someone is going to use it.</summary>
     private long Now() => _diagnostics is null ? 0 : Stopwatch.GetTimestamp();
 
+    /// <summary>Gets a value indicating whether no commit has been left in doubt: after one, the pager takes no more writes.</summary>
+    public bool AcceptsWrites => Volatile.Read(ref _commitInDoubt) is null;
+
     private void ThrowIfCommitInDoubt()
     {
         if (_commitInDoubt is not null)
