@@ -1,98 +1,101 @@
 # TekiumDB
 
-**Base de datos embebida para .NET: un solo archivo, cifrada, asíncrona de punta a punta y sin binarios nativos.**
+**An embedded database for .NET: a single file, encrypted, async end to end, and with no native binaries.**
+
+[![English](https://img.shields.io/badge/lang-English-blue)](README.md)
+[![Español](https://img.shields.io/badge/lang-Espa%C3%B1ol-success)](README.es.md)
 
 ![.NET 11](https://img.shields.io/badge/.NET-11-512BD4)
 ![Native AOT](https://img.shields.io/badge/Native%20AOT-compatible-blue)
-![Licencia MIT](https://img.shields.io/badge/licencia-MIT-green)
-![Estado: pre-alpha](https://img.shields.io/badge/estado-pre--alpha-orange)
+![MIT License](https://img.shields.io/badge/license-MIT-green)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)
 
-TekiumDB guarda todo en un único archivo `.tkdb` y es código 100 % administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal. Encima hay tablas tipadas sin reflexión, índices secundarios, restricciones, SQL con proveedor ADO.NET, LINQ, búsqueda vectorial, change feed, backup en caliente y herramientas de inspección y reparación.
+TekiumDB keeps everything in a single `.tkdb` file and is 100 % managed code. Its engine is a copy-on-write B+Tree with MVCC: readers never block or wait, and a commit is atomic with no WAL and no journal. On top of it there are typed tables without reflection, secondary indexes, constraints, SQL with an ADO.NET provider, LINQ, vector search, a change feed, hot backup, and tools to inspect and repair files.
 
 > [!NOTE]
-> **Pre-alpha.** Todavía no hay paquete NuGet publicado y el formato de archivo puede cambiar entre versiones. Verificado en macOS y Linux (arm64); Windows no se ha verificado.
+> **Pre-alpha.** There is no published NuGet package yet, and the file format may change between versions. Verified on macOS and Linux (arm64); Windows has not been verified.
 
-## Contenido
+## Contents
 
-- [Por qué TekiumDB](#por-qué-tekiumdb)
-- [Características](#características)
-- [Inicio rápido](#inicio-rápido)
-- [Guía de la API](#guía-de-la-api)
-- [Herramientas](#herramientas)
-- [Rendimiento](#rendimiento)
-- [Arquitectura](#arquitectura)
-- [Confiabilidad](#confiabilidad)
-- [Límites](#límites)
-- [Compilar y probar](#compilar-y-probar)
-- [Licencia](#licencia)
+- [Why TekiumDB](#why-tekiumdb)
+- [Features](#features)
+- [Quick start](#quick-start)
+- [API guide](#api-guide)
+- [Tools](#tools)
+- [Performance](#performance)
+- [Architecture](#architecture)
+- [Reliability](#reliability)
+- [Limits](#limits)
+- [Building and testing](#building-and-testing)
+- [License](#license)
 
-## Por qué TekiumDB
+## Why TekiumDB
 
-| | SQLite en .NET | TekiumDB |
+| | SQLite on .NET | TekiumDB |
 | --- | --- | --- |
-| Binarios nativos | Un `.so` / `.dll` / `.dylib` por plataforma | Ninguno: código administrado, compatible con Native AOT, single-file y móvil |
-| Async | La API asíncrona es síncrona por debajo | E/S asíncrona de punta a punta |
-| Cifrado | SEE comercial o SQLCipher | AES-256-GCM autenticado, incluido |
-| Búsqueda vectorial | Extensión nativa aparte | HNSW en el mismo archivo y en la misma transacción |
-| UUID v7 y fechas | `BLOB` con un índice encima | Tipos de primera clase, con rangos por fecha de creación y zone maps |
-| Modelo de datos | SQL sobre filas sin tipo | Clases de C# con serializadores generados en compilación; SQL y LINQ opcionales sobre las mismas tablas |
+| Native binaries | A `.so` / `.dll` / `.dylib` per platform | None: managed code, compatible with Native AOT, single-file and mobile |
+| Async | The async API is synchronous underneath | Asynchronous I/O end to end |
+| Encryption | Commercial SEE, or SQLCipher | Authenticated AES-256-GCM, built in |
+| Vector search | A separate native extension | HNSW in the same file and the same transaction |
+| UUID v7 and dates | A `BLOB` with an index on top | First-class types, with ranges by creation time and zone maps |
+| Data model | SQL over untyped rows | C# classes with serializers generated at compile time; optional SQL and LINQ over the same tables |
 
-Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (subconsultas, joins externos, optimización por costos). Su SQL es un subconjunto.
+What TekiumDB does **not** try to do: beat SQLite at complex SQL (subqueries, outer joins, cost-based optimization). Its SQL is a subset.
 
-## Características
+## Features
 
-**Almacenamiento**
+**Storage**
 
-- Archivo único `.tkdb` con páginas de tamaño fijo (8 KiB por defecto; 4, 16 o 32 KiB).
-- B+Tree copy-on-write con MVCC: un escritor, lectores ilimitados sin bloqueo, cada uno sobre un snapshot inmutable.
-- Commit atómico por registros de raíz alternados. Si el proceso muere a mitad de un commit, la base abre en el estado anterior, sin fase de recuperación.
-- Filas de hasta 256 MiB (páginas de overflow, transparentes).
-- Evolución de esquema sin migraciones: cada fila recuerda con qué versión se escribió.
-- Modo en memoria para pruebas (`InMemory = true`) y compresión Zstandard por página, opcional.
+- A single `.tkdb` file with fixed-size pages (8 KiB by default; 4, 16 or 32 KiB).
+- Copy-on-write B+Tree with MVCC: one writer, unlimited readers that never block, each on an immutable snapshot.
+- Atomic commit through alternating root records. If the process dies in the middle of a commit, the database opens in the previous state, with no recovery step.
+- Rows of up to 256 MiB (overflow pages, transparent to the caller).
+- Schema evolution without migrations: every row remembers the schema version it was written with.
+- In-memory mode for tests (`InMemory = true`), and optional per-page Zstandard compression.
 
-**Seguridad**
+**Security**
 
-- AES-256-GCM por página con la criptografía de .NET. La etiqueta de autenticación es también la suma de verificación: corrupción y manipulación se detectan al leer.
-- Derivación de clave con Argon2id. Cambiar la contraseña reescribe sólo la cabecera.
-- Sin cifrado, cada página lleva igualmente su suma de verificación.
+- AES-256-GCM per page, using .NET's own cryptography. The authentication tag is also the checksum: corruption and tampering are detected on read.
+- Key derivation with Argon2id. Changing the password rewrites only the header.
+- Without encryption, every page still carries its checksum.
 
-**Índices y consultas**
+**Indexes and queries**
 
-- Secundarios de una o varias columnas, sobre expresiones, parciales y únicos, mantenidos en la misma transacción que la fila.
-- Zone maps para rangos de fechas sobre series de tiempo.
-- UUID v7 como clave: hojas llenas y consultas por fecha de creación sin columna ni índice extra.
-- Vectorial: HNSW con métricas coseno, euclidiana y producto interno, y cuantización `int8` opcional.
-- `EXPLAIN` del plan elegido, en la API tipada y en SQL.
+- Secondary indexes over one or several columns, over expressions, partial and unique, maintained in the same transaction as the row.
+- Zone maps for date ranges over time series.
+- UUID v7 as a key: full leaves, and queries by creation time with no extra column or index.
+- Vector: HNSW with cosine, Euclidean and inner-product metrics, and optional `int8` quantization.
+- `EXPLAIN` of the chosen plan, in the typed API and in SQL.
 
-**Integridad**
+**Integrity**
 
-- Restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY` declaradas con atributos.
-- Aislamiento por snapshot; transacciones que se deshacen al salir del scope sin commit.
+- `CHECK`, `UNIQUE` and `FOREIGN KEY` constraints declared with attributes.
+- Snapshot isolation; a transaction rolls back when its scope ends without a commit.
 
-**Operación**
+**Operations**
 
-- Backup en caliente, verificación de integridad con la base en uso y lectura de estados pasados (viaje en el tiempo).
-- Change feed: lo que cada commit cambió, para auditoría, cachés y replicación propia.
-- Carga masiva con memoria acotada.
-- Contadores por `System.Diagnostics.Metrics`, opcionales.
-- `tkdb`: inspeccionar, compactar, reparar y cambiar la contraseña desde la línea de comandos.
+- Hot backup, integrity verification while the database is in use, and reading past states (time travel).
+- Change feed: what each commit changed, for auditing, caches and your own replication.
+- Bulk load with bounded memory.
+- Optional counters through `System.Diagnostics.Metrics`.
+- `tkdb`: inspect, compact, repair and change the password from the command line.
 
-**Ecosistema**
+**Ecosystem**
 
-- SQL con proveedor ADO.NET (funciona con Dapper), LINQ y vectores, cada uno en su paquete.
-- Funciones y procedimientos escritos en C#, llamados desde SQL.
-- Sin reflexión en tiempo de ejecución: todo lo que depende de los tipos del usuario lo escribe un generador de código al compilar. Compatible con Native AOT y trimming.
+- SQL with an ADO.NET provider (works with Dapper), LINQ and vectors, each in its own package.
+- Functions and procedures written in C#, called from SQL, and procedures stored in the file (PL/Tk), off by default.
+- No reflection at run time: everything that depends on the user's types is written by a source generator at compile time. Compatible with Native AOT and trimming.
 
-## Inicio rápido
+## Quick start
 
-| Paquete | Para qué |
+| Package | What for |
 | --- | --- |
-| `Tekium.Embedded.Core` | El motor y la API tipada. Sin dependencias en tiempo de ejecución. Incluye el generador de código |
-| `Tekium.Embedded.Sql` | SQL y proveedor ADO.NET |
-| `Tekium.Embedded.Linq` | Consultas con predicados de C# |
-| `Tekium.Embedded.Vectors` | Búsqueda vectorial |
+| `Tekium.Embedded.Core` | The engine and the typed API. No run-time dependencies. Includes the source generator |
+| `Tekium.Embedded.Sql` | SQL and the ADO.NET provider |
+| `Tekium.Embedded.Linq` | Queries with C# predicates |
+| `Tekium.Embedded.Vectors` | Vector search |
 
-Mientras no haya paquetes publicados, se referencian los proyectos de `src/` (ver [Compilar y probar](#compilar-y-probar)).
+Until packages are published, reference the projects under `src/` (see [Building and testing](#building-and-testing)).
 
 ```csharp
 using Tekium.Embedded;
@@ -105,101 +108,101 @@ public sealed partial class Document
 
     public string Title { get; set; } = "";
 
-    public string? Summary { get; set; }      // anulable: puede no tener valor
+    public string? Summary { get; set; }      // nullable: it may have no value
 
     public DateTimeOffset CreatedAt { get; set; }
 }
 
 await using var db = await TekiumDb.OpenAsync(new DbOptions
 {
-    Path = "app.tkdb",                        // o InMemory = true, para pruebas
-    Password = password.AsMemory(),           // opcional: sin contraseña no se cifra
+    Path = "app.tkdb",                        // or InMemory = true, for tests
+    Password = password.AsMemory(),           // optional: without a password nothing is encrypted
 });
 
 var docs = db.Table<Document>();
 
 await using (var tx = await db.BeginWriteAsync())
 {
-    await docs.InsertAsync(tx, new Document { Id = Guid.CreateVersion7(), Title = "Hola", CreatedAt = DateTimeOffset.UtcNow });
-    await tx.CommitAsync();                   // sin commit, salir del scope hace rollback
+    await docs.InsertAsync(tx, new Document { Id = Guid.CreateVersion7(), Title = "Hello", CreatedAt = DateTimeOffset.UtcNow });
+    await tx.CommitAsync();                   // without a commit, leaving the scope rolls back
 }
 
-var one = await docs.GetAsync(id);            // null si no existe
+var one = await docs.GetAsync(id);            // null if it does not exist
 
-await foreach (var doc in docs.ScanAsync())   // en orden de clave
+await foreach (var doc in docs.ScanAsync())   // in key order
     Process(doc);
 
-await using (var read = db.BeginRead())       // una vista que no cambia aunque otros escriban
+await using (var read = db.BeginRead())       // a view that does not change while others write
 {
     var before = await docs.GetAsync(read, id);
 }
 ```
 
-El generador de código escribe el serializador de `Document` al compilar: no hay reflexión en tiempo de ejecución, y por eso funciona con Native AOT. Si la clase cambia (columnas nuevas, quitadas o reordenadas) las filas ya escritas no se tocan: cada una recuerda con qué versión del esquema se escribió.
+The source generator writes the serializer of `Document` at compile time: there is no reflection at run time, which is why it works under Native AOT. If the class changes (columns added, removed or reordered) the rows already written are not touched: each one remembers the schema version it was written with.
 
-| Qué | Cómo |
+| What | How |
 | --- | --- |
-| Tipos de columna | `bool`, enteros de 8 a 64 bits con y sin signo, `float`, `double`, `decimal`, `char`, `string`, `byte[]`, `Guid`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `DateOnly`, `TimeOnly`, enums, y la forma anulable de todos |
-| Clave | Una propiedad con `[TkKey]`: `Guid`, `int`, `long`, `uint`, `ulong` o `string` |
-| Operaciones | `InsertAsync`, `UpdateAsync`, `UpsertAsync`, `DeleteAsync`, `GetAsync`, `ScanAsync`, `QueryAsync`, `ExplainAsync`, `BulkInsertAsync` |
-| Otros atributos | `[TkColumn("nombre")]` guarda la propiedad con otro nombre; `[TkIgnore]` la deja fuera |
-| Tamaño de fila | Hasta 256 MiB. Una fila que no cabe en un cuarto de página se guarda en páginas de overflow, sin que quien la usa lo note |
+| Column types | `bool`, signed and unsigned integers of 8 to 64 bits, `float`, `double`, `decimal`, `char`, `string`, `byte[]`, `Guid`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `DateOnly`, `TimeOnly`, enums, and the nullable form of all of them |
+| Key | One property with `[TkKey]`: `Guid`, `int`, `long`, `uint`, `ulong` or `string` |
+| Operations | `InsertAsync`, `UpdateAsync`, `UpsertAsync`, `DeleteAsync`, `GetAsync`, `ScanAsync`, `QueryAsync`, `ExplainAsync`, `BulkInsertAsync` |
+| Other attributes | `[TkColumn("name")]` stores the property under another name; `[TkIgnore]` leaves it out |
+| Row size | Up to 256 MiB. A row that does not fit in a quarter of a page is stored in overflow pages, without the caller noticing |
 
-Reglas de toda la API:
+Rules of the whole API:
 
-- Toda operación de E/S devuelve `ValueTask` o `IAsyncEnumerable<T>` y acepta `CancellationToken`. No hay métodos síncronos salvo `Dispose`.
-- Las transacciones son `IAsyncDisposable`: salir del scope sin commit hace rollback.
-- Hay un escritor a la vez (`BeginWriteAsync` espera su turno) y cualquier número de lectores, que nunca esperan.
+- Every I/O operation returns `ValueTask` or `IAsyncEnumerable<T>` and accepts a `CancellationToken`. There are no synchronous methods other than `Dispose`.
+- Transactions are `IAsyncDisposable`: leaving the scope without a commit rolls back.
+- There is one writer at a time (`BeginWriteAsync` waits its turn) and any number of readers, which never wait.
 
-## Guía de la API
+## API guide
 
-### Índices y consultas
+### Indexes and queries
 
-Un índice se declara con `[TkIndex]` y el motor lo mantiene en cada escritura, dentro de la misma transacción:
+An index is declared with `[TkIndex]` and the engine maintains it on every write, inside the same transaction:
 
 ```csharp
 [TkTable("orders")]
-[TkIndex(nameof(Customer), nameof(CreatedAt))]                 // de varias columnas
-[TkIndex(nameof(CreatedAt), Name = "open", Where = nameof(IsOpen))]   // parcial: sólo las filas abiertas
+[TkIndex(nameof(Customer), nameof(CreatedAt))]                 // over several columns
+[TkIndex(nameof(CreatedAt), Name = "open", Where = nameof(IsOpen))]   // partial: only open rows
 public sealed partial class Order
 {
     [TkKey] public Guid Id { get; set; }
 
-    [TkIndex] public string Customer { get; set; } = "";       // de una columna
+    [TkIndex] public string Customer { get; set; } = "";       // over one column
 
     public DateTimeOffset CreatedAt { get; set; }
     public decimal Total { get; set; }
     public bool Deleted { get; set; }
 
-    [TkIndex] public int Month => (CreatedAt.Year * 12) + CreatedAt.Month;   // sobre una expresión
+    [TkIndex] public int Month => (CreatedAt.Year * 12) + CreatedAt.Month;   // over an expression
 
-    public bool IsOpen => !Deleted && Total > 0;               // la condición del índice parcial
+    public bool IsOpen => !Deleted && Total > 0;               // the condition of the partial index
 }
 
 var orders = db.Table<Order>();
 
-// El generador declara un campo por columna en Order.Fields; las condiciones se unen con And.
+// The generator declares one field per column in Order.Fields; conditions are joined with And.
 var recent = Order.Fields.Customer.EqualTo("ana")
     .And(Order.Fields.CreatedAt.Between(from, to));
 
-await foreach (var order in orders.QueryAsync(recent))         // usa el índice Customer_CreatedAt
+await foreach (var order in orders.QueryAsync(recent))         // uses the index Customer_CreatedAt
     Process(order);
 
 var plan = await orders.ExplainAsync(recent);                  // IndexScan, "Customer_CreatedAt"
 ```
 
-| Qué | Cómo |
+| What | How |
 | --- | --- |
-| Condiciones | `EqualTo`, `LessThan`, `AtMost`, `GreaterThan`, `AtLeast`, `Between`, `IsNull`, `IsNotNull`, unidas con `And`. Se puede filtrar por cualquier columna; si ningún índice sirve, se recorre la tabla |
-| Orden de los valores | El de `CompareTo`, con dos salvedades: el texto compara por punto de código Unicode (sin cultura), y una fila sin valor no cumple ninguna comparación salvo `IsNull` |
-| Índice sobre expresión | `[TkIndex]` sobre una propiedad calculada (sin `set`). Debe ser determinista y depender sólo de las columnas de su fila. Si su código cambia, el índice se reconstruye solo |
-| Índice parcial | `Where` nombra una propiedad `bool` cuyo cuerpo compara columnas con constantes unidas por `&&`. Sólo se usa cuando la consulta implica esa condición; si el motor no puede probarlo, lo ignora |
-| Cambios de índices | Declarar uno nuevo, cambiarlo o quitarlo no requiere migración: la primera escritura con el tipo nuevo lo construye, reconstruye o elimina. Hasta entonces las consultas recorren la tabla |
-| Límite | Los valores indexados de una fila más su clave no pueden pasar de 1/16 de página (512 bytes con páginas de 8 KiB): una fila que lo exceda se rechaza con `TkIndexKeyTooLargeException` |
+| Conditions | `EqualTo`, `LessThan`, `AtMost`, `GreaterThan`, `AtLeast`, `Between`, `IsNull`, `IsNotNull`, joined with `And`. Any column can be filtered on; if no index helps, the table is scanned |
+| Order of values | That of `CompareTo`, with two exceptions: text compares by Unicode code point (no culture), and a row with no value satisfies no comparison other than `IsNull` |
+| Expression index | `[TkIndex]` on a computed property (no `set`). It must be deterministic and depend only on the columns of its row. If its code changes, the index rebuilds itself |
+| Partial index | `Where` names a `bool` property whose body compares columns with constants joined by `&&`. It is used only when the query implies that condition; if the engine cannot prove it, the index is ignored |
+| Changing indexes | Declaring a new one, changing it or removing it needs no migration: the first write with the new type builds, rebuilds or drops it. Until then queries scan the table |
+| Limit | The indexed values of a row plus its key cannot exceed 1/16 of a page (512 bytes with 8 KiB pages): a row beyond that is rejected with `TkIndexKeyTooLargeException` |
 
-### Consultas con LINQ
+### Queries with LINQ
 
-En su propio paquete, `Tekium.Embedded.Linq`. El predicado se traduce al mismo filtro que se escribiría con `Fields`, sin compilar nada en caliente, y funciona bajo Native AOT:
+In its own package, `Tekium.Embedded.Linq`. The predicate is translated into the same filter you would write with `Fields`, nothing is compiled at run time, and it works under Native AOT:
 
 ```csharp
 using Tekium.Embedded.Linq;
@@ -215,15 +218,15 @@ await foreach (var order in orders.Where(o => o.Total > 1000m))
 
 | | |
 | --- | --- |
-| Se puede | Comparar una propiedad guardada con un valor (`==`, `<`, `<=`, `>`, `>=`), unir con `&&`, preguntar por nulos, banderas `bool`, enumeraciones. El valor puede ser cualquier cosa que no dependa de la fila, y se calcula una vez |
-| No se puede | `||`, `!=`, métodos sobre una propiedad, comparar dos propiedades: `NotSupportedException` al construir la consulta, diciendo qué parte y por qué |
-| No compila | Ordenar, agrupar, unir: la consulta no es un `IQueryable` ni un `IAsyncEnumerable`, así que el compilador rechaza lo que el motor no hace, en vez de resolverlo en memoria sin avisar. Para hacerlo en memoria hay que pedirlo: `AsAsyncEnumerable()` |
+| Supported | Comparing a stored property with a value (`==`, `<`, `<=`, `>`, `>=`), joining with `&&`, asking about nulls, `bool` flags, enums. The value can be anything that does not depend on the row, and is computed once |
+| Refused | `||`, `!=`, methods on a property, comparing two properties: `NotSupportedException` when the query is built, saying which part and why |
+| Does not compile | Ordering, grouping, joining: the query is neither an `IQueryable` nor an `IAsyncEnumerable`, so the compiler rejects what the engine does not do, instead of quietly doing it in memory. To do it in memory you have to ask: `AsAsyncEnumerable()` |
 
-[Mediciones y detalle](docs/benchmarks/fase-11.md).
+[Measurements and details](docs/benchmarks/fase-11.md).
 
-### SQL y ADO.NET
+### SQL and ADO.NET
 
-En su propio paquete, `Tekium.Embedded.Sql`: un proveedor ADO.NET que Dapper usa sin adaptador.
+In its own package, `Tekium.Embedded.Sql`: an ADO.NET provider that Dapper uses with no adapter.
 
 ```csharp
 using Dapper;
@@ -240,18 +243,18 @@ var big = await connection.QueryAsync<Order>(
 
 | | |
 | --- | --- |
-| Sentencias | `SELECT` con `INNER JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`; `INSERT`, `UPDATE`, `DELETE`; `CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW` y sus `DROP`; `EXPLAIN` |
-| Las mismas tablas | SQL lee las tablas que declaran los tipos con `[TkTable]`, y lo que escribe es lo que escribiría la API tipada, filas e índices. Una tabla con índices sobre expresiones, `CHECK` o claves foráneas se lee con SQL pero no se escribe |
-| Vistas | Consultas guardadas, de lectura; pueden usar otras vistas, y una que acabaría usándose a sí misma se rechaza al crearla |
-| `EXPLAIN` | El camino elegido, con las filas estimadas (desde la forma del árbol de cada índice) y las que salieron |
-| Sólo asíncrono | `OpenAsync`, `ExecuteReaderAsync`, `BeginTransactionAsync`…; los métodos síncronos de ADO.NET lanzan. Con Dapper: `QueryAsync`, `ExecuteAsync` |
-| Lo que no hay | Subconsultas, `UNION`, joins externos, `ALTER TABLE`, búsqueda vectorial desde SQL |
+| Statements | `SELECT` with `INNER JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`; `INSERT`, `UPDATE`, `DELETE`; `CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `CREATE PROCEDURE` and their `DROP`; `CALL`; `EXPLAIN` |
+| The same tables | SQL reads the tables declared by types with `[TkTable]`, and what it writes is what the typed API would write, rows and indexes. A table with expression indexes, `CHECK` or foreign keys can be read with SQL but not written |
+| Views | Stored queries, read-only; they can use other views, and one that would end up using itself is rejected when created |
+| `EXPLAIN` | The chosen path, with the estimated rows (from the shape of each index's tree) and the rows that came out |
+| Async only | `OpenAsync`, `ExecuteReaderAsync`, `BeginTransactionAsync`…; ADO.NET's synchronous methods throw. With Dapper: `QueryAsync`, `ExecuteAsync` |
+| Not available | Subqueries, `UNION`, outer joins, `ALTER TABLE`, vector search from SQL |
 
-[Mediciones y detalle](docs/benchmarks/fase-12.md).
+[Measurements and details](docs/benchmarks/fase-12.md).
 
-### Funciones y procedimientos en C#
+### Functions and procedures in C#
 
-SQL puede llamar a métodos estáticos de la aplicación. Un generador de código escribe en compilación lo que les pasa los argumentos: no hay reflexión, y funciona bajo Native AOT.
+SQL can call static methods of the application. A source generator writes, at compile time, the code that passes them their arguments: there is no reflection, and it works under Native AOT.
 
 ```csharp
 public static class Routines
@@ -259,7 +262,7 @@ public static class Routines
     [TkFunction("slugify", Deterministic = true)]
     public static string Slugify(ReadOnlySpan<char> text) { … }
 
-    [TkFunction("abs_delta", Vectorized = true)]          // un bloque de filas por llamada
+    [TkFunction("abs_delta", Vectorized = true)]          // one block of rows per call
     public static void AbsDelta(ReadOnlySpan<double> a, ReadOnlySpan<double> b, Span<double> result) { … }
 
     [TkProcedure("archive_orders")]
@@ -268,7 +271,7 @@ public static class Routines
             new Dictionary<string, object?> { ["before"] = before }, ct);
 }
 
-database.UseRoutines(TkRoutines.All);                     // TkRoutines lo escribe el generador
+database.UseRoutines(TkRoutines.All);                     // TkRoutines is written by the generator
 
 await connection.QueryAsync("SELECT slugify(name), abs_delta(price, cost) FROM products");
 await connection.ExecuteAsync("CALL archive_orders(@before)", new { before });
@@ -276,24 +279,58 @@ await connection.ExecuteAsync("CALL archive_orders(@before)", new { before });
 
 | | |
 | --- | --- |
-| Función escalar | Toma y devuelve `bool`, `int`, `long`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `DateTimeOffset` o `byte[]`. Con NULL en un parámetro que no lo admite no se la llama y el resultado es NULL |
-| `Deterministic` | Con argumentos constantes se calcula una vez por sentencia; con argumentos de la fila se reutiliza el resultado mientras los argumentos se repitan |
-| `Vectorized` | Recibe bloques de hasta 1 024 filas en `ReadOnlySpan<T>` (`double`, `float`, `long`, `int`). Hoy **no es más rápida** que la escalar: el ejecutor de SQL trabaja fila por fila ([medido](docs/benchmarks/fase-13.md)) |
-| Procedimiento | Corre con `CALL`, dentro de la transacción de la sentencia: lo que escribe (con la API tipada o con SQL) se confirma o se deshace con ella |
-| Dónde viven | En la aplicación, no en el archivo. Una consulta o una vista que nombra una función que la aplicación no registró falla al prepararse, antes de leer una fila |
-| Errores de compilación | Lo que no puede ser una rutina (un tipo que SQL no tiene, un método privado, dos con el mismo nombre) es un error `TK0019`–`TK0023` |
+| Scalar function | Takes and returns `bool`, `int`, `long`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `DateTimeOffset` or `byte[]`. Given NULL for a parameter that cannot be null, it is not called and the result is NULL |
+| `Deterministic` | With constant arguments it is computed once per statement; with arguments from the row the result is reused while the arguments repeat |
+| `Vectorized` | Receives blocks of up to 1,024 rows as `ReadOnlySpan<T>` (`double`, `float`, `long`, `int`). Today it is **not faster** than the scalar form: the SQL executor works row by row ([measured](docs/benchmarks/fase-13.md)) |
+| Procedure | Runs with `CALL`, inside the transaction of the statement: what it writes (with the typed API or with SQL) commits or rolls back with it |
+| Where they live | In the application, not in the file. A query or a view that names a function the application did not register fails when it is prepared, before reading a row |
+| Compile errors | What cannot be a routine (a type SQL has no value for, a private method, two with the same name) is an error `TK0019`–`TK0023` |
 
-### Fechas y series de tiempo
+### Stored procedures
 
-Un índice sobre una fecha ordena por instante (el mismo momento en dos zonas horarias es una sola clave) y, si las fechas sólo crecen, sus hojas quedan llenas. Para tablas grandes escritas en orden de tiempo hay además un **zone map**: por cada ventana de tiempo, la tabla recuerda entre qué claves están sus filas, y una consulta por rango de fechas lee sólo ese tramo.
+A procedure can also live in the file. It is written in PL/Tk, a deliberately small subset of PL/pgSQL, compiled when it is created and kept in the catalog as a program for a small virtual machine. It travels with the file: a backup or a compacted copy carries it.
+
+```sql
+CREATE PROCEDURE archive_orders(p_before TIMESTAMPTZ) RETURNS INT AS $$
+DECLARE n INT := 0;
+BEGIN
+    FOR r IN SELECT id, total FROM orders WHERE placed < p_before LOOP
+        INSERT INTO orders_archive (id, total) VALUES (r.id, r.total);
+        DELETE FROM orders WHERE id = r.id;
+        n := n + 1;
+    END LOOP;
+    RETURN n;
+END $$
+```
+
+```csharp
+await using var db = await TekiumDb.OpenAsync(new DbOptions { Path = "app.tkdb", AllowStoredProcedures = true });
+await using var connection = new TkConnection(db);
+var archived = await connection.ExecuteScalarAsync<int>("CALL archive_orders(@before)", new { before });
+```
+
+| | |
+| --- | --- |
+| The language | `DECLARE`, assignment (`:=`), `IF`/`ELSIF`/`ELSE`, `WHILE`, `FOR row IN SELECT … LOOP`, `RETURN`, `RAISE`, `CALL … INTO`, and `SELECT … INTO`, `INSERT`, `UPDATE`, `DELETE`. No dynamic SQL, no exception handlers, no composite types, no DDL |
+| Off by default | A stored procedure is program inside a data file. Nothing in the file runs, and none can be created, unless the database is opened with `AllowStoredProcedures = true` (`Stored Procedures=true` in a connection string) |
+| What it can do | Compute, run SQL in the transaction it was called in, and call other procedures: stored ones, or C# ones the application registered. It has no I/O, no network and no way to reach any other code |
+| Limits | `ProcedureInstructionLimit` (10 million by default) stops a loop that never ends; `ProcedureCallDepth` (32, at most 256) stops endless recursion. Both are an error |
+| When one fails | The transaction it ran in can only be rolled back: a procedure stopped halfway never leaves half its work to be committed |
+| Checked when created | Unknown variables and functions, a `RETURN` with a value in a procedure that returns nothing, a variable with the same name as a column of a table its statement uses |
+| A damaged program | Is verified before it runs: it is either refused, saying why, or runs within the same limits. It cannot make the engine read outside its own registers and code |
+| C# or stored? | Work over data costs about the same either way (2–9 % more when stored): the time goes to the data, not to the interpreter ([measured](docs/benchmarks/fase-14.md)). Stored ones need no redeploy and are visible to every application that opens the file; C# ones are faster at pure computation and can use any library |
+
+### Dates and time series
+
+An index on a date orders by instant (the same moment in two time zones is a single key) and, if dates only grow, its leaves end up full. For large tables written in time order there is also a **zone map**: for each window of time, the table remembers between which keys its rows are, and a date-range query reads only that stretch.
 
 ```csharp
 [TkTable("readings")]
 public sealed partial class Reading
 {
-    [TkKey] public Guid Id { get; set; }                       // UUID v7: crece con el tiempo
+    [TkKey] public Guid Id { get; set; }                       // UUID v7: grows with time
 
-    [TkZoneMap] public DateTimeOffset At { get; set; }         // ventanas de una hora
+    [TkZoneMap] public DateTimeOffset At { get; set; }         // one-hour windows
 
     public double Value { get; set; }
 }
@@ -303,42 +340,42 @@ await foreach (var reading in readings.QueryAsync(lastDay))    // ZoneScan, "zon
     Process(reading);
 ```
 
-| | Zone map | Índice secundario |
+| | Zone map | Secondary index |
 | --- | --- | --- |
-| Lo que guarda | Una entrada por ventana de tiempo | Una entrada por fila |
-| Costo al escribir | Casi nada: se anota en memoria y se escribe al confirmar | Un árbol más que mantener en cada escritura |
-| Rango de fechas | Lee de corrido el tramo de la tabla | Va a la tabla una vez por fila encontrada |
-| Cuándo sirve | Filas escritas más o menos en orden de fecha bajo claves que crecen | Siempre |
-| Precisión | Ventanas enteras: lee algunas filas de más y las descarta | Exacta |
+| What it stores | One entry per window of time | One entry per row |
+| Cost on write | Almost none: noted in memory and written at commit | One more tree to maintain on every write |
+| Date range | Reads the stretch of the table sequentially | Goes to the table once per row found |
+| When it helps | Rows written roughly in date order under keys that grow | Always |
+| Precision | Whole windows: reads a few extra rows and discards them | Exact |
 
-Se pueden declarar los dos sobre la misma columna: el planificador usa el zone map para rangos de varias ventanas y el índice para una fecha exacta o un rango corto. `BucketMinutes` cambia el tamaño de la ventana. Borrar filas no achica las ventanas.
+Both can be declared on the same column: the planner uses the zone map for ranges of several windows and the index for an exact date or a short range. `BucketMinutes` changes the window size. Deleting rows does not shrink the windows.
 
-### Claves UUID v7
+### UUID v7 keys
 
-Un UUID v7 empieza por el milisegundo en que se creó. Con `Guid.CreateVersion7()` como clave, las filas quedan en orden de creación y "todo lo creado entre X e Y" es un rango de la clave: no hace falta una columna de fecha ni un índice sobre ella.
+A UUID v7 starts with the millisecond it was created in. With `Guid.CreateVersion7()` as the key, rows are stored in creation order and "everything created between X and Y" is a range of the key: no date column or index on it is needed.
 
 ```csharp
 var lastHour = Order.Fields.Id.CreatedBetween(now.AddHours(-1), now);   // KeyRange
 await foreach (var order in orders.QueryAsync(lastHour))
     Process(order);
 
-Order.Fields.Id.CreatedSince(monday);      // desde un momento
-Order.Fields.Id.CreatedBefore(monday);     // antes de un momento
+Order.Fields.Id.CreatedSince(monday);      // from a moment on
+Order.Fields.Id.CreatedBefore(monday);     // before a moment
 ```
 
-Los momentos se cortan al milisegundo, igual que el UUID. Las mismas condiciones sirven sobre cualquier columna `Guid` (por su índice, si lo tiene); en una columna que no guarde UUID v7 comparan los mismos bytes, que no dicen nada de la fecha.
+Moments are cut to the millisecond, like the UUID itself. The same conditions work on any `Guid` column (through its index, if it has one); on a column that does not hold UUID v7 they compare the same bytes, which say nothing about the date.
 
-| Cómo llegan las claves | Ocupación de las hojas |
+| How keys arrive | Leaf occupancy |
 | --- | ---: |
-| UUID v7, hasta unas decenas por milisegundo (lo normal: uno por operación) | 96–99 % |
-| UUID v7 creados en un bucle cerrado, cientos por milisegundo | 68 %, como al azar: dentro de un milisegundo no tienen orden |
-| UUID v4 | 69 %, y seis veces más lento de insertar |
+| UUID v7, up to a few dozen per millisecond (the usual: one per operation) | 96–99 % |
+| UUID v7 created in a tight loop, hundreds per millisecond | 68 %, like random: within a millisecond they have no order |
+| UUID v4 | 69 %, and six times slower to insert |
 
-Para cargar muchas filas de una vez, la [carga masiva](#carga-masiva) ordena las claves y deja las hojas llenas vengan como vengan. [Mediciones y detalle](docs/benchmarks/fase-8.md).
+To load many rows at once, [bulk load](#bulk-load) sorts the keys and leaves the leaves full however they arrive. [Measurements and details](docs/benchmarks/fase-8.md).
 
-### Restricciones
+### Constraints
 
-Se declaran con atributos y el motor las comprueba en cada escritura. Una violación lanza `TkConstraintException`, que nombra la restricción y la fila, y aborta la transacción: ya sólo puede deshacerse.
+They are declared with attributes and the engine checks them on every write. A violation throws `TkConstraintException`, which names the constraint and the row, and aborts the transaction: it can only be rolled back.
 
 ```csharp
 [TkTable("customers")]
@@ -371,23 +408,23 @@ catch (TkConstraintException violation)
 }
 ```
 
-| Restricción | Cómo |
+| Constraint | How |
 | --- | --- |
-| `CHECK` | `[TkCheck]` sobre una propiedad `bool` calculada a partir de las columnas de la fila. Debe ser determinista |
-| `UNIQUE` | `Unique = true` en un `[TkIndex]`, de una o varias columnas, también parcial. Las filas sin valor en alguna de sus columnas quedan exentas. El planificador sabe que una búsqueda con todas sus columnas fijadas da a lo sumo una fila (`UniqueLookup`) |
-| `FOREIGN KEY` | `[TkForeignKey(typeof(Otra))]` sobre una columna del tipo de la clave de la otra tabla. La fila referida debe existir (o la columna no tener valor), y no puede borrarse mientras alguien se refiera a ella. No hay borrado en cascada. Trae su propio índice |
-| Añadirlas después | La primera escritura con el tipo que las declara las comprueba contra las filas que ya hay, y si alguna no cumple, la rechaza nombrándola |
-| Momento de la comprobación | En cada operación, no al confirmar: dos filas que se refieren una a otra se insertan con la referencia vacía y se completan después |
+| `CHECK` | `[TkCheck]` on a `bool` property computed from the columns of the row. It must be deterministic |
+| `UNIQUE` | `Unique = true` on a `[TkIndex]`, over one or several columns, partial too. Rows with no value in any of its columns are exempt. The planner knows that a lookup with all its columns fixed gives at most one row (`UniqueLookup`) |
+| `FOREIGN KEY` | `[TkForeignKey(typeof(Other))]` on a column of the type of the other table's key. The referred row must exist (or the column have no value), and it cannot be deleted while something refers to it. There is no cascading delete. It comes with its own index |
+| Adding them later | The first write with the type that declares them checks them against the rows already there, and if one does not comply, rejects it by name |
+| When they are checked | On every operation, not at commit: two rows that refer to each other are inserted with the reference empty and completed afterwards |
 
 ### Change feed
 
-Lo que cada commit le hizo a las filas de una tabla, leído después del commit y fuera del escritor. Reemplaza a los triggers para auditoría, invalidar cachés o replicar.
+What each commit did to the rows of a table, read after the commit and outside the writer. It replaces triggers for auditing, invalidating caches or replicating.
 
 ```csharp
 await using var db = await TekiumDb.OpenAsync(new DbOptions
 {
     Path = "app.tkdb",
-    ChangeRetention = 1000,                    // cuántos commits pasados se conservan; 0 lo apaga
+    ChangeRetention = 1000,                    // how many past commits are kept; 0 turns it off
 });
 
 await foreach (var change in db.WatchAsync<Order>(lastSeen, ct))
@@ -395,40 +432,40 @@ await foreach (var change in db.WatchAsync<Order>(lastSeen, ct))
     // change.Kind: Insert | Update | Delete
     // change.Before, change.After, change.TransactionId
     await HandleAsync(change);
-    lastSeen = change.TransactionId;           // guardar al terminar cada transacción para reanudar
+    lastSeen = change.TransactionId;           // save it after each transaction to resume
 }
 ```
 
-| Qué | Cómo |
+| What | How |
 | --- | --- |
-| Qué informa | Un cambio por fila y commit, con la fila antes y después: el efecto neto de la transacción, no cada paso. En orden de commit y, dentro de un commit, de clave |
-| Desde dónde | Desde el id de la última transacción vista. `0` es la creación de la base; `db.LastTransactionId` es "desde ahora". Vale también tras cerrar y reabrir |
-| Cuándo termina | Al cancelar. Cuando alcanza al escritor, espera el siguiente commit |
-| Lo que cuesta | Los commits conservados no liberan sus páginas: el archivo es más grande, en proporción a `ChangeRetention`. El escritor no espera al consumidor |
-| Si el consumidor se atrasa | Pasados `ChangeRetention` commits recibe `TkChangeFeedException` en vez de saltarse cambios: debe volver a leer la tabla y seguir desde ahí |
+| What it reports | One change per row and commit, with the row before and after: the net effect of the transaction, not every step. In commit order and, within a commit, in key order |
+| From where | From the id of the last transaction seen. `0` is the creation of the database; `db.LastTransactionId` is "from now on". It also holds after closing and reopening |
+| When it ends | On cancellation. When it catches up with the writer, it waits for the next commit |
+| What it costs | Kept commits do not release their pages: the file is larger, in proportion to `ChangeRetention`. The writer does not wait for the consumer |
+| If the consumer falls behind | After `ChangeRetention` commits it gets `TkChangeFeedException` instead of skipping changes: it must read the table again and continue from there |
 
-### Carga masiva
+### Bulk load
 
-Para importar una tabla o restaurar un respaldo. Construye la tabla y sus índices de abajo hacia arriba, escribiendo cada página una sola vez, y no tiene todas las filas en memoria a la vez:
+For importing a table or restoring a backup. It builds the table and its indexes bottom-up, writing each page once, and never holds all the rows in memory:
 
 ```csharp
 await using var tx = await db.BeginWriteAsync();
-var loaded = await orders.BulkInsertAsync(tx, ReadOrdersFromCsv(path));   // IEnumerable<T> o IAsyncEnumerable<T>
+var loaded = await orders.BulkInsertAsync(tx, ReadOrdersFromCsv(path));   // IEnumerable<T> or IAsyncEnumerable<T>
 await tx.CommitAsync();
 ```
 
-| Qué | Cómo |
+| What | How |
 | --- | --- |
-| Orden de las filas | Cualquiera. Si llegan en orden de clave van directo al árbol, que es lo más rápido; si no, se ordenan antes, en espacio temporal del propio archivo |
-| Memoria | Acotada, no crece con el número de filas: las páginas terminadas se escriben al archivo durante la carga y pasan a ser parte de la base al confirmar |
-| Índices y restricciones | Los índices se construyen ordenando sus entradas. `CHECK`, `UNIQUE` y `FOREIGN KEY` se comprueban para cada fila |
-| Tabla con filas | Se reescribe entera, mezclada con las nuevas: pensado para cargar, no para agregar unas pocas filas a una tabla grande |
-| Si algo falla | Una clave repetida, una restricción violada o cualquier error deja la transacción sin poder confirmarse: entran todas las filas o ninguna |
-| Lo que no admite | Una tabla con `FOREIGN KEY` a sí misma |
+| Row order | Any. If they arrive in key order they go straight into the tree, which is fastest; otherwise they are sorted first, in temporary space of the file itself |
+| Memory | Bounded; it does not grow with the number of rows: finished pages are written to the file during the load and become part of the database at commit |
+| Indexes and constraints | Indexes are built by sorting their entries. `CHECK`, `UNIQUE` and `FOREIGN KEY` are checked for every row |
+| A table with rows | It is rewritten entirely, merged with the new ones: meant for loading, not for adding a few rows to a large table |
+| If something fails | A repeated key, a violated constraint or any error leaves the transaction unable to commit: all the rows go in, or none |
+| Not supported | A table with a `FOREIGN KEY` to itself |
 
-### Búsqueda vectorial
+### Vector search
 
-En su propio paquete, `Tekium.Embedded.Vectors`. Un índice vectorial guarda vectores bajo una clave y encuentra los más cercanos a una consulta con un grafo HNSW, que vive en el mismo archivo y cambia en la misma transacción que las filas:
+In its own package, `Tekium.Embedded.Vectors`. A vector index stores vectors under a key and finds the closest to a query with an HNSW graph, which lives in the same file and changes in the same transaction as the rows:
 
 ```csharp
 using Tekium.Embedded.Vectors;
@@ -438,97 +475,97 @@ var embeddings = db.VectorIndex<Guid>("doc_embeddings", new VectorIndexOptions {
 await using (var tx = await db.BeginWriteAsync())
 {
     await docs.InsertAsync(tx, doc);
-    await embeddings.UpsertAsync(tx, doc.Id, vector);     // la fila y su vector, o ninguno de los dos
+    await embeddings.UpsertAsync(tx, doc.Id, vector);     // the row and its vector, or neither
     await tx.CommitAsync();
 }
 
 var hits = await embeddings.SearchAsync(queryVector, topK: 10, efSearch: 64);
-foreach (var hit in hits)                                   // del más cercano al más lejano
+foreach (var hit in hits)                                   // from closest to farthest
     Show(await docs.GetAsync(hit.Key), hit.Distance);
 ```
 
-| Qué | Cómo |
+| What | How |
 | --- | --- |
-| Claves | `Guid`, `int`, `long` o `string`: normalmente la clave de la fila a la que pertenece el vector |
-| Métricas | `Cosine` (por defecto; normaliza al guardar), `Euclidean` e `InnerProduct`. Se fija al crear el índice, igual que las dimensiones y `M` |
-| `efSearch` | Cuántos candidatos considera cada búsqueda: más alto encuentra más de los verdaderos vecinos y tarda más. Se elige por consulta |
-| Cuantización | `Quantize = true` guarda cada componente del grafo en un byte en vez de cuatro; los vectores originales se guardan aparte y los candidatos finales se reordenan con ellos, así que la distancia devuelta es exacta |
-| Transacciones | Lo que una transacción escribe lo encuentra ella misma antes de confirmar y nadie más hasta después; un lector sigue viendo el grafo de su snapshot |
-| Borrar | `RemoveAsync` deja de devolver el vector, pero su sitio en el grafo no se recupera hasta `DropAsync`, que elimina el índice entero y libera sus páginas |
-| Cifrado | El grafo son páginas como las demás: cifradas si la base lo está |
+| Keys | `Guid`, `int`, `long` or `string`: usually the key of the row the vector belongs to |
+| Metrics | `Cosine` (the default; normalizes on store), `Euclidean` and `InnerProduct`. Fixed when the index is created, like the dimensions and `M` |
+| `efSearch` | How many candidates each search considers: higher finds more of the true neighbours and takes longer. Chosen per query |
+| Quantization | `Quantize = true` stores each component of the graph in one byte instead of four; the original vectors are kept apart and the final candidates are re-ranked with them, so the distance returned is exact |
+| Transactions | What a transaction writes it finds itself before committing, and nobody else until after; a reader keeps seeing the graph of its snapshot |
+| Deleting | `RemoveAsync` stops returning the vector, but its place in the graph is not recovered until `DropAsync`, which removes the whole index and frees its pages |
+| Encryption | The graph is pages like any others: encrypted if the database is |
 
-Medido sobre un millón de vectores de 128 dimensiones agrupados como los embeddings, con los parámetros por defecto ([mediciones](docs/benchmarks/fase-9.md)):
+Measured over one million vectors of 128 dimensions clustered the way embeddings are, with the default parameters ([measurements](docs/benchmarks/fase-9.md)):
 
-| `efSearch` | Recall@10 contra fuerza bruta | Latencia media |
+| `efSearch` | Recall@10 against brute force | Mean latency |
 | ---: | ---: | ---: |
-| 16 | 0,79 | 0,39 ms |
-| 64 (por defecto) | 0,98 | 0,75 ms |
-| 256 | 0,999 | 1,19 ms |
+| 16 | 0.79 | 0.39 ms |
+| 64 (default) | 0.98 | 0.75 ms |
+| 256 | 0.999 | 1.19 ms |
 
-El recall depende de los datos: con vectores sin ninguna estructura es mucho más bajo y hay que subir `efSearch` y `M`. Construir el índice va a unos mil vectores por segundo.
+Recall depends on the data: with vectors that have no structure at all it is much lower, and `efSearch` and `M` have to be raised. Building the index runs at about a thousand vectors per second.
 
-El índice no está atado a una tabla: quien escribe la fila escribe también su vector, en la misma transacción.
+The index is not tied to a table: whoever writes the row also writes its vector, in the same transaction.
 
-### Viaje en el tiempo
+### Time travel
 
-Leer la base como estaba cuando confirmó una transacción pasada, hasta donde alcance el horizonte (`ChangeRetention`, el mismo del change feed; apagado por defecto):
+Reading the database as it was when a past transaction committed, as far back as the horizon reaches (`ChangeRetention`, the same as the change feed's; off by default):
 
 ```csharp
 var db = await TekiumDb.OpenAsync(new DbOptions { Path = "app.tkdb", ChangeRetention = 100 });
 
 await using var past = await db.AsOfAsync(transactionId);
-var before = await orders.GetAsync(past, id);               // la fila como estaba entonces
-await foreach (var order in orders.QueryAsync(past, filter)) // consultas e índices, también
+var before = await orders.GetAsync(past, id);               // the row as it was then
+await foreach (var order in orders.QueryAsync(past, filter)) // queries and indexes too
     Compare(order);
 ```
 
-El número de transacción lo dan `TkWriteTransaction.TransactionId`, `LastTransactionId` y los cambios del change feed. Más atrás del horizonte se lanza `TkStateUnavailableException`. Mientras `past` viva su estado no se suelta; al cerrarlo, su espacio vuelve a usarse. El archivo crece con el horizonte y ahí se queda. [Mediciones y detalle](docs/benchmarks/fase-10.6.md).
+The transaction number comes from `TkWriteTransaction.TransactionId`, `LastTransactionId` and the changes of the change feed. Further back than the horizon, `TkStateUnavailableException` is thrown. While `past` lives its state is not released; when it is closed, its space is reused. The file grows with the horizon and stays that size. [Measurements and details](docs/benchmarks/fase-10.6.md).
 
-### Backup en caliente
+### Hot backup
 
-Con la base abierta y en uso. La copia tiene exactamente lo que dejó el último commit al empezar; lo que se escriba mientras tanto no entra, y nada entra a medias.
+With the database open and in use. The copy has exactly what the last commit left when the backup started; what is written meanwhile does not go in, and nothing goes in halfway.
 
 ```csharp
-var report = await db.BackupAsync("respaldo.tkdb");
-Console.WriteLine($"Respaldado hasta la transacción {report.TransactionId}");
+var report = await db.BackupAsync("backup.tkdb");
+Console.WriteLine($"Backed up to transaction {report.TransactionId}");
 
-// Una base cifrada no se respalda sin cifrar por omisión:
-await db.BackupAsync("respaldo.tkdb", new TkBackupOptions { Password = backupPassword });
+// An encrypted database is never backed up unencrypted by default:
+await db.BackupAsync("backup.tkdb", new TkBackupOptions { Password = backupPassword });
 ```
 
-No bloquea al escritor ni desaloja la caché (lee el archivo directamente). Medido sobre un millón de filas, con backups corriendo uno tras otro: la mediana del commit durable no cambia (13,0 ms contra 13,1 ms sin backup), el p95 sube de 16 a 19 ms porque comparten el disco, y cada backup tarda 0,35 s. Mientras corre, las páginas del estado que copia no se reutilizan, así que una base con mucha escritura puede crecer durante un backup largo. [Mediciones y detalle](docs/benchmarks/fase-10.2.md).
+It does not block the writer or evict the cache (it reads the file directly). Measured over one million rows, with backups running one after another: the median durable commit does not change (13.0 ms against 13.1 ms without a backup), p95 rises from 16 to 19 ms because they share the disk, and each backup takes 0.35 s. While it runs, the pages of the state being copied are not reused, so a database under heavy writing can grow during a long backup. [Measurements and details](docs/benchmarks/fase-10.2.md).
 
-### Verificación y diagnóstico
+### Verification and diagnostics
 
 ```csharp
-var verification = await db.VerifyAsync();        // con la base abierta y en uso
+var verification = await db.VerifyAsync();        // with the database open and in use
 if (!verification.IsHealthy)
     foreach (var finding in verification.Findings)
         log.Error(finding.Message);
 ```
 
-`VerifyAsync` lee del archivo cada página en uso y comprueba su suma de verificación (o su etiqueta de autenticación, si la base está cifrada), que cada árbol esté bien formado, y que la lista de páginas libres no ofrezca una en uso. Lee el disco, no la caché: encuentra una página dañada aunque la aplicación tenga una copia buena en memoria. No bloquea al escritor.
+`VerifyAsync` reads every page in use from the file and checks its checksum (or its authentication tag, if the database is encrypted), that every tree is well formed, and that the free-page list does not offer a page in use. It reads the disk, not the cache: it finds a damaged page even if the application holds a good copy in memory. It does not block the writer.
 
-Con `Diagnostics = true`, la base publica contadores por un `Meter` llamado `Tekium.Embedded`, que lee OpenTelemetry, `dotnet-counters` o cualquier `MeterListener`:
+With `Diagnostics = true`, the database publishes counters through a `Meter` named `Tekium.Embedded`, which OpenTelemetry, `dotnet-counters` or any `MeterListener` can read:
 
-| Instrumento | Qué dice |
+| Instrument | What it says |
 | --- | --- |
-| `tekium.cache.hits`, `tekium.cache.misses` | Páginas encontradas en la caché, y leídas del archivo |
-| `tekium.commit.pages`, `tekium.commit.duration` | Páginas escritas y tiempo de cada commit |
-| `tekium.snapshots.live`, `tekium.snapshots.oldest_age` | Lectores con un estado retenido, y la edad del más viejo: lo que impide reutilizar espacio |
-| `tekium.tree.depth` | Niveles de cada tabla e índice |
+| `tekium.cache.hits`, `tekium.cache.misses` | Pages found in the cache, and read from the file |
+| `tekium.commit.pages`, `tekium.commit.duration` | Pages written and time of each commit |
+| `tekium.snapshots.live`, `tekium.snapshots.oldest_age` | Readers holding a state, and the age of the oldest: what prevents space from being reused |
+| `tekium.tree.depth` | Levels of each table and index |
 
-Sin esa opción no se crea ningún `Meter` y no se cuenta nada: medido, la lectura puntual tarda lo mismo. [Mediciones y detalle](docs/benchmarks/fase-10.4.md).
+Without that option no `Meter` is created and nothing is counted: measured, a point read takes the same time. [Measurements and details](docs/benchmarks/fase-10.4.md).
 
-## Herramientas
+## Tools
 
-`tkdb` es una herramienta de línea de comandos para archivos `.tkdb` cerrados. Ninguno de sus comandos cambia el archivo que recibe, salvo `passwd`.
+`tkdb` is a command-line tool for closed `.tkdb` files. None of its commands changes the file it is given, except `passwd`.
 
 ```bash
-tkdb info    app.tkdb                              # lo que dice la cabecera; no pide contraseña
-tkdb check   app.tkdb                              # lee cada página y dice qué está mal, sin abrir la base
-tkdb compact app.tkdb -o compacta.tkdb             # una copia sin el espacio que dejaron los cambios
-tkdb repair  dañada.tkdb -o recuperada.tkdb        # una copia con todo lo que todavía se puede leer
+tkdb info    app.tkdb                              # what the header says; asks for no password
+tkdb check   app.tkdb                              # reads every page and says what is wrong, without opening the database
+tkdb compact app.tkdb -o compact.tkdb              # a copy without the space that changes left behind
+tkdb repair  damaged.tkdb -o recovered.tkdb        # a copy with everything that can still be read
 tkdb passwd  app.tkdb --password-env OLD --new-password-env NEW
 ```
 
@@ -552,139 +589,140 @@ ERROR: Page 57 of index tickets.Owner cannot be read: Page 57 failed its checksu
 
 The file has problems.
 
-$ tkdb repair app.tkdb -o recuperada.tkdb
-25000 entries copied to recuperada.tkdb
+$ tkdb repair app.tkdb -o recovered.tkdb
+25000 entries copied to recovered.tkdb
 4194304 bytes became 1359872
 Left out: index tickets.Owner
 
 ERROR: Page 57 of index tickets.Owner cannot be read: Page 57 failed its checksum: the file is corrupt.
 ```
 
-(Salida real, sobre un archivo de prueba al que se le cambió un byte de la página 57.)
+(Real output, over a test file in which one byte of page 57 was changed.)
 
-| Comando | Qué hace |
+| Command | What it does |
 | --- | --- |
-| `check` | Revisa las dos copias de la cabecera, los dos registros de dónde está la base, cada página en uso (su suma de verificación o su etiqueta de cifrado, y que el árbol esté bien formado) y la lista de páginas libres. Nombra cada página dañada y a qué tabla o índice pertenece. Lee archivos que el motor se niega a abrir |
-| `compact` | Reconstruye cada árbol con sus páginas llenas en un archivo nuevo. Se niega si el archivo está dañado |
-| `repair` | Lo mismo, pero copia lo que se puede leer y dice qué dejó fuera. Las filas de las páginas dañadas se pierden; un índice dañado, o cuya tabla perdió filas, no se copia y la primera escritura en esa tabla lo vuelve a construir |
-| `passwd` | Cambia la contraseña en el mismo archivo: sólo reescribe la cabecera |
-| Contraseñas | Nunca en la línea de comandos: de una variable de entorno, de un archivo o de la entrada estándar. `compact` y `repair` pueden dar a la copia otra contraseña o ninguna, y siempre le dan una clave de archivo nueva |
-| Código de salida | 0 nada mal, 1 el archivo tiene problemas, 2 el comando no pudo correr |
+| `check` | Checks both copies of the header, both records of where the database is, every page in use (its checksum or its encryption tag, and that the tree is well formed) and the free-page list. It names every damaged page and the table or index it belongs to. It reads files the engine refuses to open |
+| `compact` | Rebuilds every tree with full pages in a new file. It refuses if the file is damaged |
+| `repair` | The same, but it copies what can be read and says what it left out. Rows in damaged pages are lost; a damaged index, or one whose table lost rows, is not copied, and the first write to that table builds it again |
+| `passwd` | Changes the password in the same file: it rewrites only the header |
+| Passwords | Never on the command line: from an environment variable, a file or standard input. `compact` and `repair` can give the copy another password or none, and always give it a new file key |
+| Exit code | 0 nothing wrong, 1 the file has problems, 2 the command could not run |
 
-Lo mismo está en el núcleo, para usarlo desde código: `TkInspector.InspectAsync`, `TkMaintenance.CompactAsync` y `TkMaintenance.RepairAsync`. Compactar y reparar no copian el historial del change feed. [Mediciones y detalle](docs/benchmarks/fase-10.md).
+The same is in the core, to use from code: `TkInspector.InspectAsync`, `TkMaintenance.CompactAsync` and `TkMaintenance.RepairAsync`. Compacting and repairing do not copy the history of the change feed. [Measurements and details](docs/benchmarks/fase-10.md).
 
-## Rendimiento
+## Performance
 
-Medido con BenchmarkDotNet en una sola máquina (Apple M2 Max, macOS, arm64, SSD interno), contra `Microsoft.Data.Sqlite` con comandos preparados. Son órdenes de magnitud de una máquina, no promesas; cada enlace lleva a las condiciones exactas y a sus advertencias.
+Measured with BenchmarkDotNet on a single machine (Apple M2 Max, macOS, arm64, internal SSD), against `Microsoft.Data.Sqlite` with prepared commands. They are orders of magnitude from one machine, not promises; each link leads to the exact conditions and their caveats (the measurement documents are in Spanish).
 
-**Lecturas**
+**Reads**
 
-| Carga | SQLite | TekiumDB | |
+| Workload | SQLite | TekiumDB | |
 | --- | ---: | ---: | --- |
-| Leer una fila por su clave y construir el objeto (100 000 filas) | 2 016 ns, 670 B | 336 ns, 326 B | 6× más rápido ([detalle](docs/benchmarks/fase-5.md)) |
-| Lectura puntual cruda (un millón de filas) | 2 177 ns | 397 ns | 5,5× más rápido ([detalle](docs/benchmarks/fase-2.md)) |
-| Por índice secundario: las ~100 facturas de un cliente | 124 µs | 69 µs | 1,8× más rápido ([detalle](docs/benchmarks/fase-6.md)) |
-| Por índice secundario: las ~270 facturas de un día | 309 µs | 149 µs | 2,1× más rápido |
-| Rango de fechas sobre 10 millones de filas: una hora (3 601 filas) | 2,91 ms | 0,75 ms | 3,9× más rápido, con zone map ([detalle](docs/benchmarks/fase-7.md)) |
-| Rango de fechas: un día (86 401 filas) | 69,4 ms | 10,7 ms | 6,5× más rápido |
-| Rango de fechas: treinta días (2,6 millones de filas) | 2 102 ms | 310 ms | 6,8× más rápido |
+| Read a row by its key and build the object (100,000 rows) | 2,016 ns, 670 B | 336 ns, 326 B | 6× faster ([details](docs/benchmarks/fase-5.md)) |
+| Raw point read (one million rows) | 2,177 ns | 397 ns | 5.5× faster ([details](docs/benchmarks/fase-2.md)) |
+| By secondary index: the ~100 invoices of a customer | 124 µs | 69 µs | 1.8× faster ([details](docs/benchmarks/fase-6.md)) |
+| By secondary index: the ~270 invoices of a day | 309 µs | 149 µs | 2.1× faster |
+| Date range over 10 million rows: one hour (3,601 rows) | 2.91 ms | 0.75 ms | 3.9× faster, with a zone map ([details](docs/benchmarks/fase-7.md)) |
+| Date range: one day (86,401 rows) | 69.4 ms | 10.7 ms | 6.5× faster |
+| Date range: thirty days (2.6 million rows) | 2,102 ms | 310 ms | 6.8× faster |
 
-**Escrituras**
+**Writes**
 
-| Carga | SQLite | TekiumDB | |
+| Workload | SQLite | TekiumDB | |
 | --- | ---: | ---: | --- |
-| 100 000 filas en una transacción | 122 ms | 29,5 ms | 4,1× más rápido ([detalle](docs/benchmarks/fase-2.md)) |
-| 100 000 filas en 100 transacciones durables | 749 ms | 957 ms | **1,28× más lento**: cada commit copia el camino hasta la raíz |
-| 10 000 filas con tres índices, un commit | 31,6 ms | 22,9 ms | 1,4× más rápido ([detalle](docs/benchmarks/fase-6.md)) |
-| Cargar 10 millones de filas en orden | 14,0 s | 1,85 s (carga masiva) | 7,6× más rápido, con 100 MiB de memoria ([detalle](docs/benchmarks/fase-6.8.md)) |
+| 100,000 rows in one transaction | 122 ms | 29.5 ms | 4.1× faster ([details](docs/benchmarks/fase-2.md)) |
+| 100,000 rows in 100 durable transactions | 749 ms | 957 ms | **1.28× slower**: every commit copies the path up to the root |
+| 10,000 rows with three indexes, one commit | 31.6 ms | 22.9 ms | 1.4× faster ([details](docs/benchmarks/fase-6.md)) |
+| Load 10 million rows in order | 14.0 s | 1.85 s (bulk load) | 7.6× faster, with 100 MiB of memory ([details](docs/benchmarks/fase-6.8.md)) |
 
-**Espacio**
+**Space**
 
 | | TekiumDB | SQLite |
 | --- | ---: | ---: |
-| 100 000 filas tras 100 000 actualizaciones al azar, sobre el tamaño de los datos | 1,16× | 1,22× |
+| 100,000 rows after 100,000 random updates, relative to the size of the data | 1.16× | 1.22× |
 
-Copy-on-write tiene un costo conocido: una transacción de lectura que se deja abierta impide reutilizar páginas y el archivo crece mientras viva (84× en esa misma carga con un lector retenido todo el tiempo). El contador `tekium.snapshots.oldest_age` existe para vigilarlo. [Detalle](docs/benchmarks/fase-4.md).
+Copy-on-write has a known cost: a read transaction left open prevents pages from being reused and the file grows for as long as it lives (84× in that same workload with a reader held the whole time). The counter `tekium.snapshots.oldest_age` exists to watch for it. [Details](docs/benchmarks/fase-4.md).
 
-**Otras mediciones**
+**Other measurements**
 
-| Qué | Resultado |
+| What | Result |
 | --- | --- |
-| Búsqueda vectorial, un millón de vectores de 128 dimensiones | Recall@10 de 0,98 en 0,75 ms por consulta ([detalle](docs/benchmarks/fase-9.md)) |
-| Ocupación de las hojas con claves UUID v7 | 96–99 % ([detalle](docs/benchmarks/fase-8.md)) |
-| Backup en caliente de un millón de filas | 0,35 s; la mediana del commit del escritor no cambia ([detalle](docs/benchmarks/fase-10.2.md)) |
-| Contadores de diagnóstico apagados | Sin costo medible en la lectura puntual ([detalle](docs/benchmarks/fase-10.4.md)) |
-| Función de C# llamada desde SQL | Unos 30 ns por fila, lo mismo que la expresión escrita en SQL ([detalle](docs/benchmarks/fase-13.md)) |
-| Compresión por página | Reduce 3,3× los bytes escritos, pero no el tamaño del archivo: apagada por defecto ([detalle](docs/benchmarks/fase-5.5.md)) |
-| Tomar un snapshot y fijar una página en caché | 15,9 ns, sin asignaciones |
+| Vector search, one million vectors of 128 dimensions | Recall@10 of 0.98 at 0.75 ms per query ([details](docs/benchmarks/fase-9.md)) |
+| Leaf occupancy with UUID v7 keys | 96–99 % ([details](docs/benchmarks/fase-8.md)) |
+| Hot backup of one million rows | 0.35 s; the writer's median commit does not change ([details](docs/benchmarks/fase-10.2.md)) |
+| Diagnostic counters turned off | No measurable cost on a point read ([details](docs/benchmarks/fase-10.4.md)) |
+| C# function called from SQL | About 30 ns per row, the same as the expression written in SQL ([details](docs/benchmarks/fase-13.md)) |
+| Stored procedure: one turn of an empty loop | About 100 ns; archiving 10,000 rows takes 2–9 % longer than the same statements from C# ([details](docs/benchmarks/fase-14.md)) |
+| Per-page compression | Reduces the bytes written 3.3×, but not the size of the file: off by default ([details](docs/benchmarks/fase-5.5.md)) |
+| Taking a snapshot and pinning a cached page | 15.9 ns, no allocations |
 
-Los benchmarks se reproducen con `dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'`.
+The benchmarks are reproduced with `dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'`.
 
-## Arquitectura
+## Architecture
 
-Paquetes opcionales sobre un núcleo en capas. Las flechas son dependencias: el núcleo no referencia a ninguno de los paquetes de arriba.
+Optional packages over a layered core. Arrows are dependencies: the core references none of the packages above it.
 
 ```
 Tekium.Embedded.Sql          Tekium.Embedded.Linq        Tekium.Embedded.Vectors
-(SQL, ADO.NET, rutinas C#)   (predicados de C#)          (HNSW + cuantización)
+(SQL, ADO.NET, procedures)   (C# predicates)             (HNSW + quantization)
          |                            |                            |
          v                            v                            v
 +-------------------------------------------------------------------------+
-| Tekium.Embedded.Core — sin dependencias nativas, compatible con AOT     |
-|  API pública         TekiumDb, Table<T>, transacciones, IAsyncEnumerable|
-|  Catálogo y tablas   esquemas, filas tipadas, planificador, restricciones|
-|  Índices             B+Tree, secundarios, zone maps, carga masiva       |
-|  MVCC                snapshots, commit atómico, historial de estados    |
-|  Pager               caché de páginas, free-list, copy-on-write         |
-|  Cifrado             AES-256-GCM por página, Argon2id                   |
-|  E/S                 RandomAccess asíncrono, sin P/Invoke               |
+| Tekium.Embedded.Core — no native dependencies, AOT compatible           |
+|  Public API          TekiumDb, Table<T>, transactions, IAsyncEnumerable |
+|  Catalog and tables  schemas, typed rows, planner, constraints          |
+|  Indexes             B+Tree, secondary, zone maps, bulk load            |
+|  MVCC                snapshots, atomic commit, history of states        |
+|  Pager               page cache, free list, copy-on-write               |
+|  Encryption          AES-256-GCM per page, Argon2id                     |
+|  I/O                 asynchronous RandomAccess, no P/Invoke             |
 +-------------------------------------------------------------------------+
 ```
 
-| Decisión | Consecuencia |
+| Decision | Consequence |
 | --- | --- |
-| Copy-on-write: una página confirmada nunca se modifica | Los lectores no bloquean; un snapshot, un backup o un estado pasado son sólo una raíz que se conserva |
-| Commit = escribir páginas nuevas, vaciar, y cambiar un registro de raíz | No hay WAL que reproducir ni checkpoint; tras un corte la base abre en el último commit completo |
-| Todo son B+Trees del mismo archivo | Índices, catálogo, zone maps y el grafo vectorial heredan transacciones, cifrado y commit atómico |
-| El nonce de cada página cifrada es `página ‖ transacción` | Una página nunca se cifra dos veces con el mismo nonce |
-| Generador de código en vez de reflexión | Funciona bajo Native AOT; los errores de modelo son errores de compilación (`TK0001`…) |
+| Copy-on-write: a committed page is never modified | Readers do not block; a snapshot, a backup or a past state is just a root that is kept |
+| Commit = write new pages, flush, and switch a root record | There is no WAL to replay and no checkpoint; after a power cut the database opens at the last complete commit |
+| Everything is B+Trees of the same file | Indexes, catalog, zone maps and the vector graph inherit transactions, encryption and atomic commit |
+| The nonce of each encrypted page is `page ‖ transaction` | A page is never encrypted twice with the same nonce |
+| A source generator instead of reflection | It works under Native AOT; modelling mistakes are compile errors (`TK0001`…) |
 
-## Confiabilidad
+## Reliability
 
-Cómo se prueba el motor:
+How the engine is tested:
 
-- **Contra un modelo.** El B+Tree, los índices, las restricciones y las consultas se comparan con una implementación de referencia en memoria sobre secuencias aleatorias de operaciones (un millón en el árbol), verificando además la estructura y que no se pierda ninguna página.
-- **Cortes de energía.** El commit se interrumpe antes de cada operación de E/S, perdiendo a pedazos lo que no se había vaciado al disco; la base tiene que abrir siempre en un estado confirmado.
-- **Procesos muertos.** Un proceso hijo se mata en cada punto del commit, con el mismo requisito.
-- **Corrupción.** Se daña cada página de un archivo, una por una: la inspección la nombra siempre, sin lanzar, y la verificación en línea la encuentra aunque esté en caché.
-- **Criptografía.** Argon2id y BLAKE2b contra vectores de referencia (RFC 9106); el resto es la criptografía de .NET.
-- **Archivo y memoria.** Las pruebas del almacenamiento corren sobre los dos dispositivos, con inyección de fallos de E/S.
-- **Native AOT.** Un programa publicado con AOT ejercita el motor, las tablas tipadas, los vectores, las herramientas, LINQ y SQL en cada verificación.
-- **Las pruebas se prueban.** Se introducen defectos a mano en el motor y se comprueba que alguna prueba falle.
+- **Against a model.** The B+Tree, the indexes, the constraints and the queries are compared with an in-memory reference implementation over random sequences of operations (a million on the tree), also verifying the structure and that no page is lost.
+- **Power cuts.** The commit is interrupted before every I/O operation, losing in pieces whatever had not been flushed to disk; the database must always open in a committed state.
+- **Killed processes.** A child process is killed at every point of the commit, with the same requirement.
+- **Corruption.** Every page of a file is damaged, one by one: inspection always names it, without throwing, and online verification finds it even if it is cached. Every byte of a stored procedure's program is damaged too: it is refused or runs within its limits.
+- **Cryptography.** Argon2id and BLAKE2b against reference vectors (RFC 9106); the rest is .NET's cryptography.
+- **File and memory.** Storage tests run over both devices, with I/O fault injection.
+- **Native AOT.** A program published with AOT exercises the engine, the typed tables, vectors, the tools, LINQ and SQL on every verification.
+- **The tests are tested.** Defects are introduced by hand into the engine to check that some test fails.
 
-Plataformas: verificado en macOS (arm64) y en Linux (arm64, contenedor). Windows no se ha verificado.
+Platforms: verified on macOS (arm64) and on Linux (arm64, container). Windows has not been verified.
 
-## Límites
+## Limits
 
-Lo que conviene saber antes de adoptarla:
+What is worth knowing before adopting it:
 
-- **Un proceso por archivo.** No hay acceso concurrente desde varios procesos.
-- **Un escritor a la vez.** Las escrituras se serializan; muchos commits pequeños y durables son más lentos que en SQLite con WAL.
-- **Lectores largos hacen crecer el archivo**, y el archivo no se achica solo: se compacta con `tkdb compact`.
-- **SQL es un subconjunto:** sin subconsultas, `UNION`, joins externos ni `ALTER TABLE`.
-- **LINQ traduce o rechaza:** sin `||`, `!=`, ordenar ni agrupar.
-- **Sin triggers, vistas materializadas, replicación ni borrado en cascada.** En su lugar: restricciones declarativas, índices sobre expresiones y change feed.
-- **El índice vectorial** no recupera el espacio de los vectores borrados hasta eliminarlo, y no se consulta desde SQL.
-- **Formato de archivo sin estabilizar** hasta la primera versión publicada.
+- **One process per file.** There is no concurrent access from several processes.
+- **One writer at a time.** Writes are serialized; many small durable commits are slower than in SQLite with WAL.
+- **Long-lived readers make the file grow**, and the file does not shrink by itself: it is compacted with `tkdb compact`.
+- **SQL is a subset:** no subqueries, `UNION`, outer joins or `ALTER TABLE`.
+- **LINQ translates or refuses:** no `||`, `!=`, ordering or grouping.
+- **No triggers, materialized views, replication or cascading deletes.** Instead: declarative constraints, expression indexes and the change feed.
+- **The vector index** does not recover the space of deleted vectors until it is dropped, and cannot be queried from SQL.
+- **The file format is not stable** until the first published version.
 
-## Compilar y probar
+## Building and testing
 
-Requisitos: SDK de .NET 11. Para publicar con Native AOT hace falta además la cadena de herramientas nativa de la plataforma (Xcode en macOS, `clang` en Linux, las herramientas de C++ de Visual Studio en Windows).
+Requirements: the .NET 11 SDK. Publishing with Native AOT also needs the platform's native toolchain (Xcode on macOS, `clang` on Linux, the Visual Studio C++ tools on Windows).
 
 ```bash
-dotnet build -c Release                                   # los warnings son errores
-dotnet test -c Release                                    # todas las pruebas
-dotnet test --filter-class "*BTreePropertyTests"          # una clase
+dotnet build -c Release                                   # warnings are errors
+dotnet test -c Release                                    # every test
+dotnet test --filter-class "*BTreePropertyTests"          # one class
 
 # Native AOT
 dotnet publish tests/Tekium.Embedded.AotSmoke -c Release -o artifacts/aot
@@ -693,24 +731,24 @@ dotnet publish tests/Tekium.Embedded.AotSmoke -c Release -o artifacts/aot
 # Benchmarks
 dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'
 
-# Build, pruebas y AOT en Linux, dentro de un contenedor (requiere Docker)
+# Build, tests and AOT on Linux, inside a container (requires Docker)
 scripts/test-linux.sh
 ```
 
-Las pruebas usan xUnit v3 sobre Microsoft.Testing.Platform, por eso los filtros son `--filter-class` y `--filter-method` en lugar de `--filter`.
+The tests use xUnit v3 on Microsoft.Testing.Platform, which is why the filters are `--filter-class` and `--filter-method` rather than `--filter`.
 
 ```
 src/
-  Tekium.Embedded.Core/          Motor y API pública
-  Tekium.Embedded.Generators/    Generador de código: tablas, índices, restricciones y rutinas
-  Tekium.Embedded.Sql/           SQL, proveedor ADO.NET, funciones y procedimientos en C#
-  Tekium.Embedded.Linq/          Consultas con predicados de C#
-  Tekium.Embedded.Vectors/       Búsqueda vectorial HNSW
+  Tekium.Embedded.Core/          Engine and public API
+  Tekium.Embedded.Generators/    Source generator: tables, indexes, constraints and routines
+  Tekium.Embedded.Sql/           SQL, ADO.NET provider, C# routines and stored procedures
+  Tekium.Embedded.Linq/          Queries with C# predicates
+  Tekium.Embedded.Vectors/       HNSW vector search
   Tekium.Embedded.Cli/           tkdb
-tests/                           Pruebas, benchmarks y el programa de verificación de Native AOT
-docs/benchmarks/                 Mediciones, con sus condiciones
+tests/                           Tests, benchmarks and the Native AOT verification program
+docs/benchmarks/                 Measurements, with their conditions
 ```
 
-## Licencia
+## License
 
 [MIT](LICENSE). Copyright (c) 2026 Tekium.

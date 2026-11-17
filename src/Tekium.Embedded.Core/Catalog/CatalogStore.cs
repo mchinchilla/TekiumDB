@@ -28,6 +28,7 @@ internal static class CatalogStore
     private const byte ReferrersPrefix = 5;
     private const byte VectorPrefix = 7;
     private const byte ViewPrefix = 8;
+    private const byte ProcedurePrefix = 9;
     private const byte IndexFormat = 1;
     private const int IndexHeaderSize = 5;
     private const int ExpectedSchemaSize = 1024;
@@ -54,6 +55,16 @@ internal static class CatalogStore
         var length = ValidatedNameLength(name);
         var key = new byte[1 + length];
         key[0] = ViewPrefix;
+        Encoding.UTF8.GetBytes(name, key.AsSpan(1));
+        return key;
+    }
+
+    /// <summary>The key of the entry of a stored procedure of the SQL layer: its own prefix and its name. The entry is its compiled program.</summary>
+    public static byte[] ProcedureKey(string name)
+    {
+        var length = ValidatedNameLength(name);
+        var key = new byte[1 + length];
+        key[0] = ProcedurePrefix;
         Encoding.UTF8.GetBytes(name, key.AsSpan(1));
         return key;
     }

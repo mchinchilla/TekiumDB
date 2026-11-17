@@ -60,7 +60,7 @@ return failures;
 // bajo Native AOT, y un procedimiento. El generador escribió el código que las llama: no hay reflexión.
 static async Task<int> RoutinesAsync()
 {
-    await using var database = await TekiumDb.OpenAsync(new DbOptions { InMemory = true });
+    await using var database = await TekiumDb.OpenAsync(new DbOptions { InMemory = true, AllowStoredProcedures = true, ProcedureInstructionLimit = 100_000 });
     database.UseRoutines(Tekium.Embedded.AotSmoke.TkRoutines.All);
     await using var connection = new TkConnection(database);
     await RunAsync("CREATE TABLE readings (id BIGINT PRIMARY KEY, label TEXT NOT NULL, a DOUBLE NOT NULL, b DOUBLE NOT NULL)");
@@ -89,11 +89,43 @@ static async Task<int> RoutinesAsync()
         unknown = true;
     }
 
+    // Criterio de salida de la Fase 14: un procedimiento guardado, con un bucle y SQL embebido, corre; y el
+    // límite de instrucciones corta un bucle que no termina.
+    await RunAsync("CREATE TABLE kept (id BIGINT PRIMARY KEY, label TEXT NOT NULL)");
+    await RunAsync("""
+        CREATE PROCEDURE keep_some(top BIGINT) RETURNS INT AS $$
+        DECLARE n INT := 0;
+        BEGIN
+            FOR r IN SELECT id, label FROM readings WHERE id < top LOOP
+                INSERT INTO kept (id, label) VALUES (r.id, smoke_slug(r.label));
+                DELETE FROM readings WHERE id = r.id;
+                n := n + 1;
+            END LOOP;
+            RETURN n;
+        END $$
+        """);
+    await RunAsync("CREATE PROCEDURE forever() AS $$ DECLARE n INT := 0; BEGIN WHILE TRUE LOOP n := n + 1; END LOOP; END $$");
+    var moved = await ScalarAsync("CALL keep_some(500)");
+    var kept = await ScalarAsync("SELECT COUNT(*) FROM kept WHERE label = 'sensor-no--3'");
+    var remaining = await ScalarAsync("SELECT COUNT(*) FROM readings");
+    var stopped = false;
+    try
+    {
+        await ScalarAsync("CALL forever()");
+    }
+    catch (TkSqlException cut) when (cut.Message.Contains("was stopped after 100000 instructions", StringComparison.Ordinal))
+    {
+        stopped = true;
+    }
+
     // 3 000 filas: tres bloques, no tres mil llamadas.
-    if (total is 8_997_000.0 && slugs is 600L && trimmed is 10 && left is 2990L && unknown && SmokeRoutines.VectorCalls == 3)
+    if (total is 8_997_000.0 && slugs is 600L && trimmed is 10 && left is 2990L && unknown && SmokeRoutines.VectorCalls == 3
+        && moved is 500 && kept is 100L && remaining is 2490L && stopped)
     {
         return 0;
     }
+
+    await Console.Error.WriteLineAsync($"Stored procedures: {moved}, {kept}, {remaining}, stopped {stopped}.");
 
     await Console.Error.WriteLineAsync($"Routines failed: {total}, {slugs}, {trimmed}, {left}, {unknown}, {SmokeRoutines.VectorCalls} calls.");
     return 1;

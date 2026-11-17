@@ -62,4 +62,24 @@ public sealed class DbOptions
 
     /// <summary>Gets the cost of deriving the key from the password of a new encrypted database.</summary>
     internal Argon2Parameters KeyDerivation { get; init; } = Argon2Parameters.Default;
+
+    /// <summary>
+    /// Gets a value indicating whether procedures stored in the file may be created and run (the SQL
+    /// layer's <c>CREATE PROCEDURE</c> and <c>CALL</c>). Off by default: a stored procedure is program
+    /// inside a data file, and opening someone else's file must not run any of it until the application
+    /// says so.
+    /// </summary>
+    public bool AllowStoredProcedures { get; init; }
+
+    /// <summary>
+    /// Gets how many instructions a call to a stored procedure may execute, counting the procedures it
+    /// calls, before it is stopped with an error: what keeps an endless loop from hanging the process.
+    /// </summary>
+    public int ProcedureInstructionLimit { get; init; } = 10_000_000;
+
+    /// <summary>The deepest <see cref="ProcedureCallDepth"/> can be set: each level uses stack of the thread that runs it.</summary>
+    public const int MaxProcedureCallDepth = 256;
+
+    /// <summary>Gets how deep stored procedures may call one another before the call is stopped with an error. At most <see cref="MaxProcedureCallDepth"/>.</summary>
+    public int ProcedureCallDepth { get; init; } = 32;
 }

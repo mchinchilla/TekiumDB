@@ -9,7 +9,7 @@ namespace Tekium.Embedded.Sql.Parsing;
 /// A hand-written recursive descent parser for the SQL this layer runs. One statement per text. An error
 /// says what was expected, what was found and where.
 /// </summary>
-internal sealed class SqlParser
+internal sealed partial class SqlParser
 {
     private static readonly HashSet<string> Reserved = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -37,6 +37,7 @@ internal sealed class SqlParser
         Text,
         Blob,
         Parameter,
+        Body,
         Symbol,
         End,
     }
@@ -162,6 +163,23 @@ internal sealed class SqlParser
                 tokens.Add(new Token(Kind.Quoted, text[(i + 1)..end], i));
                 i = end + 1;
             }
+            else if (c == '$' && i + 1 < text.Length && text[i + 1] == '$')
+            {
+                // $$ … $$: the body of a procedure, kept as it is.
+                var end = text.IndexOf("$$", i + 2, StringComparison.Ordinal);
+                if (end < 0)
+                {
+                    throw new TkSqlException($"The body that starts at position {i + 1} has no closing $$.");
+                }
+
+                tokens.Add(new Token(Kind.Body, text[(i + 2)..end], i));
+                i = end + 2;
+            }
+            else if (c == ':' && i + 1 < text.Length && text[i + 1] == '=')
+            {
+                tokens.Add(new Token(Kind.Symbol, ":=", i));
+                i += 2;
+            }
             else if (c is '@' or ':' or '$')
             {
                 var start = i++;
@@ -286,6 +304,18 @@ internal sealed class SqlParser
             }
         }
         while (Accept(","));
+
+        // SELECT … INTO variables: only inside a procedure.
+        if (_procedural && Accept("INTO"))
+        {
+            var into = new List<string>();
+            do
+            {
+                into.Add(Name("a variable"));
+            }
+            while (Accept(","));
+            _into = into;
+        }
 
         TableRef? from = null;
         var joins = new List<JoinClause>();
@@ -439,9 +469,14 @@ internal sealed class SqlParser
             return new CreateViewStatement(name, query, _text[start..Current.Position].Trim(), replace);
         }
 
+        if (Accept("PROCEDURE"))
+        {
+            return CreateProcedure(replace);
+        }
+
         if (replace)
         {
-            throw Error("VIEW (only a view can be replaced)");
+            throw Error("VIEW or PROCEDURE (only a view or a procedure can be replaced)");
         }
 
         var unique = Accept("UNIQUE");
@@ -540,7 +575,8 @@ internal sealed class SqlParser
 
     private DropStatement Drop()
     {
-        var kind = Accept("TABLE") ? "TABLE" : Accept("INDEX") ? "INDEX" : Accept("VIEW") ? "VIEW" : throw Error("TABLE, INDEX or VIEW");
+        var kind = Accept("TABLE") ? "TABLE" : Accept("INDEX") ? "INDEX" : Accept("VIEW") ? "VIEW" : Accept("PROCEDURE") ? "PROCEDURE"
+            : throw Error("TABLE, INDEX, VIEW or PROCEDURE");
         var ifExists = false;
         if (Accept("IF"))
         {
@@ -757,6 +793,9 @@ internal sealed class SqlParser
                     throw new TkSqlException($"The blob at position {token.Position + 1} is not hexadecimal.");
                 }
 
+            case Kind.Parameter when _procedural:
+                throw new TkSqlException($"A procedure has no parameters like @{token.Text}: it reads its own variables by name (position {token.Position + 1}).");
+
             case Kind.Parameter:
                 _position++;
                 return new Parameter(token.Text);
@@ -858,7 +897,8 @@ internal sealed class SqlParser
     private bool Is(string word) =>
         (Current.Kind == Kind.Word || Current.Kind == Kind.Symbol) && string.Equals(Current.Text, word, StringComparison.OrdinalIgnoreCase);
 
-    private bool IsName() => Current.Kind == Kind.Quoted || (Current.Kind == Kind.Word && !Reserved.Contains(Current.Text));
+    private bool IsName() => Current.Kind == Kind.Quoted
+        || (Current.Kind == Kind.Word && !Reserved.Contains(Current.Text) && !(_procedural && ProceduralWords.Contains(Current.Text)));
 
     private string Peek(int ahead) =>
         _position + ahead < _tokens.Count && _tokens[_position + ahead].Kind is Kind.Word or Kind.Symbol ? _tokens[_position + ahead].Text : string.Empty;

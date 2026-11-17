@@ -32,8 +32,10 @@ public sealed class TekiumDb : IAsyncDisposable
     private TaskCompletionSource _committed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _watchers;
 
-    private TekiumDb(Pager pager, int retention, TkDiagnostics? diagnostics)
+    private TekiumDb(Pager pager, DbOptions options, TkDiagnostics? diagnostics)
     {
+        var retention = options.ChangeRetention;
+        Options = options;
         Diagnostics = diagnostics;
         Pager = pager;
         Tree = new BTree(pager);
@@ -59,6 +61,9 @@ public sealed class TekiumDb : IAsyncDisposable
     public ulong LastTransactionId => Pager.Current.TransactionId.Value;
 
     internal Pager Pager { get; }
+
+    /// <summary>Gets the options the database was opened with.</summary>
+    internal DbOptions Options { get; }
 
     /// <summary>Gets the counters of the database, if it was opened with them.</summary>
     internal TkDiagnostics? Diagnostics { get; }
@@ -108,6 +113,9 @@ public sealed class TekiumDb : IAsyncDisposable
 
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.CacheSizeMb, nameof(options));
             ArgumentOutOfRangeException.ThrowIfNegative(options.ChangeRetention, nameof(options));
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.ProcedureInstructionLimit, nameof(options));
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.ProcedureCallDepth, nameof(options));
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(options.ProcedureCallDepth, DbOptions.MaxProcedureCallDepth, nameof(options));
             var counters = options.Diagnostics ? new PagerDiagnostics() : null;
             var pagerOptions = new PagerOptions
             {
@@ -125,7 +133,7 @@ public sealed class TekiumDb : IAsyncDisposable
             owned = null;
             var database = new TekiumDb(
                 pager,
-                options.ChangeRetention,
+                options,
                 counters is null ? null : new TkDiagnostics(options.DiagnosticsName ?? options.Path ?? "memory", counters));
             try
             {

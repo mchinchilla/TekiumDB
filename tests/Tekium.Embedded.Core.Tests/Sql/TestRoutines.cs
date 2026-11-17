@@ -147,6 +147,11 @@ public static class TestRoutines
     public static ValueTask<bool> CanCancelAsync(TkContext context, CancellationToken cancellationToken) =>
         ValueTask.FromResult(context is not null && cancellationToken.CanBeCanceled);
 
+    /// <summary>Llama, con SQL, a un procedimiento guardado en el archivo: para probar que el límite de profundidad cuenta también por aquí.</summary>
+    [TkProcedure("relay")]
+    public static async ValueTask RelayAsync(TkContext context, CancellationToken cancellationToken) =>
+        await context.ExecuteAsync("CALL bounce()", null, cancellationToken);
+
     /// <summary>SQL dentro del procedimiento, en su misma transacción: ve lo que acaba de escribir.</summary>
     [TkProcedure("zero_owner")]
     public static async ValueTask<long> ZeroOwnerAsync(TkContext context, string owner, CancellationToken cancellationToken)

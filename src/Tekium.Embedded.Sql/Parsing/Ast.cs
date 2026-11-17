@@ -65,7 +65,11 @@ internal sealed record CreateIndexStatement(string Name, string Table, IReadOnly
 
 internal sealed record CreateViewStatement(string Name, SelectStatement Query, string Text, bool OrReplace) : SqlStatement;
 
-/// <summary>DROP TABLE, DROP INDEX (which names its table) or DROP VIEW.</summary>
+/// <summary>CREATE PROCEDURE: its name, parameters, what it returns if anything, and its body, still as text.</summary>
+internal sealed record CreateProcedureStatement(
+    string Name, IReadOnlyList<(string Name, TkColumnType Type)> Parameters, TkColumnType? Returns, string Body, bool OrReplace) : SqlStatement;
+
+/// <summary>DROP TABLE, DROP INDEX (which names its table), DROP VIEW or DROP PROCEDURE.</summary>
 internal sealed record DropStatement(string Kind, string Name, string? Table, bool IfExists) : SqlStatement;
 
 internal sealed record ExplainStatement(SelectStatement Query) : SqlStatement;

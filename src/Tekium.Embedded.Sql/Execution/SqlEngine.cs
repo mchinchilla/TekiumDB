@@ -5,6 +5,7 @@ using System.Text;
 using Tekium.Embedded.Catalog;
 using Tekium.Embedded.Indexing;
 using Tekium.Embedded.Sql.Parsing;
+using Tekium.Embedded.Sql.Procedures;
 using Tekium.Embedded.Sql.Storage;
 
 namespace Tekium.Embedded.Sql.Execution;
@@ -21,7 +22,13 @@ internal sealed class SqlEngine
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<TekiumDb, SqlEngine> Engines = [];
 
     private readonly ConcurrentDictionary<string, SqlStatement> _statements = new(StringComparer.Ordinal);
+    private const string StoredProceduresOff =
+        "Stored procedures are off: a procedure kept in the file is program inside a data file. Open the database with DbOptions.AllowStoredProcedures = true to create and run them.";
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<TkWriteTransaction, PlBudget> Budgets = [];
+
     private readonly ConcurrentDictionary<string, TkRoutine> _routines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, (byte[] Bytes, PlLoaded Loaded)> _procedures = new(StringComparer.Ordinal);
 
     /// <summary>Gets the functions and procedures the application registered, by name.</summary>
     public IReadOnlyDictionary<string, TkRoutine> Routines => _routines;
@@ -94,6 +101,7 @@ internal sealed class SqlEngine
                     CreateViewStatement create => await CreateViewAsync(writer, create, parameters, cancellationToken).ConfigureAwait(false),
                     DropStatement drop => await DropAsync(writer, drop, cancellationToken).ConfigureAwait(false),
                     CallStatement call => await CallAsync(writer, call, parameters, cancellationToken).ConfigureAwait(false),
+                    CreateProcedureStatement create => await For(writer.Database).CreateProcedureAsync(writer, create, cancellationToken).ConfigureAwait(false),
                     _ => throw new TkSqlException("Unsupported statement."),
                 };
         }
@@ -101,24 +109,140 @@ internal sealed class SqlEngine
 
     private static async ValueTask<SqlResult> CallAsync(TkWriteTransaction writer, CallStatement call, StatementContext context, CancellationToken cancellationToken)
     {
-        if (!context.Routines.TryGetValue(call.Name, out var routine) || routine.Procedure is not { } procedure)
-        {
-            throw new TkSqlException(
-                context.Routines.ContainsKey(call.Name)
-                    ? $"{call.Name} is a function, not a procedure: use it in an expression."
-                    : $"There is no procedure '{call.Name}': the application has not registered one.");
-        }
-
-        if (routine.ParameterCount != call.Arguments.Count)
-        {
-            throw new TkSqlException($"Procedure {routine.Name} takes {routine.ParameterCount} arguments; {call.Arguments.Count} were given.");
-        }
-
         var arguments = call.Arguments.Select(argument => Binder.Constant(argument, context)).ToArray();
-        var result = await procedure(new TkContext(writer.Database, writer), arguments, cancellationToken).ConfigureAwait(false);
+        var result = await For(writer.Database).InvokeAsync(writer, call.Name, arguments, cancellationToken).ConfigureAwait(false);
         return result is null
             ? new SqlResult()
             : new SqlResult { Names = ["result"], Types = [result.GetType()], Rows = [[result]] };
+    }
+
+    /// <summary>Calls a procedure by name: one the application registered, or else one stored in the file.</summary>
+    public async ValueTask<object?> InvokeAsync(TkWriteTransaction writer, string name, object?[] arguments, CancellationToken cancellationToken)
+    {
+        if (_routines.TryGetValue(name, out var routine))
+        {
+            if (routine.Procedure is not { } procedure)
+            {
+                throw new TkSqlException($"{name} is a function, not a procedure: use it in an expression.");
+            }
+
+            return routine.ParameterCount == arguments.Length
+                ? await procedure(new TkContext(writer.Database, writer), arguments, cancellationToken).ConfigureAwait(false)
+                : throw new TkSqlException($"Procedure {routine.Name} takes {routine.ParameterCount} arguments; {arguments.Length} were given.");
+        }
+
+        if (await StoredAsync(writer, name, cancellationToken).ConfigureAwait(false) is not var (actual, bytes))
+        {
+            throw new TkSqlException($"There is no procedure '{name}': none is stored in the database and the application has not registered one.");
+        }
+
+        var options = writer.Database.Options;
+        if (!options.AllowStoredProcedures)
+        {
+            throw new TkSqlException(StoredProceduresOff);
+        }
+
+        // The loaded form is kept while the stored bytes are the same: another transaction may see another version.
+        if (!_procedures.TryGetValue(actual, out var cached) || !cached.Bytes.AsSpan().SequenceEqual(bytes))
+        {
+            cached = (bytes, new PlLoaded(PlProgram.Decode(bytes, actual)));
+            _procedures[actual] = cached;
+        }
+
+        // One budget for the whole call, however procedures call one another from here on.
+        if (Budgets.TryGetValue(writer, out var budget))
+        {
+            return await PlMachine.RunAsync(this, writer, cached.Loaded, arguments, budget, cancellationToken).ConfigureAwait(false);
+        }
+
+        budget = new PlBudget(options.ProcedureInstructionLimit, options.ProcedureCallDepth);
+        Budgets.Add(writer, budget);
+        try
+        {
+            return await PlMachine.RunAsync(this, writer, cached.Loaded, arguments, budget, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // A procedure is called as one thing. Stopped halfway, what it had written is not what anyone
+            // asked for: the transaction can only be rolled back.
+            writer.Fail();
+            throw;
+        }
+        finally
+        {
+            Budgets.Remove(writer);
+        }
+    }
+
+    /// <summary>The program of a stored procedure, by name, exactly or ignoring case. Null if there is none.</summary>
+    private static async ValueTask<(string Name, byte[] Bytes)?> StoredAsync(TkTransaction transaction, string name, CancellationToken cancellationToken)
+    {
+        string? actual = null;
+        await foreach (var existing in SqlTable.NamesAsync(transaction, 9, cancellationToken).ConfigureAwait(false))
+        {
+            if (string.Equals(existing, name, StringComparison.Ordinal))
+            {
+                actual = existing;
+                break;
+            }
+
+            actual = string.Equals(existing, name, StringComparison.OrdinalIgnoreCase) ? existing : actual;
+        }
+
+        return actual is null
+            ? null
+            : (actual, await CatalogStore.ReadAsync(transaction.Source, transaction.CatalogRoot, CatalogStore.ProcedureKey(actual), cancellationToken).ConfigureAwait(false));
+    }
+
+    private async ValueTask<SqlResult> CreateProcedureAsync(TkWriteTransaction writer, CreateProcedureStatement create, CancellationToken cancellationToken)
+    {
+        if (!writer.Database.Options.AllowStoredProcedures)
+        {
+            throw new TkSqlException(StoredProceduresOff);
+        }
+
+        if (_routines.ContainsKey(create.Name))
+        {
+            throw new TkSqlException($"The application has registered a routine named '{create.Name}': a stored procedure with that name would never be called.");
+        }
+
+        var existing = await StoredAsync(writer, create.Name, cancellationToken).ConfigureAwait(false);
+        if (existing is not null && !create.OrReplace)
+        {
+            throw new TkSqlException($"There is already a procedure '{create.Name}'. Use CREATE OR REPLACE PROCEDURE to change it.");
+        }
+
+        byte[] key;
+        try
+        {
+            key = CatalogStore.ProcedureKey(existing?.Name ?? create.Name);
+        }
+        catch (ArgumentException invalid)
+        {
+            throw new TkSqlException($"A procedure cannot be named '{create.Name}': {invalid.Message}", invalid);
+        }
+
+        var (program, compiler) = PlCompiler.Compile(create);
+
+        // A variable with the name of a column of a table its statement reads: which of the two was meant cannot be known.
+        foreach (var (statement, variables) in compiler.Embedded)
+        {
+            foreach (var table in SqlRewriter.Tables(statement))
+            {
+                if (variables.Count > 0 && await SqlTable.OpenAsync(writer, table, cancellationToken).ConfigureAwait(false) is { } opened
+                    && variables.Find(variable => opened.Columns.Any(column => string.Equals(column.Name, variable, StringComparison.OrdinalIgnoreCase))) is { } clash)
+                {
+                    throw new TkSqlException(
+                        $"'{clash}' is a variable of the procedure and a column of table '{table}': rename the variable, or write the column as {table}.{clash}.");
+                }
+            }
+        }
+
+        // Decoding what was just encoded runs the same checks a call will.
+        var bytes = program.Encode();
+        new PlLoaded(PlProgram.Decode(bytes, create.Name)).BindAll(new StatementContext(new Dictionary<string, object?>(), _routines));
+        await writer.Database.Tree.PutAsync(writer.Inner, key, bytes, cancellationToken).ConfigureAwait(false);
+        return new SqlResult();
     }
 
     private static void Describe(PlanNode node, int depth, List<object?[]> lines)
@@ -400,6 +524,17 @@ internal sealed class SqlEngine
     private static async ValueTask<SqlResult> DropAsync(TkWriteTransaction writer, DropStatement drop, CancellationToken cancellationToken)
     {
         var tree = writer.Database.Tree;
+        if (drop.Kind == "PROCEDURE")
+        {
+            if (await StoredAsync(writer, drop.Name, cancellationToken).ConfigureAwait(false) is not var (procedure, _))
+            {
+                return drop.IfExists ? new SqlResult() : throw new TkSqlException($"There is no procedure '{drop.Name}'.");
+            }
+
+            await tree.DeleteAsync(writer.Inner, CatalogStore.ProcedureKey(procedure), cancellationToken).ConfigureAwait(false);
+            return new SqlResult();
+        }
+
         if (drop.Kind == "VIEW")
         {
             if (await SelectRunner.ViewAsync(writer, drop.Name, cancellationToken).ConfigureAwait(false) is not { } view)

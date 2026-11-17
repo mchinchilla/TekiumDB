@@ -17,7 +17,7 @@ namespace Tekium.Embedded.Sql;
 /// <see cref="DbConnection.BeginTransactionAsync(CancellationToken)"/> and the <c>…Async</c> methods of
 /// its commands. The synchronous ones throw <see cref="NotSupportedException"/>, because the engine has no
 /// synchronous I/O to do them with. A statement run outside a transaction commits by itself.
-/// Connection string: <c>Data Source=app.tkdb;Password=…;Cache Size=256;Change Retention=0</c>.
+/// Connection string: <c>Data Source=app.tkdb;Password=…;Cache Size=256;Change Retention=0;Stored Procedures=false</c>.
 /// </remarks>
 public sealed class TkConnection : DbConnection
 {
@@ -99,6 +99,7 @@ public sealed class TkConnection : DbConnection
                 Password = (Setting("Password") ?? string.Empty).AsMemory(),
                 CacheSizeMb = Number("Cache Size", 256),
                 ChangeRetention = Number("Change Retention", 0),
+                AllowStoredProcedures = string.Equals(Setting("Stored Procedures"), "true", StringComparison.OrdinalIgnoreCase),
             },
             cancellationToken).ConfigureAwait(false);
     }
