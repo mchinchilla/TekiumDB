@@ -14,6 +14,7 @@ public sealed class TkWriteTransaction : TkTransaction
 {
     private readonly WriteTransaction _inner;
     private readonly Dictionary<string, TableState> _tables = new(StringComparer.Ordinal);
+    private Dictionary<string, ITkCommitParticipant>? _participants;
     private bool _failed;
 
     internal TkWriteTransaction(TekiumDb database, WriteTransaction inner)
@@ -49,6 +50,15 @@ public sealed class TkWriteTransaction : TkTransaction
             if (state.FlushZones is { } flush)
             {
                 await flush(this, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        // Whatever else keeps its own trees in this transaction says where they are now.
+        if (_participants is not null)
+        {
+            foreach (var participant in _participants.Values)
+            {
+                await participant.FlushAsync(this, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -105,6 +115,20 @@ public sealed class TkWriteTransaction : TkTransaction
         GC.SuppressFinalize(this);
         return _inner.DisposeAsync();
     }
+
+    /// <summary>
+    /// What a structure outside the tables (a vector index) keeps for the length of this transaction, under
+    /// a name of its own. It is asked to write its catalog entry when the transaction commits.
+    /// </summary>
+    internal bool TryGetParticipant(string name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ITkCommitParticipant? participant)
+    {
+        participant = null;
+        return _participants is not null && _participants.TryGetValue(name, out participant);
+    }
+
+    /// <summary>Keeps <paramref name="participant"/> for the length of this transaction.</summary>
+    internal void AddParticipant(string name, ITkCommitParticipant participant) =>
+        (_participants ??= new Dictionary<string, ITkCommitParticipant>(StringComparer.Ordinal)).Add(name, participant);
 
     /// <summary>What this transaction knows about a table: loaded from the catalog on first use, then kept here.</summary>
     internal async ValueTask<TableState> TableAsync(string name, byte[] tableKey, CancellationToken cancellationToken)

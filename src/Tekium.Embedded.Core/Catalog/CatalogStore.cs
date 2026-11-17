@@ -26,9 +26,29 @@ internal static class CatalogStore
     private const byte IndexPrefix = 3;
     private const byte ConstraintsPrefix = 4;
     private const byte ReferrersPrefix = 5;
+    private const byte VectorPrefix = 7;
     private const byte IndexFormat = 1;
     private const int IndexHeaderSize = 5;
     private const int ExpectedSchemaSize = 1024;
+
+    /// <summary>The key of the entry of a vector index: its own prefix (6 is the history of commits) and its name.</summary>
+    public static byte[] VectorIndexKey(string name)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        var length = Encoding.UTF8.GetByteCount(name);
+        if (length > MaxNameBytes)
+        {
+            throw new ArgumentException($"The name of a vector index must not exceed {MaxNameBytes} bytes in UTF-8.", nameof(name));
+        }
+
+        var key = new byte[1 + length];
+        key[0] = VectorPrefix;
+        Encoding.UTF8.GetBytes(name, key.AsSpan(1));
+        return key;
+    }
+
+    /// <summary>Whether a catalog key is the entry of a vector index.</summary>
+    public static bool IsVectorIndexKey(ReadOnlySpan<byte> key) => key.Length > 1 && key[0] == VectorPrefix;
 
     /// <summary>The key of the entry that says where the rows of a table are.</summary>
     public static byte[] TableKey(string name)

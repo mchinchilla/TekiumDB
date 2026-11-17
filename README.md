@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 8 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay búsqueda vectorial ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 9 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Todavía no hay capa SQL ni LINQ ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -62,7 +62,7 @@ Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy
 
 - Temporal: zone maps por ventana de tiempo y split 100/0 para series de tiempo (ya existe: ver [Fechas y series de tiempo](#fechas-y-series-de-tiempo)).
 - UUID v7: las hojas quedan llenas aunque los de un mismo milisegundo lleguen en desorden, y "todo lo creado entre X e Y" es un rango de la clave (ya existe: ver [Claves UUID v7](#claves-uuid-v7)).
-- Vectorial: HNSW persistido, con métricas coseno, L2 y producto interno, y cuantización `int8` opcional.
+- Vectorial: HNSW persistido en el mismo archivo, con métricas coseno, L2 y producto interno, y cuantización `int8` opcional (ya existe: ver [Búsqueda vectorial](#búsqueda-vectorial)).
 - Secundarios genéricos, sobre expresiones y parciales (ya existen: ver [Índices y consultas](#índices-y-consultas)).
 
 **API y ecosistema**
@@ -314,12 +314,48 @@ await tx.CommitAsync();
 | Si algo falla | Una clave repetida, una restricción violada o cualquier error deja la transacción sin poder confirmarse: entran todas las filas o ninguna |
 | Lo que no admite | Una tabla con `FOREIGN KEY` a sí misma |
 
-Lo que sigue es diseño objetivo y todavía no existe:
+### Búsqueda vectorial
+
+En su propio paquete, `Tekium.Embedded.Vectors`. Un índice vectorial guarda vectores bajo una clave y encuentra los más cercanos a una consulta con un grafo HNSW, que vive en el mismo archivo y cambia en la misma transacción que las filas:
 
 ```csharp
-var hits = await docs.SearchVectorAsync(
-    x => x.Embedding, queryVector, topK: 10, efSearch: 64);
+using Tekium.Embedded.Vectors;
+
+var embeddings = db.VectorIndex<Guid>("doc_embeddings", new VectorIndexOptions { Dimensions = 384 });
+
+await using (var tx = await db.BeginWriteAsync())
+{
+    await docs.InsertAsync(tx, doc);
+    await embeddings.UpsertAsync(tx, doc.Id, vector);     // la fila y su vector, o ninguno de los dos
+    await tx.CommitAsync();
+}
+
+var hits = await embeddings.SearchAsync(queryVector, topK: 10, efSearch: 64);
+foreach (var hit in hits)                                   // del más cercano al más lejano
+    Show(await docs.GetAsync(hit.Key), hit.Distance);
 ```
+
+| Qué | Cómo |
+| --- | --- |
+| Claves | `Guid`, `int`, `long` o `string`: normalmente la clave de la fila a la que pertenece el vector |
+| Métricas | `Cosine` (por defecto; normaliza al guardar), `Euclidean` e `InnerProduct`. Se fija al crear el índice, igual que las dimensiones y `M` |
+| `efSearch` | Cuántos candidatos considera cada búsqueda: más alto encuentra más de los verdaderos vecinos y tarda más. Se elige por consulta |
+| Cuantización | `Quantize = true` guarda cada componente del grafo en un byte en vez de cuatro; los vectores originales se guardan aparte y los candidatos finales se reordenan con ellos, así que la distancia devuelta es exacta |
+| Transacciones | Lo que una transacción escribe lo encuentra ella misma antes de confirmar y nadie más hasta después; un lector sigue viendo el grafo de su snapshot |
+| Borrar | `RemoveAsync` deja de devolver el vector, pero su sitio en el grafo no se recupera hasta `DropAsync`, que elimina el índice entero y libera sus páginas |
+| Cifrado | El grafo son páginas como las demás: cifradas si la base lo está |
+
+Medido sobre un millón de vectores de 128 dimensiones agrupados como los embeddings, con los parámetros por defecto ([detalle](docs/benchmarks/fase-9.md)):
+
+| `efSearch` | Recall@10 contra fuerza bruta | Latencia media |
+| ---: | ---: | ---: |
+| 16 | 0,79 | 0,39 ms |
+| 64 (por defecto) | 0,98 | 0,75 ms |
+| 256 | 0,999 | 1,19 ms |
+
+El recall depende de los datos: con vectores sin ninguna estructura es mucho más bajo y hay que subir `efSearch` y `M`. Construir el índice va a unos mil vectores por segundo.
+
+El índice no está atado a una tabla: quien escribe la fila escribe también su vector, en la misma transacción. Declararlo como columna (`[TkVector]`) y que la tabla lo mantenga sola todavía no existe.
 
 Reglas de la API:
 
@@ -373,7 +409,7 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 6.8 | Carga masiva: el B+Tree construido de abajo hacia arriba | Hecho en macOS y Linux, [medido](docs/benchmarks/fase-6.8.md): 3× más rápida que insertar fila por fila en una sola transacción, con la novena parte de la memoria; no es el orden de magnitud del criterio, que sólo se alcanza contra insertar con un commit cada mil filas (58×) |
 | 7 | Índice temporal con zone maps y split 100/0 | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-7.md); Windows sin verificar |
 | 8 | Índice UUID v7 | Hecho en macOS y Linux, [medido](docs/benchmarks/fase-8.md): criterio cumplido con hasta decenas de UUID por milisegundo (96–99 % de ocupación); no con cientos por milisegundo creados en un bucle (68 %); Windows sin verificar |
-| 9 | Índice vectorial HNSW | Pendiente |
+| 9 | Índice vectorial HNSW | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-9.md) (recall@10 de 0,98 sobre un millón de vectores con estructura); Windows sin verificar |
 | 10 – 10.6 | Herramientas, backup en caliente, verificación y viaje en el tiempo | Pendiente |
 | 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |
 | 13 – 14 | Funciones y procedimientos: C# por generador y PL/Tk | Pendiente |
@@ -414,8 +450,10 @@ Las pruebas usan xUnit v3 sobre Microsoft.Testing.Platform, por eso los filtros 
 src/
   Tekium.Embedded.Core/          Núcleo del motor y API pública
   Tekium.Embedded.Generators/    Generador de código fuente: serializador, campos, índices y restricciones de cada [TkTable]
+  Tekium.Embedded.Vectors/       Búsqueda vectorial HNSW, en su propio paquete
 tests/
   Tekium.Embedded.Core.Tests/    Pruebas unitarias
+  Tekium.Embedded.Vectors.Tests/ Pruebas del índice vectorial, contra fuerza bruta
   Tekium.Embedded.CrashChild/    Proceso que las pruebas de crash lanzan y matan a mitad de un commit
   Tekium.Embedded.Benchmarks/    Benchmarks con BenchmarkDotNet
   Tekium.Embedded.AotSmoke/      Consumidor mínimo publicado con Native AOT

@@ -8,6 +8,7 @@ using Tekium.Embedded.Indexing;
 using Tekium.Embedded.Security;
 using Tekium.Embedded.Storage;
 using Tekium.Embedded.Transactions;
+using Tekium.Embedded.Vectors;
 
 // Ejercita el núcleo bajo Native AOT. Devuelve 0 si todo va bien; CI ejecuta el binario publicado.
 // Cada fase agrega aquí su camino feliz mínimo.
@@ -42,12 +43,76 @@ finally
 failures += await RoundTripAsync("memory", static () => new MemoryStorageDevice(), reopen: false);
 failures += await EncryptedRoundTripAsync();
 failures += await TypedRoundTripAsync();
+failures += await VectorRoundTripAsync();
 
 await Console.Out.WriteLineAsync(
     $"TekiumDB AOT smoke: {(failures == 0 ? "OK" : "FAILED")} " +
     $"(dynamic code supported: {RuntimeFeature.IsDynamicCodeSupported})");
 
 return failures;
+
+// Búsqueda vectorial: construir, cerrar, reabrir y encontrar, con y sin cuantización, sobre una base cifrada.
+static async Task<int> VectorRoundTripAsync()
+{
+    var file = Path.Combine(Path.GetTempPath(), $"tekium-aot-vectors-{Guid.NewGuid():N}.tkdb");
+    var options = new DbOptions { Path = file, Password = "aot vector password".AsMemory(), CacheSizeMb = 16 };
+    var plain = new VectorIndexOptions { Dimensions = 24, Metric = VectorMetric.Cosine };
+    var small = new VectorIndexOptions { Dimensions = 24, Metric = VectorMetric.Euclidean, Quantize = true, QuantizationMin = -2, QuantizationMax = 2 };
+    var random = new Random(5);
+    var vectors = new float[800][];
+    for (var i = 0; i < vectors.Length; i++)
+    {
+        vectors[i] = new float[24];
+        for (var j = 0; j < 24; j++)
+        {
+            vectors[i][j] = (float)((random.NextDouble() * 2) - 1);
+        }
+    }
+
+    try
+    {
+        var database = await TekiumDb.OpenAsync(options);
+        await using (database)
+        {
+            await using var writer = await database.BeginWriteAsync();
+            for (var i = 0; i < vectors.Length; i++)
+            {
+                await database.VectorIndex<Guid>("by_id", plain).UpsertAsync(writer, Guid.CreateVersion7(DateTimeOffset.UnixEpoch.AddSeconds(i)), vectors[i]);
+                await database.VectorIndex<string>("by_name", small).UpsertAsync(writer, $"v{i}", vectors[i]);
+            }
+
+            await database.VectorIndex<string>("by_name", small).RemoveAsync(writer, "v7");
+            await writer.CommitAsync();
+        }
+
+        database = await TekiumDb.OpenAsync(options);
+        await using (database)
+        {
+            // Cada vector es su propio vecino más cercano; el borrado no aparece.
+            var misses = 0;
+            for (var i = 0; i < vectors.Length; i += 13)
+            {
+                var byId = await database.VectorIndex<Guid>("by_id", plain).SearchAsync(vectors[i], topK: 3);
+                var byName = await database.VectorIndex<string>("by_name", small).SearchAsync(vectors[i], topK: 3);
+                misses += byId.Count == 3 && byId[0].Distance < 1e-3f ? 0 : 1;
+                misses += byName.Count == 3 && byName[0].Key == $"v{i}" && byName[0].Distance < 1e-3f ? 0 : 1;
+            }
+
+            var removed = await database.VectorIndex<string>("by_name", small).SearchAsync(vectors[7], topK: 800, efSearch: 800);
+            if (misses == 0 && removed.Count == 799 && !removed.Any(static hit => hit.Key == "v7"))
+            {
+                return 0;
+            }
+
+            await Console.Error.WriteLineAsync($"Vector round-trip failed: {misses} misses, {removed.Count} found after a removal.");
+            return 1;
+        }
+    }
+    finally
+    {
+        File.Delete(file);
+    }
+}
 
 // La API pública de punta a punta: serializadores generados, catálogo y evolución de esquema, sin reflexión.
 static async Task<int> TypedRoundTripAsync()
