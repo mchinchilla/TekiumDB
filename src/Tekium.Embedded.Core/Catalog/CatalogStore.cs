@@ -27,6 +27,7 @@ internal static class CatalogStore
     private const byte ConstraintsPrefix = 4;
     private const byte ReferrersPrefix = 5;
     private const byte VectorPrefix = 7;
+    private const byte ViewPrefix = 8;
     private const byte IndexFormat = 1;
     private const int IndexHeaderSize = 5;
     private const int ExpectedSchemaSize = 1024;
@@ -46,6 +47,19 @@ internal static class CatalogStore
         Encoding.UTF8.GetBytes(name, key.AsSpan(1));
         return key;
     }
+
+    /// <summary>The key of the entry of a view of the SQL layer: its own prefix and its name. The entry is the text of its query.</summary>
+    public static byte[] ViewKey(string name)
+    {
+        var length = ValidatedNameLength(name);
+        var key = new byte[1 + length];
+        key[0] = ViewPrefix;
+        Encoding.UTF8.GetBytes(name, key.AsSpan(1));
+        return key;
+    }
+
+    /// <summary>Whether a catalog key is the entry of a view.</summary>
+    public static bool IsViewKey(ReadOnlySpan<byte> key) => key.Length > 1 && key[0] == ViewPrefix;
 
     /// <summary>
     /// The roots of the trees a vector index keeps. Its entry starts with a format byte, how many trees it

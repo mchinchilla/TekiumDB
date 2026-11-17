@@ -1,0 +1,170 @@
+// Copyright (c) Tekium. Licensed under the MIT License.
+
+using System.Buffers;
+using System.Buffers.Binary;
+using System.Text;
+using Tekium.Embedded.Catalog;
+using Tekium.Embedded.Indexing;
+using Tekium.Embedded.Storage;
+
+namespace Tekium.Embedded.Sql.Storage;
+
+/// <summary>
+/// An index of a table as the catalog describes it, read without the row type that declared it. The
+/// definition bytes are those of <see cref="IndexDefinition"/>: an index created through SQL over plain
+/// columns is, byte for byte, the one a <c>[TkIndex]</c> on the same columns declares.
+/// </summary>
+internal sealed class StoredIndex
+{
+    private const byte PlainFormat = 1;
+    private const byte UniqueFormat = 2;
+    private const byte ZoneFormat = 3;
+
+    private StoredIndex(string name, byte[] definition)
+    {
+        Name = name;
+        Definition = definition;
+    }
+
+    public string Name { get; }
+
+    public byte[] Definition { get; }
+
+    public PageNumber Root { get; set; }
+
+    /// <summary>Gets or sets the index as a write transaction holds it: where it is now, and whether it changed.</summary>
+    public TkWriteTransaction.IndexEntry? Entry { get; set; }
+
+    /// <summary>Gets where the entries are now.</summary>
+    public PageNumber CurrentRoot => Entry?.Root ?? Root;
+
+    public bool IsUnique { get; private set; }
+
+    public bool IsZoneMap { get; private set; }
+
+    /// <summary>Gets the columns of the key, most significant first, as positions in the current schema; -1 for an expression or a column that is gone.</summary>
+    public int[] Columns { get; private set; } = [];
+
+    public TkColumnType[] Types { get; private set; } = [];
+
+    public bool[] Nullable { get; private set; } = [];
+
+    /// <summary>Gets the conditions of a partial index: a column of the current schema, how it is encoded, and the range it must be in.</summary>
+    public (int Column, TkColumnType Type, bool Nullable, KeyRange Range)[] Where { get; private set; } = [];
+
+    /// <summary>Gets why the SQL layer cannot keep this index up to date, or null if it can.</summary>
+    public string? Unmaintainable { get; private set; }
+
+    /// <summary>The definition of an index over plain columns.</summary>
+    public static StoredIndex Create(string name, ReadOnlySpan<TkColumn> columns, int[] fields, bool unique)
+    {
+        var encoded = new ArrayBufferWriter<byte>();
+        Put(encoded, unique ? UniqueFormat : PlainFormat);
+        Put(encoded, (byte)fields.Length);
+        foreach (var field in fields)
+        {
+            var column = columns[field];
+            Put(encoded, (byte)column.Type);
+            Put(encoded, column.IsNullable ? (byte)1 : (byte)0);
+            Put(encoded, 0);
+            Put(encoded, (byte)Encoding.UTF8.GetByteCount(column.Name));
+            Encoding.UTF8.GetBytes(column.Name, encoded);
+            BinaryPrimitives.WriteInt32LittleEndian(encoded.GetSpan(sizeof(int)), 0);
+            encoded.Advance(sizeof(int));
+        }
+
+        Put(encoded, 0);
+        return Decode(name, encoded.WrittenSpan.ToArray(), columns);
+
+        static void Put(ArrayBufferWriter<byte> writer, byte value)
+        {
+            writer.GetSpan(1)[0] = value;
+            writer.Advance(1);
+        }
+    }
+
+    public static StoredIndex Decode(string name, byte[] definition, ReadOnlySpan<TkColumn> columns)
+    {
+        var index = new StoredIndex(name, definition);
+        try
+        {
+            var position = 0;
+            var format = definition[position++];
+            index.IsUnique = format == UniqueFormat;
+            index.IsZoneMap = format == ZoneFormat;
+            if (format is not (PlainFormat or UniqueFormat or ZoneFormat))
+            {
+                index.Unmaintainable = "it is of a kind this version does not know";
+                return index;
+            }
+
+            if (index.IsZoneMap)
+            {
+                position += sizeof(int);
+                index.Unmaintainable = "it is a zone map";
+            }
+
+            var count = definition[position++];
+            index.Columns = new int[count];
+            index.Types = new TkColumnType[count];
+            index.Nullable = new bool[count];
+            for (var i = 0; i < count; i++)
+            {
+                (index.Columns[i], index.Types[i], index.Nullable[i]) = Field(definition, ref position, columns, index);
+            }
+
+            var conditions = definition[position++];
+            index.Where = new (int, TkColumnType, bool, KeyRange)[conditions];
+            for (var i = 0; i < conditions; i++)
+            {
+                var (column, type, nullable) = Field(definition, ref position, columns, index);
+                var flags = definition[position++];
+                var low = Bound(definition, ref position);
+                var high = Bound(definition, ref position);
+                index.Where[i] = (column, type, nullable, new KeyRange((flags & 1) != 0 ? low : null, (flags & 2) != 0, (flags & 4) != 0 ? high : null, (flags & 8) != 0));
+            }
+        }
+        catch (Exception exception) when (exception is IndexOutOfRangeException or ArgumentException)
+        {
+            throw new InvalidDataException($"The definition of index '{name}' in the catalog is damaged.", exception);
+        }
+
+        return index;
+    }
+
+    private static (int Column, TkColumnType Type, bool Nullable) Field(byte[] definition, ref int position, ReadOnlySpan<TkColumn> columns, StoredIndex index)
+    {
+        var type = (TkColumnType)definition[position++];
+        var nullable = definition[position++] != 0;
+        var isExpression = definition[position++] != 0;
+        var nameLength = definition[position++];
+        var name = Encoding.UTF8.GetString(definition, position, nameLength);
+        position += nameLength;
+        position += sizeof(int) + BinaryPrimitives.ReadInt32LittleEndian(definition.AsSpan(position));
+        if (isExpression)
+        {
+            index.Unmaintainable ??= $"it indexes the expression '{name}', which only the row type that declares it can compute";
+            return (-1, type, nullable);
+        }
+
+        for (var i = 0; i < columns.Length; i++)
+        {
+            if (string.Equals(columns[i].Name, name, StringComparison.Ordinal) && columns[i].Type == type && columns[i].IsNullable == nullable)
+            {
+                return (i, type, nullable);
+            }
+        }
+
+        index.Unmaintainable ??= $"it indexes column '{name}', which the table no longer has as it was";
+        return (-1, type, nullable);
+    }
+
+    private static byte[] Bound(byte[] definition, ref int position)
+    {
+        var length = BinaryPrimitives.ReadUInt16LittleEndian(definition.AsSpan(position));
+        position += sizeof(ushort);
+        var bound = definition.AsSpan(position, length).ToArray();
+        position += length;
+        return bound;
+    }
+}

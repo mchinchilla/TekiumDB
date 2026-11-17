@@ -115,7 +115,7 @@ internal sealed class DatabaseCopier(TekiumDb destination, WriteTransaction tran
                 await PutAsync(entry).ConfigureAwait(false);
                 break;
 
-            case CatalogEntryKind.Schema or CatalogEntryKind.Constraints or CatalogEntryKind.Referrers:
+            case CatalogEntryKind.Schema or CatalogEntryKind.Constraints or CatalogEntryKind.Referrers or CatalogEntryKind.View:
                 await PutAsync(_value).ConfigureAwait(false);
                 break;
 

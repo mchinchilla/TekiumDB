@@ -14,6 +14,7 @@
     <InternalsVisibleTo Include="Tekium.Embedded.AotSmoke" />
     <InternalsVisibleTo Include="Tekium.Embedded.CrashChild" />
     <!-- El índice vectorial vive en su paquete y guarda sus páginas por el mismo pager y la misma transacción. -->
+    <InternalsVisibleTo Include="Tekium.Embedded.Sql" />
     <InternalsVisibleTo Include="Tekium.Embedded.Vectors" />
     <InternalsVisibleTo Include="Tekium.Embedded.Vectors.Tests" />
   </ItemGroup>

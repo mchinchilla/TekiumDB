@@ -16,6 +16,7 @@ internal enum CatalogEntryKind
     Referrers,
     History,
     VectorIndex,
+    View,
     Unknown,
 }
 
@@ -108,6 +109,7 @@ internal static class DatabaseWalk
             4 => CatalogEntryKind.Constraints,
             5 => CatalogEntryKind.Referrers,
             6 => CatalogEntryKind.History,
+            8 => CatalogEntryKind.View,
             _ => CatalogEntryKind.Unknown,
         };
         if (kind == CatalogEntryKind.Unknown)

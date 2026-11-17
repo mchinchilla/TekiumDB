@@ -7,6 +7,7 @@ using Tekium.Embedded.AotSmoke;
 using Tekium.Embedded.Indexing;
 using Tekium.Embedded.Linq;
 using Tekium.Embedded.Security;
+using Tekium.Embedded.Sql;
 using Tekium.Embedded.Storage;
 using Tekium.Embedded.Transactions;
 using Tekium.Embedded.Vectors;
@@ -46,12 +47,86 @@ failures += await EncryptedRoundTripAsync();
 failures += await TypedRoundTripAsync();
 failures += await VectorRoundTripAsync();
 failures += await MaintenanceAsync();
+failures += await SqlAsync();
 
 await Console.Out.WriteLineAsync(
     $"TekiumDB AOT smoke: {(failures == 0 ? "OK" : "FAILED")} " +
     $"(dynamic code supported: {RuntimeFeature.IsDynamicCodeSupported})");
 
 return failures;
+
+// SQL por ADO.NET: crear, escribir con parámetros, consultar con join, agregados y una vista, y leer el plan.
+static async Task<int> SqlAsync()
+{
+    var file = Path.Combine(Path.GetTempPath(), $"tekium-aot-sql-{Guid.NewGuid():N}.tkdb");
+    try
+    {
+        await using var connection = new TkConnection($"Data Source={file};Password=aot sql password;Cache Size=8");
+        await connection.OpenAsync();
+        await RunAsync("CREATE TABLE cities (id INT PRIMARY KEY, name TEXT NOT NULL UNIQUE)");
+        await RunAsync("CREATE TABLE people (id BIGINT PRIMARY KEY, name TEXT NOT NULL, city INT NOT NULL, born TIMESTAMP, score DECIMAL)");
+        await RunAsync("CREATE INDEX by_city ON people (city)");
+        await RunAsync("INSERT INTO cities (id, name) VALUES (1, 'Lima'), (2, 'Quito')");
+        await using (var transaction = await connection.BeginTransactionAsync())
+        {
+            for (var i = 0; i < 200; i++)
+            {
+                await RunAsync(
+                    "INSERT INTO people (id, name, city, born, score) VALUES (@id, @name, @city, @born, @score)",
+                    ("id", (long)i), ("name", $"Person {i}"), ("city", 1 + (i % 2)), ("born", new DateTimeOffset(1990, 1, 1, 0, 0, 0, TimeSpan.Zero).AddDays(i)), ("score", i * 1.5m));
+            }
+
+            await transaction.CommitAsync();
+        }
+
+        await RunAsync("CREATE VIEW by_place AS SELECT c.name AS place, COUNT(*) AS people, MAX(p.score) AS best FROM people p JOIN cities c ON c.id = p.city GROUP BY c.name");
+        var summary = await QueryAsync("SELECT place, people, best FROM by_place WHERE people > @least ORDER BY place", ("least", 50));
+        var plan = await QueryAsync("EXPLAIN SELECT name FROM people WHERE city = 2 AND score > 100");
+        var changed = await RunAsync("UPDATE people SET score = score + 1 WHERE id < 10");
+        if (summary is ["Lima|100|297.0", "Quito|100|298.5"] && changed == 10 && plan.Exists(static line => line.Contains("Index by_city of people", StringComparison.Ordinal)))
+        {
+            return 0;
+        }
+
+        await Console.Error.WriteLineAsync($"SQL failed: {string.Join(" ; ", summary)} / {string.Join(" ; ", plan)} / {changed} changed.");
+        return 1;
+
+        async Task<int> RunAsync(string sql, params (string Name, object Value)[] parameters)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            foreach (var (name, value) in parameters)
+            {
+                command.Parameters.Add(new TkParameter(name, value));
+            }
+
+            return await command.ExecuteNonQueryAsync();
+        }
+
+        async Task<List<string>> QueryAsync(string sql, params (string Name, object Value)[] parameters)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            foreach (var (name, value) in parameters)
+            {
+                command.Parameters.Add(new TkParameter(name, value));
+            }
+
+            var rows = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                rows.Add(string.Join('|', Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? string.Empty : reader.GetString(i))));
+            }
+
+            return rows;
+        }
+    }
+    finally
+    {
+        File.Delete(file);
+    }
+}
 
 // Herramientas: inspeccionar sin abrir, compactar a un archivo nuevo, y diagnosticar y reparar uno dañado a mano.
 static async Task<int> MaintenanceAsync()

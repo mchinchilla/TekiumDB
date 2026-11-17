@@ -4,6 +4,7 @@
     <Project Path="src/Tekium.Embedded.Core/Tekium.Embedded.Core.csproj" />
     <Project Path="src/Tekium.Embedded.Generators/Tekium.Embedded.Generators.csproj" />
     <Project Path="src/Tekium.Embedded.Linq/Tekium.Embedded.Linq.csproj" />
+    <Project Path="src/Tekium.Embedded.Sql/Tekium.Embedded.Sql.csproj" />
     <Project Path="src/Tekium.Embedded.Vectors/Tekium.Embedded.Vectors.csproj" />
   </Folder>
   <Folder Name="/tests/">
