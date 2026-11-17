@@ -153,9 +153,17 @@ public abstract class SqlTableTests : DatabaseTests
         var refused = await Assert.ThrowsAsync<TkSqlException>(async () => await tickets.DeleteAsync((await tickets.GetAsync(tickets.Key(1L), Ct))!, Ct));
         Assert.Contains("through its row type", refused.Message, StringComparison.Ordinal);
 
-        Assert.Contains("CHECK or FOREIGN KEY", (await SqlTable.OpenAsync(writer, "books", Ct))!.ReadOnlyReason, StringComparison.Ordinal);
-        Assert.Contains("refer to it", (await SqlTable.OpenAsync(writer, "authors", Ct))!.ReadOnlyReason, StringComparison.Ordinal);
+        Assert.Contains("CHECK constraints", (await SqlTable.OpenAsync(writer, "books", Ct))!.ReadOnlyReason, StringComparison.Ordinal);
         Assert.Null(await SqlTable.OpenAsync(writer, "nothing", Ct));
+
+        // Una tabla a la que otra se refiere sí se escribe: SQL sabe a quién preguntar antes de borrar una fila.
+        var authors = (await SqlTable.OpenAsync(writer, "authors", Ct))!;
+        Assert.Null(authors.ReadOnlyReason);
+        await authors.InsertAsync(["bea", null, "Bea"], Ct);
+        await authors.DeleteAsync((await authors.GetAsync(authors.Key("bea"), Ct))!, Ct);
+        var referred = await Assert.ThrowsAsync<TkConstraintException>(async () => await authors.DeleteAsync((await authors.GetAsync(authors.Key("ana"), Ct))!, Ct));
+        Assert.Equal("fk_Author", referred.Constraint);
+        Assert.Equal("books", referred.Table);
     }
 
     [Fact]

@@ -41,3 +41,49 @@ public sealed partial record Chore
 
     public bool IsPending => !Done;
 }
+
+/// <summary>Una tabla a la que otra se refiere, sin nada que SQL no sepa mantener.</summary>
+[TkTable("teams")]
+public sealed partial record Team
+{
+    [TkKey]
+    public int Id { get; set; }
+
+    public string Name { get; set; } = string.Empty;
+}
+
+/// <summary>Dos claves foráneas y nada más: una a otra tabla y una a la propia. SQL las comprueba igual que este tipo.</summary>
+[TkTable("players")]
+public sealed partial record Player
+{
+    [TkKey]
+    public long Id { get; set; }
+
+    [TkForeignKey(typeof(Team))]
+    public int? Team { get; set; }
+
+    [TkForeignKey(typeof(Player), Name = "captain")]
+    public long? Captain { get; set; }
+
+    public string Name { get; set; } = string.Empty;
+}
+
+/// <summary>La tabla "players" con una columna más, como la deja un ALTER TABLE.</summary>
+[TkTable("players")]
+public sealed partial record PlayerWithNumber
+{
+    [TkKey]
+    public long Id { get; set; }
+
+    [TkForeignKey(typeof(Team))]
+    public int? Team { get; set; }
+
+    [TkForeignKey(typeof(Player), Name = "captain")]
+    public long? Captain { get; set; }
+
+    public string Name { get; set; } = string.Empty;
+
+    public int Number { get; set; }
+
+    public string? Nick { get; set; }
+}

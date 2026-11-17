@@ -85,6 +85,9 @@ internal sealed class ConstraintSet
         return new ConstraintSet(checks, foreignKeys, Encode(checks, foreignKeys));
     }
 
+    /// <summary>The constraints of a table from their parts, as whoever changes them without a row type has them.</summary>
+    public static ConstraintSet Create(TkCheck[] checks, ForeignKeyInfo[] foreignKeys) => new(checks, foreignKeys, Encode(checks, foreignKeys));
+
     public static ConstraintSet Decode(ReadOnlySpan<byte> encoded)
     {
         if (encoded.IsEmpty)

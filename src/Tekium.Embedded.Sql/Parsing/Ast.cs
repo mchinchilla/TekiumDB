@@ -73,7 +73,19 @@ internal sealed record DeleteStatement(string Table, SqlExpr? Where, IReadOnlyLi
 
 internal sealed record ColumnDefinition(string Name, TkColumnType Type, bool NotNull, bool PrimaryKey, bool Unique);
 
-internal sealed record CreateTableStatement(string Name, IReadOnlyList<ColumnDefinition> Columns, bool IfNotExists) : SqlStatement;
+/// <summary>A FOREIGN KEY as it is declared: a column that refers to the primary key of a table. Without a name it is <c>fk_</c> and the column.</summary>
+internal sealed record ForeignKeyDefinition(string? Name, string Column, string Table, string? TargetColumn);
+
+internal sealed record CreateTableStatement(
+    string Name, IReadOnlyList<ColumnDefinition> Columns, bool IfNotExists, IReadOnlyList<ForeignKeyDefinition> ForeignKeys) : SqlStatement;
+
+/// <summary>ALTER TABLE: exactly one of a column to add (with the value the rows there are take), a FOREIGN KEY to add, or a constraint to drop.</summary>
+internal sealed record AlterTableStatement(
+    string Table, ColumnDefinition? AddColumn, object? Default, ForeignKeyDefinition? AddForeignKey, string? DropConstraint, bool IfExists) : SqlStatement
+{
+    /// <summary>Gets a value indicating whether the column to add was given a DEFAULT, which may be NULL.</summary>
+    public bool HasDefault { get; init; }
+}
 
 internal sealed record CreateIndexStatement(string Name, string Table, IReadOnlyList<string> Columns, bool Unique, bool IfNotExists) : SqlStatement;
 

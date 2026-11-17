@@ -13,8 +13,8 @@ namespace Tekium.Embedded.Sql.Storage;
 /// <summary>
 /// A table of the catalog, used without the row type that declares it: rows are arrays of values, one
 /// per column. It reads any table. It writes those whose indexes and constraints it can keep exactly as
-/// the typed API would: plain, unique and partial indexes over columns. A table with indexes over
-/// expressions, zone maps, CHECK or FOREIGN KEY constraints is read-only here.
+/// the typed API would: plain, unique and partial indexes over columns, and FOREIGN KEY constraints. A
+/// table with indexes over expressions, zone maps or CHECK constraints is read-only here.
 /// </summary>
 internal sealed class SqlTable
 {
@@ -47,6 +47,9 @@ internal sealed class SqlTable
     public byte Version { get; }
 
     public List<StoredIndex> Indexes { get; } = [];
+
+    /// <summary>Gets the FOREIGN KEY constraints of the table, each with the column it is on.</summary>
+    public List<(ForeignKeyInfo Info, int Column)> ForeignKeys { get; } = [];
 
     /// <summary>Gets why the table cannot be written through SQL, or null if it can.</summary>
     public string? ReadOnlyReason { get; private set; }
@@ -110,14 +113,31 @@ internal sealed class SqlTable
 
         table.Indexes.Sort(static (a, b) => string.CompareOrdinal(a.Name, b.Name));
         var constraints = await CatalogStore.ReadAsync(source, catalog, CatalogStore.ConstraintsKey(tableKey), cancellationToken).ConfigureAwait(false);
-        var referrers = await CatalogStore.ReadAsync(source, catalog, CatalogStore.ReferrersKey(tableKey), cancellationToken).ConfigureAwait(false);
+        var set = ConstraintSet.Decode(constraints);
+        string? unchecked0 = null;
+        foreach (var foreignKey in set.ForeignKeys)
+        {
+            // The column is the one its index starts with: the constraint itself does not name it.
+            if (table.Indexes.Find(index => string.Equals(index.Name, foreignKey.Index, StringComparison.Ordinal)) is { } index && CanCheck(index))
+            {
+                table.ForeignKeys.Add((foreignKey, index.Columns[0]));
+            }
+            else
+            {
+                unchecked0 ??= $"its FOREIGN KEY '{foreignKey.Name}' has no index '{foreignKey.Index}' that SQL can check it with";
+            }
+        }
+
         table.ReadOnlyReason =
             table.Indexes.Find(static index => index.Unmaintainable is not null) is { } index0 ? $"its index '{index0.Name}' cannot be kept from SQL: {index0.Unmaintainable}"
-            : constraints.Length > 0 && ConstraintSet.Decode(constraints) is { } set && (set.Checks.Length > 0 || set.ForeignKeys.Length > 0) ? "it has CHECK or FOREIGN KEY constraints, which only the row type that declares them can check"
-            : referrers.Length > 0 && ConstraintSet.DecodeReferrers(referrers).Count > 0 ? "other tables refer to it with FOREIGN KEY constraints"
-            : null;
+            : set.Checks.Length > 0 ? "it has CHECK constraints, which only the row type that declares them can check"
+            : unchecked0;
         return table;
     }
+
+    /// <summary>Whether a FOREIGN KEY can be checked with an index: it holds every row, and starts with a column.</summary>
+    public static bool CanCheck(StoredIndex index) =>
+        index.Unmaintainable is null && !index.IsZoneMap && index.Where.Length == 0 && index.Columns.Length > 0 && index.Columns[0] >= 0;
 
     /// <summary>The name of a table as the catalog has it: the one given, or one that differs only in case. Null if there is none.</summary>
     public static async ValueTask<string?> ResolveAsync(TkTransaction transaction, string name, CancellationToken cancellationToken)
@@ -363,6 +383,7 @@ internal sealed class SqlTable
         var writer = Writable();
         var key = Key(old[KeyColumn]!);
         var changes = Changes(old, null, key);
+        await EnsureNotReferredAsync(writer, old, key, cancellationToken).ConfigureAwait(false);
         try
         {
             await ApplyAsync(writer, changes, cancellationToken).ConfigureAwait(false);
@@ -461,6 +482,20 @@ internal sealed class SqlTable
         var encoded = SqlValues.EncodeRow(Version, Columns, row);
         var changes = Changes(old, row, key);
 
+        // FOREIGN KEY, before anything changes: the row each one refers to must be there.
+        foreach (var (foreignKey, column) in ForeignKeys)
+        {
+            if (row[column] is { } value && !await RefersToARowAsync(writer, foreignKey, value, Columns[column].Type, key, cancellationToken).ConfigureAwait(false))
+            {
+                writer.Fail();
+                throw new TkConstraintException(
+                    $"Table '{Name}': the row with key {SqlValues.Show(row[KeyColumn])} violates FOREIGN KEY constraint '{foreignKey.Name}': no row of '{foreignKey.Table}' has the key it refers to. The transaction is aborted.",
+                    Name,
+                    foreignKey.Name,
+                    SqlValues.Show(row[KeyColumn]));
+            }
+        }
+
         // UNIQUE, before anything changes: another row with the same values in a unique index.
         foreach (var (index, _, entry, prefix, hasNull) in changes)
         {
@@ -489,6 +524,97 @@ internal sealed class SqlTable
         }
 
         _state.Changed = true;
+    }
+
+    /// <summary>
+    /// Whether the table a FOREIGN KEY refers to has a row whose key is a value. A row may refer to
+    /// itself, also while it is being inserted: <paramref name="own"/> is the key of the row asking.
+    /// </summary>
+    public async ValueTask<bool> RefersToARowAsync(
+        TkWriteTransaction writer, ForeignKeyInfo foreignKey, object value, TkColumnType type, byte[]? own, CancellationToken cancellationToken)
+    {
+        byte[] key;
+        try
+        {
+            key = SqlValues.PrimaryKey(value, type);
+        }
+        catch (TkSqlException)
+        {
+            // Too long to be a key, or empty: nothing in the other table can have it.
+            return false;
+        }
+
+        var parent = await writer.TableAsync(foreignKey.Table, CatalogStore.TableKey(foreignKey.Table), cancellationToken).ConfigureAwait(false);
+        return (ReferenceEquals(parent, _state) && own is not null && key.AsSpan().SequenceEqual(own))
+            || await BTree.GetAsync(writer.Inner, parent.Root, key, Memory<byte>.Empty, cancellationToken).ConfigureAwait(false) != BTree.NotFound;
+    }
+
+    /// <summary>Refuses to delete a row while rows of this or another table refer to it through a FOREIGN KEY.</summary>
+    private async ValueTask EnsureNotReferredAsync(TkWriteTransaction writer, object?[] old, byte[] key, CancellationToken cancellationToken)
+    {
+        var referrers = await writer.ReferrersAsync(_state!, cancellationToken).ConfigureAwait(false);
+        if (referrers.Count == 0)
+        {
+            return;
+        }
+
+        var buffer = new byte[_transaction.Database.Tree.MaxKeySize];
+        foreach (var referrer in referrers)
+        {
+            var referring = await writer.TableAsync(referrer.Table, CatalogStore.TableKey(referrer.Table), cancellationToken).ConfigureAwait(false);
+            var indexes = await writer.IndexesAsync(referring, cancellationToken).ConfigureAwait(false);
+            if (!indexes.TryGetValue(referrer.Index, out var index))
+            {
+                throw new InvalidDataException($"Table '{referrer.Table}' lacks the index of its FOREIGN KEY '{referrer.Name}' to table '{Name}'.");
+            }
+
+            // The entries of the rows that refer to this one start with its key, as an index holds it.
+            var probe = buffer.AsMemory(0, ReferenceProbe(key, referrer.IsNullable, buffer));
+            await foreach (var entry in BTree.RangeAsync(writer.Inner, index.Root, probe, After(probe.ToArray()), cancellationToken).ConfigureAwait(false))
+            {
+                // A row that refers to itself does not keep itself from being deleted.
+                if (ReferenceEquals(referring, _state)
+                    && entry.Value.Length == sizeof(ushort)
+                    && BinaryPrimitives.ReadUInt16LittleEndian(entry.Value.Span) is var prefix
+                    && prefix <= entry.Key.Length
+                    && entry.Key.Span[prefix..].SequenceEqual(key))
+                {
+                    continue;
+                }
+
+                writer.Fail();
+                var text = SqlValues.Show(old[KeyColumn]);
+                throw new TkConstraintException(
+                    $"Table '{referrer.Table}': FOREIGN KEY constraint '{referrer.Name}' is violated: the row of '{Name}' with key {text} cannot be deleted while rows of '{referrer.Table}' refer to it. The transaction is aborted.",
+                    referrer.Table,
+                    referrer.Name,
+                    text);
+            }
+        }
+    }
+
+    /// <summary>A stored key of this table as the first field of an index of a table that refers to it.</summary>
+    private int ReferenceProbe(ReadOnlySpan<byte> key, bool isNullable, Span<byte> destination)
+    {
+        var writer = new TkKeyWriter(destination);
+        if (isNullable)
+        {
+            writer.WritePresent();
+        }
+
+        if (Columns[KeyColumn].Type == TkColumnType.Text)
+        {
+            // In an index, text has its zeros escaped and an end mark; in the table it is the whole key.
+            writer.Write(key);
+        }
+        else
+        {
+            writer.WriteRaw(key);
+        }
+
+        return writer.IsTruncated
+            ? throw new InvalidDataException($"Table '{Name}': a stored key is too long to be looked up in an index.")
+            : writer.Length;
     }
 
     /// <summary>For each index, the entry the old row has in it and the one the new row gets: null when the row is not in the index.</summary>

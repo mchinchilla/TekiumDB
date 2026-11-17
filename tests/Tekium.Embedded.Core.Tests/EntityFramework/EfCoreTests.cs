@@ -125,6 +125,9 @@ public abstract class EfCoreTests : DatabaseTests
         await pair.SameAsync(static async db =>
         {
             var blog = await db.Blogs.SingleAsync(static b => b.Id == 2, Ct);
+
+            // Primero sus entradas: SQLite las borraría en cascada, y TekiumDB se niega a dejar una sin su blog.
+            await db.Posts.Where(static p => p.BlogId == 2).ExecuteDeleteAsync(Ct);
             await db.Blogs.Where(static b => b.Id == 2).ExecuteDeleteAsync(Ct);
             blog.Rating = 99;
             var failure = await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() => db.SaveChangesAsync(Ct));
@@ -350,8 +353,7 @@ public abstract class EfCoreTests : DatabaseTests
         Assert.Throws<NotSupportedException>(() => db.Blogs.Count());
         Assert.Throws<NotSupportedException>(() => db.Database.EnsureDeleted());
 
-        // Sin migraciones.
-        Assert.Contains("EnsureCreatedAsync", (await Assert.ThrowsAsync<NotSupportedException>(() => db.Database.MigrateAsync(Ct))).Message, StringComparison.Ordinal);
+        Assert.Contains("MigrateAsync", Assert.ThrowsAny<NotSupportedException>(() => db.Database.Migrate()).Message, StringComparison.Ordinal);
 
         // Lo que el SQL de TekiumDB no tiene falla diciendo qué, al ejecutar la consulta.
         var union = await Assert.ThrowsAsync<Tekium.Embedded.Sql.TkSqlException>(
@@ -366,9 +368,26 @@ public abstract class EfCoreTests : DatabaseTests
         await using var ledger = new Ledger(composite);
         Assert.Contains("exactly one column", (await Assert.ThrowsAsync<NotSupportedException>(() => ledger.Database.EnsureCreatedAsync(Ct))).Message, StringComparison.Ordinal);
 
-        // Las claves foráneas no se crean: una referencia a algo que no existe se guarda. Es un límite, no un defecto oculto.
+        // Las claves foráneas están en la base: una referencia a algo que no existe no se guarda.
         db.Add(new Post { Id = Guid.NewGuid(), Title = "orphan", At = Epoch, BlogId = 999, AuthorId = 999 });
-        Assert.Equal(1, await db.SaveChangesAsync(Ct));
+        var orphan = await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync(Ct));
+        Assert.StartsWith("FK_Posts_", Assert.IsType<TkConstraintException>(orphan.InnerException).Constraint, StringComparison.Ordinal);
+        db.ChangeTracker.Clear();
+
+        // Pero sólo impiden: la base no borra en cascada. EF borra lo que tiene cargado; lo que no, hace fallar el borrado.
+        var parent = new Blog { Name = "parent", Rating = 1 };
+        parent.Posts.Add(new Post { Id = Guid.NewGuid(), Title = "child", At = Epoch, Author = new Author { Name = "someone" } });
+        db.Add(parent);
+        Assert.Equal(3, await db.SaveChangesAsync(Ct));
+        db.ChangeTracker.Clear();
+        var kept = await Assert.ThrowsAsync<TkConstraintException>(() => db.Blogs.Where(static b => b.Name == "parent").ExecuteDeleteAsync(Ct));
+        Assert.Equal("FK_Posts_Blogs_BlogId", kept.Constraint);
+        db.Remove(await db.Blogs.SingleAsync(static b => b.Name == "parent", Ct));
+        Assert.IsType<TkConstraintException>((await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync(Ct))).InnerException);
+        db.ChangeTracker.Clear();
+        db.Remove(await db.Blogs.Include(static b => b.Posts).SingleAsync(static b => b.Name == "parent", Ct));
+        Assert.Equal(2, await db.SaveChangesAsync(Ct));
+        Assert.Equal(0, await db.Posts.CountAsync(Ct));
 
         // EnsureDeletedAsync quita las tablas del modelo, y se pueden volver a crear.
         Assert.True(await db.Database.EnsureDeletedAsync(Ct));

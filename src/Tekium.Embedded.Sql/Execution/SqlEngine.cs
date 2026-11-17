@@ -100,6 +100,7 @@ internal sealed class SqlEngine
                     CreateIndexStatement create => await CreateIndexAsync(writer, create, cancellationToken).ConfigureAwait(false),
                     CreateViewStatement create => await CreateViewAsync(writer, create, parameters, cancellationToken).ConfigureAwait(false),
                     DropStatement drop => await DropAsync(writer, drop, cancellationToken).ConfigureAwait(false),
+                    AlterTableStatement alter => await AlterTableAsync(writer, alter, cancellationToken).ConfigureAwait(false),
                     CallStatement call => await CallAsync(writer, call, parameters, cancellationToken).ConfigureAwait(false),
                     CreateProcedureStatement create => await For(writer.Database).CreateProcedureAsync(writer, create, cancellationToken).ConfigureAwait(false),
                     _ => throw new TkSqlException("Unsupported statement."),
@@ -447,8 +448,290 @@ internal sealed class SqlEngine
                 .ConfigureAwait(false);
         }
 
+        // A FOREIGN KEY is declared once the table is there: it may refer to the table itself.
+        foreach (var foreignKey in create.ForeignKeys)
+        {
+            await AddForeignKeyAsync(writer, await TableAsync(writer, create.Name, cancellationToken).ConfigureAwait(false), foreignKey, cancellationToken).ConfigureAwait(false);
+        }
+
         return new SqlResult();
     }
+
+    private static async ValueTask<SqlResult> AlterTableAsync(TkWriteTransaction writer, AlterTableStatement alter, CancellationToken cancellationToken)
+    {
+        var table = await TableAsync(writer, alter.Table, cancellationToken).ConfigureAwait(false);
+        if (table.ReadOnlyReason is { } reason)
+        {
+            throw new TkSqlException($"Table '{table.Name}' cannot be changed through SQL: {reason}.");
+        }
+
+        if (alter.AddForeignKey is { } foreignKey)
+        {
+            await AddForeignKeyAsync(writer, table, foreignKey, cancellationToken).ConfigureAwait(false);
+        }
+        else if (alter.DropConstraint is { } constraint)
+        {
+            await DropConstraintAsync(writer, table, constraint, alter.IfExists, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await AddColumnAsync(writer, table, alter.AddColumn!, alter.HasDefault, alter.Default, cancellationToken).ConfigureAwait(false);
+        }
+
+        return new SqlResult();
+    }
+
+    /// <summary>
+    /// Declares a FOREIGN KEY exactly as a row type would: the same entry in the catalog of the table, the
+    /// same note in the table referred to, and an index that starts with the column, made if there is none.
+    /// The rows there are must already respect it.
+    /// </summary>
+    private static async ValueTask AddForeignKeyAsync(TkWriteTransaction writer, SqlTable table, ForeignKeyDefinition definition, CancellationToken cancellationToken)
+    {
+        var column = table.Column(definition.Column) is >= 0 and var at ? at : throw new TkSqlException($"Table '{table.Name}' has no column '{definition.Column}'.");
+        var name = definition.Name ?? $"fk_{table.Columns[column].Name}";
+        if (name.Length == 0 || Encoding.UTF8.GetByteCount(name) > ConstraintSet.MaxNameBytes)
+        {
+            throw new TkSqlException($"Table '{table.Name}': the name of constraint '{name}' must take from 1 to {ConstraintSet.MaxNameBytes} UTF-8 bytes.");
+        }
+
+        var parent = string.Equals(definition.Table, table.Name, StringComparison.OrdinalIgnoreCase)
+            ? table
+            : await SqlTable.OpenAsync(writer, definition.Table, cancellationToken).ConfigureAwait(false)
+                ?? throw new TkSqlException($"FOREIGN KEY '{name}' of table '{table.Name}' refers to '{definition.Table}', and there is no table '{definition.Table}'.");
+        var parentKey = parent.Columns[parent.KeyColumn];
+        if (definition.TargetColumn is { } target && parent.Column(target) != parent.KeyColumn)
+        {
+            throw new TkSqlException(
+                $"FOREIGN KEY '{name}' of table '{table.Name}' cannot refer to '{target}' of '{parent.Name}': a foreign key refers only to its primary key, '{parentKey.Name}'.");
+        }
+
+        if (table.Columns[column].Type != parentKey.Type)
+        {
+            throw new TkSqlException(
+                $"FOREIGN KEY '{name}' of table '{table.Name}' cannot be declared: column '{table.Columns[column].Name}' is {TypeName(table.Columns[column].Type)} and the key of '{parent.Name}' is {TypeName(parentKey.Type)}.");
+        }
+
+        var state = await writer.TableAsync(table.Name, table.TableKey, cancellationToken).ConfigureAwait(false);
+        var constraints = ConstraintSet.Decode(await writer.ConstraintsAsync(state, cancellationToken).ConfigureAwait(false));
+        if (constraints.ForeignKeys.Any(known => string.Equals(known.Name, name, StringComparison.OrdinalIgnoreCase))
+            || constraints.Checks.Any(known => string.Equals(known.Name, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new TkSqlException($"Table '{table.Name}' already has a constraint '{name}'.");
+        }
+
+        // The rows there are: nothing is declared if one of them refers to a row that is not there.
+        var declared = new ForeignKeyInfo(name, parent.Name, name, table.Columns[column].IsNullable);
+        var referring = new List<(object Key, object Value)>();
+        await foreach (var row in table.ScanAsync(default, default, cancellationToken).ConfigureAwait(false))
+        {
+            if (row[column] is { } value)
+            {
+                referring.Add((row[table.KeyColumn]!, value));
+            }
+        }
+
+        foreach (var (key, value) in referring)
+        {
+            if (!await table.RefersToARowAsync(writer, declared, value, parentKey.Type, null, cancellationToken).ConfigureAwait(false))
+            {
+                throw new TkSqlException(
+                    $"FOREIGN KEY '{name}' cannot be added to table '{table.Name}': the row with key {SqlValues.Show(key)} refers to {SqlValues.Show(value)}, and no row of '{parent.Name}' has that key.");
+            }
+        }
+
+        // Deleting a row asks who refers to it: that needs an index that starts with the column.
+        var index = table.Indexes.Find(index => SqlTable.CanCheck(index) && index.Columns[0] == column)?.Name;
+        if (index is null)
+        {
+            index = name;
+            while (table.Indexes.Exists(existing => string.Equals(existing.Name, index, StringComparison.OrdinalIgnoreCase)))
+            {
+                index += "_";
+            }
+
+            await CreateIndexAsync(writer, new CreateIndexStatement(index, table.Name, [table.Columns[column].Name], false, false), cancellationToken).ConfigureAwait(false);
+        }
+
+        try
+        {
+            ForeignKeyInfo[] foreignKeys = [.. constraints.ForeignKeys, declared with { Index = index }];
+            await writer.SetConstraintsAsync(state, ConstraintSet.Create(constraints.Checks, foreignKeys).Encoded, cancellationToken).ConfigureAwait(false);
+            await SetReferrersAsync(writer, table.Name, parent.Name, foreignKeys, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            writer.Fail();
+            throw;
+        }
+    }
+
+    /// <summary>Tells a table referred to which foreign keys of a table refer to it now: who to ask before deleting a row.</summary>
+    private static ValueTask SetReferrersAsync(TkWriteTransaction writer, string table, string parent, ForeignKeyInfo[] foreignKeys, CancellationToken cancellationToken) =>
+        writer.SetReferrersAsync(
+            parent,
+            table,
+            foreignKeys.Where(key => string.Equals(key.Table, parent, StringComparison.Ordinal)).Select(key => new Referrer(table, key.Name, key.Index, key.IsNullable)),
+            cancellationToken);
+
+    private static async ValueTask DropConstraintAsync(TkWriteTransaction writer, SqlTable table, string name, bool ifExists, CancellationToken cancellationToken)
+    {
+        var state = await writer.TableAsync(table.Name, table.TableKey, cancellationToken).ConfigureAwait(false);
+        var constraints = ConstraintSet.Decode(await writer.ConstraintsAsync(state, cancellationToken).ConfigureAwait(false));
+        var at = Array.FindIndex(constraints.ForeignKeys, known => string.Equals(known.Name, name, StringComparison.Ordinal));
+        at = at >= 0 ? at : Array.FindIndex(constraints.ForeignKeys, known => string.Equals(known.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (at < 0)
+        {
+            if (ifExists)
+            {
+                return;
+            }
+
+            throw new TkSqlException($"Table '{table.Name}' has no constraint '{name}'.");
+        }
+
+        // The index the constraint was checked with stays: it may be one that was there before.
+        var dropped = constraints.ForeignKeys[at];
+        try
+        {
+            ForeignKeyInfo[] foreignKeys = [.. constraints.ForeignKeys.Where((_, i) => i != at)];
+            await writer.SetConstraintsAsync(state, ConstraintSet.Create(constraints.Checks, foreignKeys).Encoded, cancellationToken).ConfigureAwait(false);
+            await SetReferrersAsync(writer, table.Name, dropped.Table, foreignKeys, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            writer.Fail();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Adds a column as a new version of the schema: no row is rewritten, and the rows there are read the
+    /// column as the typed API reads it (NULL, or the zero of its type if it cannot be NULL). Only a
+    /// DEFAULT that is something else writes the rows again, with it.
+    /// </summary>
+    private static async ValueTask AddColumnAsync(
+        TkWriteTransaction writer, SqlTable table, ColumnDefinition column, bool hasDefault, object? byDefault, CancellationToken cancellationToken)
+    {
+        if (column.PrimaryKey)
+        {
+            throw new TkSqlException($"Column '{column.Name}' cannot be added as the primary key of table '{table.Name}': the primary key of a table does not change.");
+        }
+
+        if (table.Column(column.Name) >= 0)
+        {
+            throw new TkSqlException($"Table '{table.Name}' already has a column '{column.Name}'.");
+        }
+
+        if (table.Version == byte.MaxValue)
+        {
+            throw new TkSqlException($"Table '{table.Name}' has used all {byte.MaxValue} schema versions a table may have.");
+        }
+
+        var value = byDefault is null ? null : SqlValues.Convert(byDefault, column.Type, column.Name);
+        if (column.NotNull && hasDefault && value is null)
+        {
+            throw new TkSqlException($"Column '{column.Name}' of table '{table.Name}' cannot be NULL, and its DEFAULT is NULL.");
+        }
+
+        var rows = new List<object?[]>();
+        await foreach (var row in table.ScanAsync(default, default, cancellationToken).ConfigureAwait(false))
+        {
+            rows.Add(row);
+            if (!column.Unique && value is null)
+            {
+                // Nobody needs the rows: only whether there is more than one, or what to write them with.
+                break;
+            }
+        }
+
+        // What every row there is will read: with more than one, it cannot be unique.
+        if (column.Unique && rows.Count > 1 && (value is not null || column.NotNull))
+        {
+            throw new TkSqlException(
+                $"Column '{column.Name}' cannot be unique: the {rows.Count} rows of table '{table.Name}' would all have {SqlValues.Show(value ?? SqlValues.Zero(column.Type))} in it.");
+        }
+
+        TableSchema schema;
+        try
+        {
+            schema = new TableSchema((byte)(table.Version + 1), [.. table.Columns, new TkColumn(column.Name, column.Type, !column.NotNull)], table.KeyColumn);
+            if (schema.Columns.Length > TableSchema.MaxColumns)
+            {
+                throw new TkSqlException($"Table '{table.Name}' already has {TableSchema.MaxColumns} columns, the most a table may.");
+            }
+        }
+        catch (ArgumentException invalid)
+        {
+            throw new TkSqlException($"Column '{column.Name}' cannot be added to table '{table.Name}': {invalid.Message}", invalid);
+        }
+
+        var state = await writer.TableAsync(table.Name, table.TableKey, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var encoded = new byte[schema.EncodedSize()];
+            schema.Encode(encoded);
+            await writer.Database.Tree.PutAsync(writer.Inner, CatalogStore.SchemaKey(table.TableKey, schema.Version), encoded, cancellationToken).ConfigureAwait(false);
+            state.Schema = schema;
+            state.UncommittedVersion = schema.Version;
+            state.Changed = true;
+
+            // Whatever row type wrote the table in this transaction must look at its columns again.
+            state.WritesAs = null;
+
+            var position = schema.Columns.Length - 1;
+            if (value is not null && !(column.NotNull && Same(value, SqlValues.Zero(column.Type))))
+            {
+                var changed = await TableAsync(writer, table.Name, cancellationToken).ConfigureAwait(false);
+                var old = new List<object?[]>();
+                await foreach (var row in changed.ScanAsync(default, default, cancellationToken).ConfigureAwait(false))
+                {
+                    old.Add(row);
+                }
+
+                foreach (var row in old)
+                {
+                    var written = (object?[])row.Clone();
+                    written[position] = value;
+                    await changed.UpdateAsync(row, written, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is not TkSqlException)
+        {
+            writer.Fail();
+            throw;
+        }
+
+        if (column.Unique)
+        {
+            await CreateIndexAsync(writer, new CreateIndexStatement($"{column.Name}_unique", table.Name, [column.Name], true, false), cancellationToken).ConfigureAwait(false);
+        }
+
+        static bool Same(object left, object right) => left is byte[] bytes ? right is byte[] other && bytes.AsSpan().SequenceEqual(other) : left.Equals(right);
+    }
+
+    /// <summary>The type of a column as SQL names it, with its article.</summary>
+    private static string TypeName(TkColumnType type) => type switch
+    {
+        TkColumnType.I32 => "an INT",
+        TkColumnType.I64 => "a BIGINT",
+        TkColumnType.I16 => "a SMALLINT",
+        TkColumnType.U8 => "a TINYINT",
+        TkColumnType.Boolean => "a BOOLEAN",
+        TkColumnType.Text => "a TEXT",
+        TkColumnType.Uuid => "a UUID",
+        TkColumnType.F32 => "a REAL",
+        TkColumnType.F64 => "a DOUBLE",
+        TkColumnType.Numeric => "a DECIMAL",
+        TkColumnType.DateTimeOffset => "a TIMESTAMP",
+        TkColumnType.DateTime => "a DATETIME",
+        TkColumnType.DateOnly => "a DATE",
+        TkColumnType.TimeOnly => "a TIME",
+        TkColumnType.TimeSpan => "an INTERVAL",
+        TkColumnType.Bytes => "a BLOB",
+        _ => $"of type {type}",
+    };
 
     private static async ValueTask<SqlResult> CreateIndexAsync(TkWriteTransaction writer, CreateIndexStatement create, CancellationToken cancellationToken)
     {
@@ -608,8 +891,28 @@ internal sealed class SqlEngine
                     return drop.IfExists ? new SqlResult() : throw new TkSqlException($"Table '{table.Name}' has no index '{drop.Name}'.");
                 }
 
+                if (table.ForeignKeys.Find(key => string.Equals(key.Info.Index, index.Name, StringComparison.Ordinal)) is { Info.Name: { } user })
+                {
+                    throw new TkSqlException($"Index '{index.Name}' of table '{table.Name}' is what FOREIGN KEY '{user}' is checked with: drop the constraint first.");
+                }
+
                 await RemoveIndexAsync(index).ConfigureAwait(false);
                 return new SqlResult();
+            }
+
+            if ((await writer.ReferrersAsync(state, cancellationToken).ConfigureAwait(false)).Find(referrer => !string.Equals(referrer.Table, table.Name, StringComparison.Ordinal)) is { Table: { } other } referrer)
+            {
+                throw new TkSqlException(
+                    $"Table '{table.Name}' cannot be dropped: rows of '{other}' refer to it through FOREIGN KEY '{referrer.Name}'. Drop that constraint or that table first.");
+            }
+
+            // The tables it referred to have nobody of this one to ask any more.
+            foreach (var parent in table.ForeignKeys.Select(static key => key.Info.Table).Distinct(StringComparer.Ordinal))
+            {
+                if (!string.Equals(parent, table.Name, StringComparison.Ordinal))
+                {
+                    await writer.SetReferrersAsync(parent, table.Name, [], cancellationToken).ConfigureAwait(false);
+                }
             }
 
             foreach (var index in table.Indexes)

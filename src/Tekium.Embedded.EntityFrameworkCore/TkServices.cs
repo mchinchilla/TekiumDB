@@ -143,23 +143,43 @@ public sealed class TkDatabaseCreator(RelationalDatabaseCreatorDependencies depe
         return false;
     }
 
-    /// <summary>Drops the tables of the model. The file stays: it may hold what is not of this model.</summary>
+    /// <summary>Drops the tables of the model and the history of migrations. The file stays: it may hold what is not of this model.</summary>
     /// <inheritdoc/>
     public override async Task DeleteAsync(CancellationToken cancellationToken = default)
     {
-        foreach (var table in Tables())
+        var helper = Dependencies.SqlGenerationHelper;
+        var model = Dependencies.CurrentContext.Context.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var existing = new List<ITable>();
+        foreach (var table in model.Tables)
         {
-            if (await ExistsAsync(table, cancellationToken).ConfigureAwait(false))
+            if (await ExistsAsync(table.Name, cancellationToken).ConfigureAwait(false))
             {
-                await RunAsync($"DROP TABLE {Dependencies.SqlGenerationHelper.DelimitIdentifier(table)}", cancellationToken).ConfigureAwait(false);
+                existing.Add(table);
             }
         }
+
+        // A table that others refer to cannot be dropped: the foreign keys go first, then the tables in any order.
+        foreach (var table in existing)
+        {
+            foreach (var foreignKey in table.ForeignKeyConstraints)
+            {
+                await RunAsync($"ALTER TABLE {helper.DelimitIdentifier(table.Name)} DROP CONSTRAINT IF EXISTS {helper.DelimitIdentifier(foreignKey.Name)}", cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        foreach (var table in existing)
+        {
+            await RunAsync($"DROP TABLE {helper.DelimitIdentifier(table.Name)}", cancellationToken).ConfigureAwait(false);
+        }
+
+        await RunAsync($"DROP TABLE IF EXISTS {helper.DelimitIdentifier(HistoryRepository.DefaultTableName)}", cancellationToken).ConfigureAwait(false);
     }
 
     private IEnumerable<string> Tables() =>
         Dependencies.CurrentContext.Context.GetService<IDesignTimeModel>().Model.GetRelationalModel().Tables.Select(static table => table.Name);
 
-    private async Task<bool> ExistsAsync(string table, CancellationToken cancellationToken)
+    /// <summary>Whether the database has a table: it is asked for a row of it.</summary>
+    internal async Task<bool> ExistsAsync(string table, CancellationToken cancellationToken)
     {
         try
         {
@@ -179,9 +199,38 @@ public sealed class TkDatabaseCreator(RelationalDatabaseCreatorDependencies depe
             cancellationToken);
 }
 
-/// <summary>Writes CREATE TABLE and CREATE INDEX as TekiumDB reads them.</summary>
+/// <summary>
+/// Writes the operations of a migration as TekiumDB reads them: tables, columns added, indexes and foreign
+/// keys. What would have to write a table again (dropping, renaming or changing a column, renaming a
+/// table) is refused by name, and so is what the engine does not have.
+/// </summary>
 public sealed class TkMigrationsSqlGenerator(MigrationsSqlGeneratorDependencies dependencies) : MigrationsSqlGenerator(dependencies)
 {
+    private const string Can = "A migration over TekiumDB can create and drop tables, add columns, create and drop indexes, and add and drop foreign keys.";
+
+    /// <inheritdoc/>
+    public override IReadOnlyList<MigrationCommand> Generate(
+        IReadOnlyList<MigrationOperation> operations, IModel? model = null, MigrationsSqlGenerationOptions options = MigrationsSqlGenerationOptions.Default)
+    {
+        ArgumentNullException.ThrowIfNull(operations);
+        if (options.HasFlag(MigrationsSqlGenerationOptions.Idempotent))
+        {
+            throw new NotSupportedException("TekiumDB cannot run an idempotent script: its SQL has nothing to decide with. Apply migrations with Database.MigrateAsync().");
+        }
+
+        // A foreign key is checked with an index that starts with its column, and makes one if there is none.
+        // The ones declared with a table wait until the tables and the indexes of the migration are there:
+        // they use the index EF creates for them, and may refer to a table created later.
+        var ordered = new List<MigrationOperation>(operations);
+        var last = ordered.FindLastIndex(static operation => operation is CreateTableOperation or CreateIndexOperation);
+        if (last >= 0)
+        {
+            ordered.InsertRange(last + 1, ordered.OfType<CreateTableOperation>().SelectMany(static table => table.ForeignKeys).ToList());
+        }
+
+        return base.Generate(ordered, model, options);
+    }
+
     /// <inheritdoc/>
     protected override void Generate(CreateTableOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
     {
@@ -192,6 +241,11 @@ public sealed class TkMigrationsSqlGenerator(MigrationsSqlGeneratorDependencies 
             throw new NotSupportedException($"Table '{operation.Name}' needs a primary key of exactly one column: TekiumDB has no keys of several columns, and no tables without one.");
         }
 
+        if (operation.CheckConstraints.Count > 0)
+        {
+            throw Unsupported($"create CHECK constraint '{operation.CheckConstraints[0].Name}' of table '{operation.Name}': SQL has no CHECK constraints");
+        }
+
         var helper = Dependencies.SqlGenerationHelper;
         builder.Append("CREATE TABLE ").Append(helper.DelimitIdentifier(operation.Name)).AppendLine(" (");
         using (builder.Indent())
@@ -199,6 +253,11 @@ public sealed class TkMigrationsSqlGenerator(MigrationsSqlGeneratorDependencies 
             for (var i = 0; i < operation.Columns.Count; i++)
             {
                 var column = operation.Columns[i];
+                if (column.DefaultValue is not null || column.DefaultValueSql is not null || column.ComputedColumnSql is not null)
+                {
+                    throw Unsupported($"give column '{column.Name}' of table '{operation.Name}' a default or computed value: a column keeps none, so set the value in the application");
+                }
+
                 builder.Append(helper.DelimitIdentifier(column.Name)).Append(" ").Append(column.ColumnType ?? GetColumnType(operation.Schema, operation.Name, column.Name, column, model)!);
                 if (!column.IsNullable)
                 {
@@ -221,45 +280,262 @@ public sealed class TkMigrationsSqlGenerator(MigrationsSqlGeneratorDependencies 
             EndStatement(builder);
         }
 
-        // An alternate key is a unique index. Foreign keys are not created: TekiumDB does not enforce them from SQL.
+        // An alternate key is a unique index. The foreign keys come after every table and index of the migration.
         foreach (var unique in operation.UniqueConstraints)
         {
-            builder.Append("CREATE UNIQUE INDEX ").Append(helper.DelimitIdentifier(unique.Name)).Append(" ON ").Append(helper.DelimitIdentifier(operation.Name))
-                .Append(" (").Append(string.Join(", ", unique.Columns.Select(helper.DelimitIdentifier))).Append(")").AppendLine(helper.StatementTerminator);
+            Generate(unique, model, builder);
+        }
+    }
+
+    /// <inheritdoc/>
+    protected override void Generate(AddColumnOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        if (operation.DefaultValueSql is not null)
+        {
+            throw Unsupported($"add column '{operation.Name}' of table '{operation.Table}' with DefaultValueSql: the value of the rows there are must be written out (defaultValue)");
+        }
+
+        if (operation.ComputedColumnSql is not null)
+        {
+            throw Unsupported($"add computed column '{operation.Name}' of table '{operation.Table}'");
+        }
+
+        var helper = Dependencies.SqlGenerationHelper;
+        var type = operation.ColumnType ?? GetColumnType(operation.Schema, operation.Table, operation.Name, operation, model)!;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table)).Append(" ADD COLUMN ").Append(helper.DelimitIdentifier(operation.Name)).Append(" ").Append(type);
+        if (!operation.IsNullable)
+        {
+            builder.Append(" NOT NULL");
+        }
+
+        // The rows there are take it. It is not kept for the rows to come: EF gives every column a value.
+        if (operation.DefaultValue is { } value)
+        {
+            var mapping = Dependencies.TypeMappingSource.FindMapping(value.GetType(), type) ?? Dependencies.TypeMappingSource.GetMappingForValue(value);
+            builder.Append(" DEFAULT ").Append(mapping.GenerateSqlLiteral(value));
+        }
+
+        End(builder, terminate);
+    }
+
+    /// <inheritdoc/>
+    protected override void Generate(AddForeignKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        if (operation.Columns.Length != 1 || operation.PrincipalColumns is { Length: not 1 })
+        {
+            throw new NotSupportedException(
+                $"FOREIGN KEY '{operation.Name}' of table '{operation.Table}' is of {operation.Columns.Length} columns: in TekiumDB a foreign key is one column that refers to the primary key of a table.");
+        }
+
+        // What happens on delete is not written: here a foreign key only refuses. EF still deletes the dependents it has loaded.
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table)).Append(" ADD CONSTRAINT ").Append(helper.DelimitIdentifier(operation.Name))
+            .Append(" FOREIGN KEY (").Append(helper.DelimitIdentifier(operation.Columns[0])).Append(") REFERENCES ").Append(helper.DelimitIdentifier(operation.PrincipalTable));
+        if (operation.PrincipalColumns is { } principal)
+        {
+            builder.Append(" (").Append(helper.DelimitIdentifier(principal[0])).Append(")");
+        }
+
+        End(builder, terminate);
+    }
+
+    /// <inheritdoc/>
+    protected override void Generate(DropForeignKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table)).Append(" DROP CONSTRAINT ").Append(helper.DelimitIdentifier(operation.Name));
+        End(builder, terminate);
+    }
+
+    /// <inheritdoc/>
+    protected override void Generate(CreateIndexOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        if (operation.Filter is not null)
+        {
+            throw Unsupported($"create index '{operation.Name}' of table '{operation.Table}' with a filter: SQL creates indexes over every row");
+        }
+
+        if (operation.IsDescending is { Length: > 0 })
+        {
+            throw Unsupported($"create index '{operation.Name}' of table '{operation.Table}' in descending order");
+        }
+
+        Index(builder, operation.Name, operation.Table, operation.Columns, operation.IsUnique, terminate);
+    }
+
+    /// <inheritdoc/>
+    protected override void Generate(AddUniqueConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        Index(builder, operation.Name, operation.Table, operation.Columns, true, true);
+    }
+
+    /// <inheritdoc/>
+    protected override void Generate(DropUniqueConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        DropIndex(builder, operation.Name, operation.Table, true);
+    }
+
+    /// <inheritdoc/>
+    protected override void Generate(DropIndexOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        DropIndex(builder, operation.Name, operation.Table ?? throw Unsupported($"drop index '{operation.Name}' without the name of its table"), terminate);
+    }
+
+    /// <inheritdoc/>
+    protected override void Generate(DropColumnOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true) =>
+        throw Unsupported($"drop column '{operation?.Name}' of table '{operation?.Table}': that would write the table again");
+
+    /// <inheritdoc/>
+    protected override void Generate(RenameColumnOperation operation, IModel? model, MigrationCommandListBuilder builder) =>
+        throw Unsupported($"rename column '{operation?.Name}' of table '{operation?.Table}'");
+
+    /// <inheritdoc/>
+    protected override void Generate(AlterColumnOperation operation, IModel? model, MigrationCommandListBuilder builder) =>
+        throw Unsupported($"change column '{operation?.Name}' of table '{operation?.Table}': that would write the table again");
+
+    /// <inheritdoc/>
+    protected override void Generate(RenameTableOperation operation, IModel? model, MigrationCommandListBuilder builder) =>
+        throw Unsupported($"rename table '{operation?.Name}'");
+
+    /// <inheritdoc/>
+    protected override void Generate(RenameIndexOperation operation, IModel? model, MigrationCommandListBuilder builder) =>
+        throw Unsupported($"rename index '{operation?.Name}': drop it and create it with the new name");
+
+    /// <inheritdoc/>
+    protected override void Generate(AddPrimaryKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true) =>
+        throw Unsupported($"change the primary key of table '{operation?.Table}'");
+
+    /// <inheritdoc/>
+    protected override void Generate(DropPrimaryKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true) =>
+        throw Unsupported($"change the primary key of table '{operation?.Table}'");
+
+    /// <inheritdoc/>
+    protected override void Generate(AddCheckConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder) =>
+        throw Unsupported($"create CHECK constraint '{operation?.Name}' of table '{operation?.Table}': SQL has no CHECK constraints");
+
+    /// <inheritdoc/>
+    protected override void Generate(DropCheckConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder) =>
+        throw Unsupported($"drop CHECK constraint '{operation?.Name}' of table '{operation?.Table}': SQL has no CHECK constraints");
+
+    /// <inheritdoc/>
+    protected override void Generate(CreateSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder) => throw Unsupported("use sequences");
+
+    /// <inheritdoc/>
+    protected override void Generate(AlterSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder) => throw Unsupported("use sequences");
+
+    /// <inheritdoc/>
+    protected override void Generate(DropSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder) => throw Unsupported("use sequences");
+
+    /// <inheritdoc/>
+    protected override void Generate(RenameSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder) => throw Unsupported("use sequences");
+
+    /// <inheritdoc/>
+    protected override void Generate(RestartSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder) => throw Unsupported("use sequences");
+
+    /// <inheritdoc/>
+    protected override void Generate(EnsureSchemaOperation operation, IModel? model, MigrationCommandListBuilder builder) => throw Unsupported("use schemas");
+
+    /// <inheritdoc/>
+    protected override void Generate(DropSchemaOperation operation, IModel? model, MigrationCommandListBuilder builder) => throw Unsupported("use schemas");
+
+    private static NotSupportedException Unsupported(string what) => new($"TekiumDB cannot {what}. {Can}");
+
+    private void Index(MigrationCommandListBuilder builder, string name, string table, string[] columns, bool unique, bool terminate)
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append(unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ").Append(helper.DelimitIdentifier(name)).Append(" ON ").Append(helper.DelimitIdentifier(table))
+            .Append(" (").Append(string.Join(", ", columns.Select(helper.DelimitIdentifier))).Append(")");
+        End(builder, terminate);
+    }
+
+    private void DropIndex(MigrationCommandListBuilder builder, string name, string table, bool terminate)
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("DROP INDEX ").Append(helper.DelimitIdentifier(name)).Append(" ON ").Append(helper.DelimitIdentifier(table));
+        End(builder, terminate);
+    }
+
+    private void End(MigrationCommandListBuilder builder, bool terminate)
+    {
+        if (terminate)
+        {
+            builder.AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
             EndStatement(builder);
         }
     }
 }
 
-/// <summary>Migrations are not supported: the tables of a model are created with <c>EnsureCreatedAsync</c>.</summary>
+/// <summary>
+/// The history of migrations: a table like any other. One process uses a database, so there is nobody
+/// else to keep out while migrating, and the lock is nothing.
+/// </summary>
 public sealed class TkHistoryRepository(HistoryRepositoryDependencies dependencies) : HistoryRepository(dependencies)
 {
-    private const string Unsupported = "TekiumDB has no migrations: create the tables of the model with Database.EnsureCreatedAsync().";
-
-    /// <inheritdoc/>
-    protected override string ExistsSql => throw new NotSupportedException(Unsupported);
-
-    /// <inheritdoc/>
-    protected override bool InterpretExistsResult(object? value) => throw new NotSupportedException(Unsupported);
-
-    /// <inheritdoc/>
-    public override string GetCreateIfNotExistsScript() => throw new NotSupportedException(Unsupported);
-
-    /// <inheritdoc/>
-    public override string GetBeginIfNotExistsScript(string migrationId) => throw new NotSupportedException(Unsupported);
-
-    /// <inheritdoc/>
-    public override string GetBeginIfExistsScript(string migrationId) => throw new NotSupportedException(Unsupported);
-
-    /// <inheritdoc/>
-    public override string GetEndIfScript() => throw new NotSupportedException(Unsupported);
+    private const string AsyncOnly = "TekiumDB does no synchronous I/O: apply migrations with Database.MigrateAsync().";
+    private const string NoScripts = "TekiumDB cannot run an idempotent script: its SQL has nothing to decide with. Apply migrations with Database.MigrateAsync().";
 
     /// <inheritdoc/>
     public override LockReleaseBehavior LockReleaseBehavior => LockReleaseBehavior.Explicit;
 
     /// <inheritdoc/>
-    public override IMigrationsDatabaseLock AcquireDatabaseLock() => throw new NotSupportedException(Unsupported);
+    protected override string ExistsSql => $"SELECT 1 FROM {SqlGenerationHelper.DelimitIdentifier(TableName)} LIMIT 1";
 
     /// <inheritdoc/>
-    public override Task<IMigrationsDatabaseLock> AcquireDatabaseLockAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException(Unsupported);
+    public override bool Exists() => throw new NotSupportedException(AsyncOnly);
+
+    /// <inheritdoc/>
+    public override Task<bool> ExistsAsync(CancellationToken cancellationToken = default) =>
+        ((TkDatabaseCreator)Dependencies.DatabaseCreator).ExistsAsync(TableName, cancellationToken);
+
+    /// <inheritdoc/>
+    public override string GetCreateIfNotExistsScript()
+    {
+        var script = GetCreateScript();
+        const string create = "CREATE TABLE";
+        return script.Insert(script.IndexOf(create, StringComparison.Ordinal) + create.Length, " IF NOT EXISTS");
+    }
+
+    /// <inheritdoc/>
+    public override string GetBeginIfNotExistsScript(string migrationId) => throw new NotSupportedException(NoScripts);
+
+    /// <inheritdoc/>
+    public override string GetBeginIfExistsScript(string migrationId) => throw new NotSupportedException(NoScripts);
+
+    /// <inheritdoc/>
+    public override string GetEndIfScript() => throw new NotSupportedException(NoScripts);
+
+    /// <inheritdoc/>
+    public override IMigrationsDatabaseLock AcquireDatabaseLock() => throw new NotSupportedException(AsyncOnly);
+
+    /// <inheritdoc/>
+    public override Task<IMigrationsDatabaseLock> AcquireDatabaseLockAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult<IMigrationsDatabaseLock>(new NoLock(this));
+
+    /// <inheritdoc/>
+    protected override bool InterpretExistsResult(object? value) => value is not null;
+
+    private sealed class NoLock(IHistoryRepository historyRepository) : IMigrationsDatabaseLock
+    {
+        public IHistoryRepository HistoryRepository => historyRepository;
+
+        public void Dispose()
+        {
+        }
+
+        public ValueTask DisposeAsync() => default;
+    }
 }

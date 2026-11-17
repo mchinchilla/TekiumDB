@@ -223,6 +223,38 @@ static async Task<int> SqlAsync()
             await Console.Error.WriteLineAsync($"SQL of phase 16 failed: {string.Join(" ; ", empty)} / {string.Join(" ; ", crowded)} / {string.Join(" ; ", kinds)} / {string.Join(" ; ", born)}");
             return 1;
         }
+
+        // Lo que la Fase 17 agregó: claves foráneas que SQL declara y comprueba, y columnas nuevas.
+        await RunAsync("ALTER TABLE people ADD CONSTRAINT lives_in FOREIGN KEY (city) REFERENCES cities (id)");
+        await RunAsync("ALTER TABLE cities ADD COLUMN country TEXT NOT NULL DEFAULT 'PE'");
+        await RunAsync("ALTER TABLE cities ADD COLUMN mayor TEXT");
+        var country = await QueryAsync("SELECT name, country, mayor FROM cities WHERE id = 3");
+        var kept = string.Empty;
+        try
+        {
+            await RunAsync("DELETE FROM cities WHERE id = 1");
+        }
+        catch (TkConstraintException referred)
+        {
+            kept = referred.Constraint;
+        }
+
+        var lost = string.Empty;
+        try
+        {
+            await RunAsync("INSERT INTO people (name, city) VALUES ('Nowhere', 99)");
+        }
+        catch (TkConstraintException missing)
+        {
+            lost = missing.Constraint;
+        }
+
+        if (country is not ["Cusco|PE|"] || kept != "lives_in" || lost != "lives_in")
+        {
+            await Console.Error.WriteLineAsync($"SQL of phase 17 failed: {string.Join(" ; ", country)} / {kept} / {lost}");
+            return 1;
+        }
+
         if (summary is ["Lima|100|297.0", "Quito|100|298.5"] && changed == 10 && plan.Exists(static line => line.Contains("Index by_city of people", StringComparison.Ordinal)))
         {
             return 0;

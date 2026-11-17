@@ -16,7 +16,7 @@ internal sealed partial class SqlParser
         "SELECT", "FROM", "WHERE", "GROUP", "BY", "HAVING", "ORDER", "LIMIT", "OFFSET", "INNER", "JOIN", "ON", "AS", "AND", "OR", "NOT",
         "IS", "NULL", "IN", "BETWEEN", "LIKE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "DROP", "TABLE", "INDEX",
         "VIEW", "UNIQUE", "PRIMARY", "KEY", "EXPLAIN", "DISTINCT", "ASC", "DESC", "TRUE", "FALSE", "IF", "EXISTS", "REPLACE", "LEFT", "RIGHT",
-        "OUTER", "CROSS", "UNION", "RETURNING", "CASE", "WHEN", "THEN", "ELSE", "END",
+        "OUTER", "CROSS", "UNION", "RETURNING", "CASE", "WHEN", "THEN", "ELSE", "END", "ALTER", "CONSTRAINT", "FOREIGN", "REFERENCES",
     };
 
     private readonly string _text;
@@ -259,6 +259,11 @@ internal sealed partial class SqlParser
             return Drop();
         }
 
+        if (Accept("ALTER"))
+        {
+            return Alter();
+        }
+
         if (Accept("CALL"))
         {
             var name = Name("the name of a procedure");
@@ -277,7 +282,7 @@ internal sealed partial class SqlParser
             return new CallStatement(name, arguments);
         }
 
-        throw Error("SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, CALL or EXPLAIN");
+        throw Error("SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, CALL or EXPLAIN");
     }
 
     private SelectStatement Select()
@@ -545,9 +550,16 @@ internal sealed partial class SqlParser
         var tableName = Name("a table name");
         Expect("(");
         var definitions = new List<ColumnDefinition>();
+        var foreignKeys = new List<ForeignKeyDefinition>();
         string? keyColumn = null;
         do
         {
+            if (Is("CONSTRAINT") || Is("FOREIGN"))
+            {
+                foreignKeys.Add(ForeignKey());
+                continue;
+            }
+
             if (Accept("PRIMARY"))
             {
                 Expect("KEY");
@@ -562,38 +574,12 @@ internal sealed partial class SqlParser
                 continue;
             }
 
-            var column = Name("a column name");
-            var type = ColumnType();
-            var notNull = false;
-            var primary = false;
-            var isUnique = false;
-            while (true)
+            var (definition, reference, _) = Column(false);
+            definitions.Add(definition);
+            if (reference is not null)
             {
-                if (Accept("NOT"))
-                {
-                    Expect("NULL");
-                    notNull = true;
-                }
-                else if (Accept("NULL"))
-                {
-                    notNull = false;
-                }
-                else if (Accept("PRIMARY"))
-                {
-                    Expect("KEY");
-                    primary = true;
-                }
-                else if (Accept("UNIQUE"))
-                {
-                    isUnique = true;
-                }
-                else
-                {
-                    break;
-                }
+                foreignKeys.Add(reference);
             }
-
-            definitions.Add(new ColumnDefinition(column, type, notNull || primary, primary, isUnique));
         }
         while (Accept(","));
         Expect(")");
@@ -608,7 +594,165 @@ internal sealed partial class SqlParser
             definitions[at] = definitions[at] with { PrimaryKey = true, NotNull = true };
         }
 
-        return new CreateTableStatement(tableName, definitions, exists);
+        return new CreateTableStatement(tableName, definitions, exists, foreignKeys);
+    }
+
+    /// <summary>A column as CREATE TABLE and ALTER TABLE declare it: name, type, and what follows in any order.</summary>
+    private (ColumnDefinition Column, ForeignKeyDefinition? Reference, (bool Given, object? Value) Default) Column(bool allowDefault)
+    {
+        var column = Name("a column name");
+        var type = ColumnType();
+        var notNull = false;
+        var primary = false;
+        var isUnique = false;
+        ForeignKeyDefinition? reference = null;
+        (bool Given, object? Value) byDefault = default;
+        while (true)
+        {
+            if (Accept("NOT"))
+            {
+                Expect("NULL");
+                notNull = true;
+            }
+            else if (Accept("NULL"))
+            {
+                notNull = false;
+            }
+            else if (Accept("PRIMARY"))
+            {
+                Expect("KEY");
+                primary = true;
+            }
+            else if (Accept("UNIQUE"))
+            {
+                isUnique = true;
+            }
+            else if (Accept("REFERENCES"))
+            {
+                reference = References(null, column);
+            }
+            else if (allowDefault && Is("DEFAULT"))
+            {
+                _position++;
+                byDefault = (true, WrittenValue());
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        return (new ColumnDefinition(column, type, notNull || primary, primary, isUnique), reference, byDefault);
+    }
+
+    /// <summary>A value written out: a number with its sign, a text, TRUE, FALSE or NULL.</summary>
+    private object? WrittenValue()
+    {
+        var negative = Accept("-");
+        if (Primary() is Literal literal && !(negative && literal.Value is not (long or decimal or double)))
+        {
+            return negative ? Negate(literal.Value!) : literal.Value;
+        }
+
+        throw new TkSqlException("Expected a value written out (a number, a text, TRUE, FALSE or NULL) as the DEFAULT of a column: it cannot be worked out from anything else.");
+    }
+
+    /// <summary><c>[CONSTRAINT name] FOREIGN KEY (column) REFERENCES table [(column)]</c>.</summary>
+    private ForeignKeyDefinition ForeignKey()
+    {
+        var name = Accept("CONSTRAINT") ? Name("a constraint name") : null;
+        Expect("FOREIGN");
+        Expect("KEY");
+        Expect("(");
+        var column = Name("a column name");
+        if (Is(","))
+        {
+            throw Error(") (a foreign key is one column)");
+        }
+
+        Expect(")");
+        Expect("REFERENCES");
+        return References(name, column);
+    }
+
+    private ForeignKeyDefinition References(string? name, string column)
+    {
+        var table = Name("a table name");
+        string? target = null;
+        if (Accept("("))
+        {
+            target = Name("a column name");
+            Expect(")");
+        }
+
+        // A foreign key here does one thing: it refuses. Saying so is accepted; asking for anything else is not.
+        while (Accept("ON"))
+        {
+            var when = Accept("DELETE") ? "DELETE" : Accept("UPDATE") ? "UPDATE" : throw Error("DELETE or UPDATE");
+            if (Accept("RESTRICT"))
+            {
+                continue;
+            }
+
+            if (Accept("NO"))
+            {
+                if (!Accept("ACTION"))
+                {
+                    throw Error("ACTION");
+                }
+
+                continue;
+            }
+
+            var action = Accept("CASCADE") ? "CASCADE" : Accept("SET") ? (Accept("NULL") ? "SET NULL" : Accept("DEFAULT") ? "SET DEFAULT" : throw Error("NULL or DEFAULT"))
+                : throw Error("RESTRICT, NO ACTION, CASCADE or SET");
+            throw new TkSqlException(
+                $"ON {when} {action} is not supported: a FOREIGN KEY only refuses to leave a row referring to one that is not there. Delete or change the referring rows first.");
+        }
+
+        return new ForeignKeyDefinition(name, column, table, target);
+    }
+
+    private AlterTableStatement Alter()
+    {
+        Expect("TABLE");
+        var table = Name("a table name");
+        if (Accept("ADD"))
+        {
+            if (Is("CONSTRAINT") || Is("FOREIGN"))
+            {
+                return new AlterTableStatement(table, null, null, ForeignKey(), null, false);
+            }
+
+            // COLUMN is optional, and may also be the name of the column.
+            if (Is("COLUMN") && _position + 2 < _tokens.Count && _tokens[_position + 1].Kind is Kind.Word or Kind.Quoted && _tokens[_position + 2].Kind is Kind.Word or Kind.Quoted)
+            {
+                _position++;
+            }
+
+            var (column, reference, byDefault) = Column(true);
+            if (reference is not null)
+            {
+                throw new TkSqlException($"Column '{column.Name}' cannot be added with REFERENCES: add the column, then the constraint with ALTER TABLE {table} ADD FOREIGN KEY.");
+            }
+
+            return new AlterTableStatement(table, column, byDefault.Value, null, null, false) { HasDefault = byDefault.Given };
+        }
+
+        if (Accept("DROP"))
+        {
+            Expect("CONSTRAINT");
+            var ifExists = false;
+            if (Accept("IF"))
+            {
+                Expect("EXISTS");
+                ifExists = true;
+            }
+
+            return new AlterTableStatement(table, null, null, null, Name("a constraint name"), ifExists);
+        }
+
+        throw Error("ADD or DROP");
     }
 
     private DropStatement Drop()

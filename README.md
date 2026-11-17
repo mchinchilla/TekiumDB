@@ -248,15 +248,17 @@ var big = await connection.QueryAsync<Order>(
 
 | | |
 | --- | --- |
-| Statements | `SELECT` with `INNER JOIN` and `LEFT JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`; `INSERT`, `UPDATE`, `DELETE`, each with `RETURNING`; `CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `CREATE PROCEDURE` and their `DROP`; `CALL`; `EXPLAIN` |
+| Statements | `SELECT` with `INNER JOIN` and `LEFT JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`; `INSERT`, `UPDATE`, `DELETE`, each with `RETURNING`; `CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `CREATE PROCEDURE` and their `DROP`; `ALTER TABLE` to add a column or add and drop a foreign key; `CALL`; `EXPLAIN` |
 | Subqueries | `EXISTS (…)`, `x IN (…)`, a query as a value, and a query in `FROM`. They can read the row of the outer query, and are run once per row |
 | Expressions | `CASE`, `CAST`, `LIKE`, `BETWEEN`, `IN`, arithmetic, `||`, `COALESCE`, `LOWER`, `UPPER`, `LENGTH`, `ABS`, `STARTSWITH`, `ENDSWITH`, `CONTAINS` |
 | Keys | A whole-number primary key left out of an `INSERT` is the one after the highest in the table |
-| The same tables | SQL reads the tables declared by types with `[TkTable]`, and what it writes is what the typed API would write, rows and indexes. A table with expression indexes, `CHECK` or foreign keys can be read with SQL but not written |
+| Foreign keys | `REFERENCES other` on a column, or `FOREIGN KEY (column) REFERENCES other`, in `CREATE TABLE` or `ALTER TABLE … ADD CONSTRAINT`. One column that refers to the primary key of a table. The referred row must exist, and cannot be deleted while something refers to it; there is no `ON DELETE CASCADE`. A violation aborts the transaction. It is the same constraint `[TkForeignKey]` declares, in the same bytes |
+| New columns | `ALTER TABLE t ADD COLUMN c TYPE [NOT NULL] [DEFAULT value]` rewrites no row: the rows there are read the column as `NULL`, or as the zero of its type if it cannot be `NULL`. Only a `DEFAULT` that is something else writes them again. The default is for the rows there are; it is not kept for later inserts |
+| The same tables | SQL reads the tables declared by types with `[TkTable]`, and what it writes is what the typed API would write, rows and indexes. A table with expression indexes, zone maps or `CHECK` can be read with SQL but not written |
 | Views | Stored queries, read-only; they can use other views, and one that would end up using itself is rejected when created |
 | `EXPLAIN` | The chosen path, with the estimated rows (from the shape of each index's tree) and the rows that came out |
 | Async only | `OpenAsync`, `ExecuteReaderAsync`, `BeginTransactionAsync`…; ADO.NET's synchronous methods throw. With Dapper: `QueryAsync`, `ExecuteAsync` |
-| Not available | `UNION`, right and full joins, `ALTER TABLE`, subqueries in `GROUP BY` queries or in `UPDATE`/`DELETE`, vector search from SQL |
+| Not available | `UNION`, right and full joins, dropping, renaming or changing a column, renaming a table, subqueries in `GROUP BY` queries or in `UPDATE`/`DELETE`, vector search from SQL |
 
 [Measurements and details](docs/benchmarks/fase-12.md).
 
@@ -291,13 +293,15 @@ var busy = await shop.Blogs
 
 | | |
 | --- | --- |
-| Works | `EnsureCreatedAsync` and `EnsureDeletedAsync`; `SaveChangesAsync` with inserts, updates and deletes, and its concurrency check; `ExecuteUpdateAsync` and `ExecuteDeleteAsync`; queries with `Where`, `OrderBy`, `Skip`/`Take`, `Include`/`ThenInclude` (single and split), `Any`, `All`, `Count`, `First`, `Single`, `Find`, `Min`, `Max`, `Sum`, `Average`, `GroupBy`, `Distinct`, `Join`, `SelectMany`, `Contains`, projections and `FromSqlRaw`; transactions |
+| Works | `EnsureCreatedAsync` and `EnsureDeletedAsync`; `MigrateAsync`; `SaveChangesAsync` with inserts, updates and deletes, and its concurrency check; `ExecuteUpdateAsync` and `ExecuteDeleteAsync`; queries with `Where`, `OrderBy`, `Skip`/`Take`, `Include`/`ThenInclude` (single and split), `Any`, `All`, `Count`, `First`, `Single`, `Find`, `Min`, `Max`, `Sum`, `Average`, `GroupBy`, `Distinct`, `Join`, `SelectMany`, `Contains`, projections and `FromSqlRaw`; transactions |
 | Checked against SQLite | The tests run every operation on TekiumDB and on EF Core's SQLite provider with the same model, and require the same result |
 | Async only | `ToList()`, `SaveChanges()`, `EnsureCreated()` and the other synchronous methods throw `NotSupportedException`: TekiumDB does no synchronous I/O |
 | Keys | One column. An `int` or `long` key is assigned by the database; a `Guid` one by EF Core |
+| Foreign keys | Created in the database and checked by it: a reference to a missing row is not saved. They only refuse: whatever `OnDelete` says, the database deletes nothing in cascade. EF Core still deletes the dependents it has loaded; with dependents it has not loaded, the delete fails where SQLite would cascade. One column, referring to a primary key |
+| Migrations | `MigrateAsync`, with its history table and each run in one transaction: create and drop tables, add columns, create and drop indexes, add and drop foreign keys, seed data. Dropping, renaming or changing a column, and renaming a table, are refused by name: they would have to write the table again. `dotnet ef database update` does not work, because it is synchronous; the other `dotnet ef` commands have not been tried against this provider |
 | Types | `bool`, `byte`, `short`, `int`, `long`, `float`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `TimeSpan`, `byte[]`, enums, and their nullable forms. Dates with an offset compare and sort as instants, which SQLite cannot do |
 | Text | `StartsWith`, `EndsWith` and `Contains` compare characters, as in .NET: case matters |
-| Not there | Migrations; keys of several columns; foreign keys in the database (EF Core still fixes up and cascades what it has loaded, but nothing stops a reference to a missing row); savepoints; `Union`; and what EF Core cannot translate fails saying so |
+| Not there | Keys of several columns; cascading deletes in the database; column defaults kept by the database (`HasDefaultValue`); migrations that drop, rename or change a column; idempotent scripts; savepoints; `Union`; and what EF Core cannot translate fails saying so |
 | Native AOT | Not this package: EF Core builds its queries with reflection and code generated at run time |
 
 ### Functions and procedures in C#
@@ -776,11 +780,11 @@ What is worth knowing before adopting it:
 - **One process per file.** There is no concurrent access from several processes.
 - **One writer at a time.** Writes are serialized; many small durable commits are slower than in SQLite with WAL.
 - **Long-lived readers make the file grow**, and the file does not shrink by itself: it is compacted with `tkdb compact`.
-- **SQL is a subset:** no `UNION`, right or full joins, or `ALTER TABLE`; a subquery is run once per row of the outer query.
+- **SQL is a subset:** no `UNION`, right or full joins; `ALTER TABLE` adds columns and foreign keys but does not drop, rename or change a column; a subquery is run once per row of the outer query.
 - **LINQ translates or refuses:** no `||`, `!=`, ordering or grouping.
 - **No triggers, materialized views, replication or cascading deletes.** Instead: declarative constraints, expression indexes and the change feed.
 - **The vector index** does not recover the space of deleted vectors until it is dropped, and cannot be queried from SQL.
-- **The Entity Framework Core provider is async only**, has no migrations, and does not create foreign keys in the database.
+- **The Entity Framework Core provider is async only.** Its foreign keys refuse but never cascade, and its migrations cannot drop, rename or change a column.
 - **The file format is not stable** until the first published version.
 
 ## Building and testing
