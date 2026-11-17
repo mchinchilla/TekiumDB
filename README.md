@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 10.2 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Todavía no hay capa SQL ni LINQ ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 10.4 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Todavía no hay capa SQL ni LINQ ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -371,6 +371,28 @@ await db.BackupAsync("respaldo.tkdb", new TkBackupOptions { Password = backupPas
 
 No bloquea al escritor ni desaloja la caché (lee el archivo directamente). Medido sobre un millón de filas, con backups corriendo uno tras otro: la mediana del commit durable no cambia (13,0 ms contra 13,1 ms sin backup), el p95 sube de 16 a 19 ms porque comparten el disco, y cada backup tarda 0,35 s. Mientras corre, las páginas del estado que copia no se reutilizan, así que una base con mucha escritura puede crecer durante un backup largo. Detalle en [docs/benchmarks/fase-10.2.md](docs/benchmarks/fase-10.2.md).
 
+### Verificación y diagnóstico
+
+```csharp
+var verification = await db.VerifyAsync();        // con la base abierta y en uso
+if (!verification.IsHealthy)
+    foreach (var finding in verification.Findings)
+        log.Error(finding.Message);
+```
+
+`VerifyAsync` lee del archivo cada página en uso y comprueba su suma de verificación (o su etiqueta de autenticación, si la base está cifrada), que cada árbol esté bien formado, y que la lista de páginas libres no ofrezca una en uso. Lee el disco, no la caché: encuentra una página dañada aunque la aplicación tenga una copia buena en memoria. No bloquea al escritor.
+
+Con `Diagnostics = true`, la base publica contadores por un `Meter` llamado `Tekium.Embedded`, que lee OpenTelemetry, `dotnet-counters` o cualquier `MeterListener`:
+
+| Instrumento | Qué dice |
+| --- | --- |
+| `tekium.cache.hits`, `tekium.cache.misses` | Páginas encontradas en la caché, y leídas del archivo |
+| `tekium.commit.pages`, `tekium.commit.duration` | Páginas escritas y tiempo de cada commit |
+| `tekium.snapshots.live`, `tekium.snapshots.oldest_age` | Lectores con un estado retenido, y la edad del más viejo: lo que impide reutilizar espacio |
+| `tekium.tree.depth` | Niveles de cada tabla e índice |
+
+Sin esa opción no se crea ningún `Meter` y no se cuenta nada: medido, la lectura puntual tarda lo mismo. Detalle en [docs/benchmarks/fase-10.4.md](docs/benchmarks/fase-10.4.md).
+
 ### Herramientas
 
 `tkdb` es una herramienta de línea de comandos para archivos `.tkdb` cerrados. Ninguno de sus comandos cambia el archivo que recibe, salvo `passwd`.
@@ -479,7 +501,8 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 9 | Índice vectorial HNSW | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-9.md) (recall@10 de 0,98 sobre un millón de vectores con estructura); Windows sin verificar |
 | 10 | Herramientas: `tkdb` para inspeccionar, reparar, cambiar la contraseña y compactar | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.md); Windows sin verificar |
 | 10.2 | Backup en caliente desde un snapshot fijado | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.2.md); Windows sin verificar |
-| 10.4 – 10.6 | Verificación con contadores de diagnóstico y viaje en el tiempo | Pendiente |
+| 10.4 | `VerifyAsync` y contadores de diagnóstico por `Meter` | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.4.md); Windows sin verificar |
+| 10.6 | Viaje en el tiempo: abrir la base en una transacción pasada | Pendiente |
 | 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |
 | 13 – 14 | Funciones y procedimientos: C# por generador y PL/Tk | Pendiente |
 | 15 | Adaptadores: EF Core, `IDistributedCache`, Data Protection, HealthChecks | Pendiente |

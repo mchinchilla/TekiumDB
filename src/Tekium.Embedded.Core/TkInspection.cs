@@ -82,7 +82,11 @@ public sealed record TkRootSlot(int Index, bool IsValid, ulong TransactionId, lo
 /// <param name="Entries">How many entries could be read.</param>
 /// <param name="Pages">How many pages it takes, counting those of large values.</param>
 /// <param name="DamagedPages">How many of its pages could not be read. What hangs from them is not counted.</param>
-public sealed record TkTreeSummary(string Name, long Entries, long Pages, long DamagedPages);
+public sealed record TkTreeSummary(string Name, long Entries, long Pages, long DamagedPages)
+{
+    /// <summary>Gets how many levels the tree has: 0 if it is empty or its root cannot be read, 1 if its root is a leaf.</summary>
+    public int Depth { get; init; }
+}
 
 /// <summary>What <see cref="TkInspector"/> found in a database file, read without opening it.</summary>
 public sealed class TkInspection

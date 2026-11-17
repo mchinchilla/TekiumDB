@@ -18,6 +18,9 @@ internal sealed record PagerOptions
     /// <summary>Gets the Zstandard level pages are compressed with. Any page reads back whatever level wrote it.</summary>
     public int CompressionLevel { get; init; } = 3;
 
+    /// <summary>Gets what counts cache hits, commits and snapshots, or <see langword="null"/> to count nothing.</summary>
+    public PagerDiagnostics? Diagnostics { get; init; }
+
     /// <summary>Gets the cost of deriving the key from the password of a new encrypted database.</summary>
     public Argon2Parameters KeyDerivation { get; init; } = Argon2Parameters.Default;
 }

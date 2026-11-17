@@ -866,7 +866,7 @@ internal sealed class BTree
     }
 
     /// <summary>How many levels a tree has: 0 if it is empty, 1 if its root is a leaf.</summary>
-    private static async ValueTask<int> HeightAsync(IPageSource source, PageNumber root, CancellationToken cancellationToken)
+    internal static async ValueTask<int> HeightAsync(IPageSource source, PageNumber root, CancellationToken cancellationToken)
     {
         var height = 0;
         for (var number = root; !number.IsNone; height++)

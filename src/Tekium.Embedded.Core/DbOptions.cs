@@ -42,6 +42,20 @@ public sealed class DbOptions
     /// </summary>
     public int ChangeRetention { get; init; }
 
+    /// <summary>
+    /// Gets a value indicating whether the database publishes counters through a
+    /// <see cref="System.Diagnostics.Metrics.Meter"/> named <see cref="TekiumDb.MeterName"/>: cache hits
+    /// and misses, pages written and time taken by each commit, live snapshots and the age of the
+    /// oldest, and the depth of each tree. Off by default, and then nothing is counted at all.
+    /// </summary>
+    public bool Diagnostics { get; init; }
+
+    /// <summary>
+    /// Gets the name the counters of this database carry in their <c>tekium.db</c> tag, to tell several
+    /// databases apart. By default, the path of the file, or <c>memory</c>.
+    /// </summary>
+    public string? DiagnosticsName { get; init; }
+
     /// <summary>Gets how much memory the page cache may use, in mebibytes.</summary>
     public int CacheSizeMb { get; init; } = 256;
 

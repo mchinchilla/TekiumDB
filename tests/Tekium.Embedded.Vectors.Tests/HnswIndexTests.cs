@@ -745,6 +745,11 @@ public abstract class HnswIndexTests : IAsyncLifetime
             Ct);
 
         Assert.True(report.TransactionId < database.LastTransactionId);
+
+        // La verificación de la base abierta también sigue los cuatro árboles del índice.
+        var verification = await database.VerifyAsync(Ct);
+        Assert.True(verification.IsHealthy);
+        Assert.Equal(1200, verification.Trees.Single(static tree => tree.Name == "vector index live, tree 1").Entries);
         await using var copy = await OpenAsync(target);
         var copied = copy.VectorIndex<int>("live", options);
         await using var read = copy.BeginRead();

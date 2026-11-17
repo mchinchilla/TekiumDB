@@ -2,6 +2,7 @@
 
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using Tekium.Embedded.Security;
 
@@ -26,6 +27,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
 
     private readonly IStorageDevice _device;
     private readonly IPageProtector _protector;
+    private readonly PagerDiagnostics? _diagnostics;
     private readonly PagerOptions _options;
     private readonly PageCache _cache;
     private readonly SemaphoreSlim _writerGate = new(1, 1);
@@ -68,7 +70,9 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         _protector = compressed ? new CompressedPageProtector(protector, options.CompressionLevel, pageSize) : protector;
         _options = options;
         _cache = new PageCache(options.CachePages);
-        _current = new SnapshotState(current);
+        _diagnostics = options.Diagnostics;
+        _current = new SnapshotState(current, Now());
+        _diagnostics?.Publish(_retained, _current);
         _currentSlot = slot;
         _lastIssued = current.TransactionId.Value;
         PageSize = pageSize;
@@ -182,10 +186,19 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         }
     }
 
-    public bool TryPin(PageNumber number, out PageLease lease) => _cache.TryPin(number, out lease);
+    public bool TryPin(PageNumber number, out PageLease lease)
+    {
+        if (!_cache.TryPin(number, out lease))
+        {
+            return false;
+        }
+
+        _diagnostics?.Hit();
+        return true;
+    }
 
     public ValueTask<PageLease> PinAsync(PageNumber number, CancellationToken cancellationToken) =>
-        _cache.TryPin(number, out var lease)
+        TryPin(number, out var lease)
             ? new ValueTask<PageLease>(lease)
             : LoadAsync(number, cancellationToken);
 
@@ -224,6 +237,8 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
                     horizon = Math.Min(horizon, (long)_retained[i].Snapshot.TransactionId.Value);
                 }
             }
+
+            _diagnostics?.Publish(_retained, state);
 
             // The floor is read before the pins: whoever pins checks the floor afterwards, so one of the two sees the other.
             horizon = Math.Min(horizon, Volatile.Read(ref _retentionFloor));
@@ -327,6 +342,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     /// </remarks>
     internal async ValueTask CommitAsync(WriteTransaction transaction, CancellationToken cancellationToken)
     {
+        var started = Now();
         var state = _current;
         var current = state.Snapshot;
         var freeList = FreeList.Prepare(transaction);
@@ -397,6 +413,7 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
             }
         }
 
+        var written = dirty.Count;
         dirty.Clear();
         if (freeList is not null)
         {
@@ -404,7 +421,13 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         }
 
         _retained.Add(state);
-        Volatile.Write(ref _current, new SnapshotState(next));
+        var published = new SnapshotState(next, Now());
+        Volatile.Write(ref _current, published);
+        if (_diagnostics is { } diagnostics)
+        {
+            diagnostics.Publish(_retained, published);
+            diagnostics.Committed?.Invoke(written, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        }
     }
 
     private static async ValueTask<Pager> CreateCoreAsync(
@@ -593,6 +616,9 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         }
     }
 
+    /// <summary>The time, only if someone is going to use it.</summary>
+    private long Now() => _diagnostics is null ? 0 : Stopwatch.GetTimestamp();
+
     private void ThrowIfCommitInDoubt()
     {
         if (_commitInDoubt is not null)
@@ -734,6 +760,8 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
 
     private async ValueTask<PageLease> LoadAsync(PageNumber number, CancellationToken cancellationToken)
     {
+        _diagnostics?.Miss();
+
         // The writer may be reading back pages it wrote ahead of its commit, past the committed end of the file.
         if (number.Value < FileHeader.MetaPages || number.Value >= Math.Max(Current.PageCount, Volatile.Read(ref _spilledPageCount)))
         {

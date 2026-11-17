@@ -40,16 +40,16 @@ internal sealed class TreeWalker(IPageSource pager, long pageCount, List<TkFindi
         _onEntry = onEntry;
         if (!root.IsNone)
         {
-            await VisitAsync(root, null, null, 0).ConfigureAwait(false);
+            await VisitAsync(root, null, null, 0, -1).ConfigureAwait(false);
         }
 
-        return new TkTreeSummary(name, _entries, _pages, _damaged);
+        return new TkTreeSummary(name, _entries, _pages, _damaged) { Depth = _leafDepth + 1 };
     }
 
     private static bool IsDamage(Exception exception) =>
         exception is InvalidDataException or IOException or ArgumentException or IndexOutOfRangeException;
 
-    private async ValueTask VisitAsync(PageNumber number, byte[]? lower, byte[]? upper, int depth)
+    private async ValueTask VisitAsync(PageNumber number, byte[]? lower, byte[]? upper, int depth, int parentKeys)
     {
         if (!Claim(number))
         {
@@ -127,7 +127,7 @@ internal sealed class TreeWalker(IPageSource pager, long pageCount, List<TkFindi
         {
             for (var i = 0; i < children.Length; i++)
             {
-                await VisitAsync(children[i], i == 0 ? lower : keys[i - 1], i == keys.Length ? upper : keys[i], depth + 1)
+                await VisitAsync(children[i], i == 0 ? lower : keys[i - 1], i == keys.Length ? upper : keys[i], depth + 1, keys.Length)
                     .ConfigureAwait(false);
             }
 
@@ -141,6 +141,13 @@ internal sealed class TreeWalker(IPageSource pager, long pageCount, List<TkFindi
         else if (_leafDepth != depth)
         {
             Damaged(TkFindingKind.TreeDamaged, number, "is a leaf at a different depth than the others");
+            return;
+        }
+
+        // An empty leaf is only right as the root, or as the only child of a node left without keys.
+        if (keys.Length == 0 && parentKeys > 0)
+        {
+            Damaged(TkFindingKind.TreeDamaged, number, "is empty but has siblings it should have been merged with");
             return;
         }
 

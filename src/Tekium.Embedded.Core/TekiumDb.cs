@@ -32,12 +32,16 @@ public sealed class TekiumDb : IAsyncDisposable
     private TaskCompletionSource _committed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _watchers;
 
-    private TekiumDb(Pager pager, int retention)
+    private TekiumDb(Pager pager, int retention, TkDiagnostics? diagnostics)
     {
+        Diagnostics = diagnostics;
         Pager = pager;
         Tree = new BTree(pager);
         _retention = retention;
     }
+
+    /// <summary>The name of the <see cref="System.Diagnostics.Metrics.Meter"/> a database opened with <see cref="DbOptions.Diagnostics"/> publishes its counters through.</summary>
+    public const string MeterName = "Tekium.Embedded";
 
     /// <summary>Marks a <see cref="Table{T}"/> so that tables of every row type fit in one dictionary.</summary>
     internal interface ITable;
@@ -55,6 +59,9 @@ public sealed class TekiumDb : IAsyncDisposable
     public ulong LastTransactionId => Pager.Current.TransactionId.Value;
 
     internal Pager Pager { get; }
+
+    /// <summary>Gets the counters of the database, if it was opened with them.</summary>
+    internal TkDiagnostics? Diagnostics { get; }
 
     /// <summary>Gets or sets how many finished pages a bulk load keeps in memory before writing them to the file.</summary>
     internal int BulkSpillPages { get; set; } = 2048;
@@ -101,8 +108,10 @@ public sealed class TekiumDb : IAsyncDisposable
 
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.CacheSizeMb, nameof(options));
             ArgumentOutOfRangeException.ThrowIfNegative(options.ChangeRetention, nameof(options));
+            var counters = options.Diagnostics ? new PagerDiagnostics() : null;
             var pagerOptions = new PagerOptions
             {
+                Diagnostics = counters,
                 PageSize = pageSize,
                 CachePages = (int)Math.Clamp(options.CacheSizeMb * 1048576L / pageSize.Bytes, MinimumCachePages, int.MaxValue),
                 KeyDerivation = options.KeyDerivation,
@@ -114,7 +123,10 @@ public sealed class TekiumDb : IAsyncDisposable
                 ? await Pager.CreateAsync(owned, pagerOptions, options.Password.Span, cancellationToken).ConfigureAwait(false)
                 : await Pager.OpenAsync(owned, pagerOptions, options.Password.Span, cancellationToken).ConfigureAwait(false);
             owned = null;
-            var database = new TekiumDb(pager, options.ChangeRetention);
+            var database = new TekiumDb(
+                pager,
+                options.ChangeRetention,
+                counters is null ? null : new TkDiagnostics(options.DiagnosticsName ?? options.Path ?? "memory", counters));
             try
             {
                 await database.LoadHistoryAsync(cancellationToken).ConfigureAwait(false);
@@ -237,6 +249,55 @@ public sealed class TekiumDb : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Checks the database as its last commit left it, while it stays open and in use: every page in use
+    /// is read from the file and checked (its checksum, or its authentication tag if the database is
+    /// encrypted), every tree is checked to be well formed, and the list of free pages is checked not to
+    /// offer a page in use nor to miss one. What is wrong is reported with its page and what it belongs to.
+    /// </summary>
+    /// <remarks>
+    /// It reads the file, not the cache: a page damaged on disk is found even if the application still
+    /// has a good copy in memory. Writers are not blocked; like any reader, it keeps the pages of the
+    /// state it checks from being reused until it is done.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the verification.</param>
+    /// <returns>What was found.</returns>
+    public ValueTask<TkVerification> VerifyAsync(CancellationToken cancellationToken = default) => VerifyAsync(null, cancellationToken);
+
+    /// <summary>Verifies the latest commit. <paramref name="afterSnapshot"/> runs once the state to check is fixed.</summary>
+    internal async ValueTask<TkVerification> VerifyAsync(Func<ValueTask>? afterSnapshot, CancellationToken cancellationToken)
+    {
+        var snapshot = Pager.BeginRead();
+        try
+        {
+            var state = snapshot.Snapshot;
+            if (afterSnapshot is not null)
+            {
+                await afterSnapshot().ConfigureAwait(false);
+            }
+
+            var findings = new List<TkFinding>();
+            var trees = new List<TkTreeSummary>();
+            var source = new Maintenance.DirectPageSource(Pager);
+            var walker = new Maintenance.TreeWalker(source, state.PageCount, findings, cancellationToken);
+            await Maintenance.DatabaseWalk.TreesAsync(walker, state.Root, findings, trees, null).ConfigureAwait(false);
+            var free = await Maintenance.FreeListCheck.RunAsync(source, Pager.PageSize, state, walker.Visited, findings, cancellationToken)
+                .ConfigureAwait(false);
+            return new TkVerification
+            {
+                TransactionId = state.TransactionId.Value,
+                PagesInUse = walker.Visited.Count,
+                PagesFree = free,
+                Trees = trees,
+                Findings = findings,
+            };
+        }
+        finally
+        {
+            snapshot.Dispose();
+        }
+    }
+
     /// <summary>Backs up onto the device <paramref name="destination"/> returns. <paramref name="afterSnapshot"/> runs once the state to copy is fixed.</summary>
     internal async ValueTask<TkBackupReport> BackupAsync(
         Func<DbOptions, IStorageDevice> destination, TkBackupOptions? options, Func<ValueTask>? afterSnapshot, CancellationToken cancellationToken)
@@ -265,7 +326,11 @@ public sealed class TekiumDb : IAsyncDisposable
 
     /// <summary>Closes the database.</summary>
     /// <returns>A task that completes when the file is closed.</returns>
-    public ValueTask DisposeAsync() => Pager.DisposeAsync();
+    public ValueTask DisposeAsync()
+    {
+        Diagnostics?.Dispose();
+        return Pager.DisposeAsync();
+    }
 
     /// <summary>
     /// Writes into the catalog of a transaction about to commit where the state before it was, and

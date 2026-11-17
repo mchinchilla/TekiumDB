@@ -97,7 +97,9 @@ internal static class Workload
     /// <summary>Abre la base y recorre todo el árbol para dejar la caché caliente.</summary>
     public static async Task<(Pager Pager, BTree Tree)> OpenTekiumWarmAsync(string path)
     {
-        var pager = await Pager.OpenAsync(FileStorageDevice.Open(path, FileMode.Open), Options, default);
+        // TEKIUM_BENCH_DIAGNOSTICS=1 mide lo que cuestan los contadores encendidos; sin ella, apagados.
+        var options = Environment.GetEnvironmentVariable("TEKIUM_BENCH_DIAGNOSTICS") == "1" ? Options with { Diagnostics = new PagerDiagnostics() } : Options;
+        var pager = await Pager.OpenAsync(FileStorageDevice.Open(path, FileMode.Open), options, default);
         var tree = new BTree(pager);
         long bytes = 0;
         await foreach (var entry in tree.RangeAsync(default, default, default))

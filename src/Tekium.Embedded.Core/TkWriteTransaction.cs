@@ -53,6 +53,27 @@ public sealed class TkWriteTransaction : TkTransaction
             }
         }
 
+        if (Database.Diagnostics is { } diagnostics)
+        {
+            // Only when someone asked for counters: how deep each tree this transaction changed is now.
+            foreach (var (name, state) in _tables)
+            {
+                if (state.Changed)
+                {
+                    diagnostics.SetDepth($"table {name}", await Indexing.BTree.HeightAsync(_inner, state.Root, cancellationToken).ConfigureAwait(false));
+                }
+
+                foreach (var (index, changed) in state.Indexes ?? [])
+                {
+                    if (changed.Dirty)
+                    {
+                        diagnostics.SetDepth(
+                            $"index {name}.{index}", await Indexing.BTree.HeightAsync(_inner, changed.Root, cancellationToken).ConfigureAwait(false));
+                    }
+                }
+            }
+        }
+
         // Whatever else keeps its own trees in this transaction says where they are now.
         if (_participants is not null)
         {

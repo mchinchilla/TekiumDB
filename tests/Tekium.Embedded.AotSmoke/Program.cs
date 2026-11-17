@@ -78,9 +78,30 @@ static async Task<int> MaintenanceAsync()
 
         // Backup en caliente: con la base abierta, a un archivo con su propia contraseña.
         var backup = Path.Combine(directory, "backup.tkdb");
-        database = await TekiumDb.OpenAsync(new DbOptions { Path = source, Password = "aot tools password".AsMemory(), CacheSizeMb = 8 });
+        database = await TekiumDb.OpenAsync(new DbOptions { Path = source, Password = "aot tools password".AsMemory(), CacheSizeMb = 8, Diagnostics = true });
         await using (database)
         {
+            // Verificación de la base abierta, y contadores leídos como los leería un exportador de métricas.
+            long hits = 0;
+            using var listener = new System.Diagnostics.Metrics.MeterListener();
+            listener.InstrumentPublished = static (instrument, self) =>
+            {
+                if (instrument.Meter.Name == TekiumDb.MeterName)
+                {
+                    self.EnableMeasurementEvents(instrument);
+                }
+            };
+            listener.SetMeasurementEventCallback<long>((instrument, value, _, _) => hits += instrument.Name == "tekium.cache.hits" ? value : 0);
+            listener.Start();
+            var verified = await database.VerifyAsync();
+            _ = await database.VectorIndex<int>("points", index).SearchAsync(new float[] { 1, 2, 1, 2, 3, 4, 5, 6 }, topK: 3);
+            listener.RecordObservableInstruments();
+            if (!verified.IsHealthy || verified.Trees.Count != 5 || verified.TransactionId != database.LastTransactionId || hits == 0)
+            {
+                await Console.Error.WriteLineAsync($"Verification failed: {verified.Findings.Count} findings, {hits} cache hits counted.");
+                return 1;
+            }
+
             var taken = await database.BackupAsync(backup, new TkBackupOptions { Password = "aot backup password".AsMemory() });
             var copied = await TkInspector.InspectAsync(backup, "aot backup password".AsMemory());
             if (taken.TransactionId != database.LastTransactionId || !copied.IsHealthy || copied.Trees.Count != 5)
