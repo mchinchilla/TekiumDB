@@ -187,6 +187,49 @@ internal sealed class SqlTable
         }
     }
 
+    /// <summary>
+    /// The key after the highest of a table whose key is a whole number; 1 if the table is empty. The
+    /// tree is only read forward, so the highest is found by halving: a few dozen descents.
+    /// </summary>
+    public async ValueTask<long> NextKeyAsync(CancellationToken cancellationToken)
+    {
+        var type = Columns[KeyColumn].Type;
+        var (low, high) = type == TkColumnType.I32 ? (int.MinValue, int.MaxValue) : (long.MinValue, long.MaxValue);
+        if (!await AnyFromAsync(low).ConfigureAwait(false))
+        {
+            return 1;
+        }
+
+        // There is a key at or after low, and none after high.
+        while (low < high)
+        {
+            var middle = (long)(low + (((Int128)high - low + 1) / 2));
+            if (await AnyFromAsync(middle).ConfigureAwait(false))
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return low < (type == TkColumnType.I32 ? int.MaxValue : long.MaxValue)
+            ? low + 1
+            : throw new TkSqlException($"Table '{Name}' has used the highest key its type holds: give the key of the new row.");
+
+        async ValueTask<bool> AnyFromAsync(long key)
+        {
+            await foreach (var entry in BTree.RangeAsync(Source, Root, Key(SqlValues.Convert(key, type, Columns[KeyColumn].Name)), default, cancellationToken).ConfigureAwait(false))
+            {
+                _ = entry;
+                return true;
+            }
+
+            return false;
+        }
+    }
+
     /// <summary>The rows whose primary key is from <paramref name="from"/> up to, not including, <paramref name="to"/>, in key order. Empty bounds are open.</summary>
     public async IAsyncEnumerable<object?[]> ScanAsync(
         ReadOnlyMemory<byte> from, ReadOnlyMemory<byte> to, [EnumeratorCancellation] CancellationToken cancellationToken)

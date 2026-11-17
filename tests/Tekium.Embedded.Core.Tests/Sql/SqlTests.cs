@@ -303,9 +303,8 @@ public abstract class SqlTests : DatabaseTests
         await RefusedAsync<TkSqlException>(connection, "SELECT id FROM items WHERE", "Expected an expression but found the end of the statement, at position 27");
         await RefusedAsync<TkSqlException>(connection, "SELECT id FROM items WHERE id = 'abc", "no closing quote");
         await RefusedAsync<TkSqlException>(connection, "SELECT id FROM items; SELECT 1", "Expected the end of the statement");
-        await RefusedAsync<TkSqlException>(connection, "SELECT id FROM items LEFT JOIN owners ON 1 = 1", "outer and cross joins are not supported");
-        await RefusedAsync<TkSqlException>(connection, "SELECT id FROM items WHERE id IN (SELECT id FROM owners)", "a subquery is not supported");
-        await RefusedAsync<TkSqlException>(connection, "SELECT id FROM (SELECT id FROM items) x", "create a view");
+        await RefusedAsync<TkSqlException>(connection, "SELECT id FROM items RIGHT JOIN owners ON 1 = 1", "right, full and cross joins are not supported");
+        await RefusedAsync<TkSqlException>(connection, "SELECT id FROM items CROSS JOIN owners", "right, full and cross joins are not supported");
         await RefusedAsync<TkSqlException>(connection, "SELECT id FROM items UNION SELECT id FROM owners", "UNION is not supported");
         await RefusedAsync<TkSqlException>(connection, "SELECT id FROM items i JOIN owners o ON o.name = i.owner", "more than one table");
         await RefusedAsync<TkSqlException>(connection, "SELECT x.id FROM items", "no column 'x.id'");
@@ -475,6 +474,221 @@ public abstract class SqlTests : DatabaseTests
         Assert.Equal(items.Count, await CountIndexEntriesAsync(database, "items", "dup"));
         await AssertNoLeaksAsync(database);
         Assert.True((await database.VerifyAsync(Ct)).IsHealthy);
+    }
+
+    [Fact]
+    public async Task Left_joins_queries_in_from_and_subqueries_agree_with_linq_to_objects()
+    {
+        await using var database = await OpenAsync(NewDevice());
+        var (items, owners) = await FillAsync(database);
+        await using var connection = new TkConnection(database);
+        await RunAsync(connection, "INSERT INTO owners (id, name, region) VALUES (50, 'idle', 'north'), (51, 'lazy', 'south')");
+        owners.Add((50, "idle", "north"));
+        owners.Add((51, "lazy", "south"));
+
+        // LEFT JOIN: quien no tiene con qué unirse se queda, con NULL del otro lado.
+        Assert.Equal(
+            owners.SelectMany(o => items.Where(i => i.Owner == o.Name && i.Qty > 95).DefaultIfEmpty(), (o, i) => $"{o.Id}|{i?.Id}").Order(StringComparer.Ordinal),
+            (await QueryAsync(connection, "SELECT o.id, i.id FROM owners o LEFT JOIN items i ON i.owner = o.name AND i.qty > 95")).Order(StringComparer.Ordinal));
+        Assert.Equal(
+            owners.Where(o => !items.Exists(i => i.Owner == o.Name)).Select(static o => $"{o.Name}"),
+            await QueryAsync(connection, "SELECT o.name FROM owners o LEFT OUTER JOIN items i ON i.owner = o.name WHERE i.id IS NULL ORDER BY o.id"));
+        Assert.Equal(
+            owners.Select(o => $"{o.Name}|{items.Count(i => i.Owner == o.Name)}"),
+            await QueryAsync(connection, "SELECT o.name, COUNT(i.id) FROM owners o LEFT JOIN items i ON i.owner = o.name GROUP BY o.name, o.id ORDER BY o.id"));
+
+        // Dos LEFT JOIN seguidos, el segundo sobre lo que el primero pudo dejar en NULL.
+        Assert.Equal(
+            owners.Where(static o => o.Id >= 6).SelectMany(
+                o => items.Where(i => i.Owner == o.Name && i.Id < 12).DefaultIfEmpty(),
+                (o, i) => $"{o.Id}|{i?.Id}|{(i is null ? null : items.FirstOrDefault(j => j.Id == i.Id + 1)?.Qty)}").Order(StringComparer.Ordinal),
+            (await QueryAsync(
+                connection,
+                "SELECT o.id, i.id, j.qty FROM owners o LEFT JOIN items i ON i.owner = o.name AND i.id < 12 LEFT JOIN items j ON j.id = i.id + 1 WHERE o.id >= 6")).Order(StringComparer.Ordinal));
+
+        // Una consulta en el lugar de una tabla.
+        Assert.Equal(
+            items.OrderByDescending(static i => i.Qty).ThenBy(static i => i.Id).Take(5).Join(owners, static i => i.Owner, static o => o.Name, static (i, o) => $"{i.Id}|{o.Region}"),
+            await QueryAsync(
+                connection,
+                "SELECT t.id, o.region FROM (SELECT id, owner, qty FROM items ORDER BY qty DESC, id LIMIT 5) AS t JOIN owners o ON o.name = t.owner ORDER BY t.qty DESC, t.id"));
+        Assert.Equal(
+            [$"{items.GroupBy(static i => i.Owner).Max(static g => g.Count())}"],
+            await QueryAsync(connection, "SELECT MAX(n) FROM (SELECT owner, COUNT(*) AS n FROM items GROUP BY owner) counts"));
+
+        // EXISTS y NOT EXISTS, leyendo la fila de afuera.
+        Assert.Equal(
+            owners.Where(o => items.Exists(i => i.Owner == o.Name && i.Qty > 97)).Select(static o => $"{o.Id}"),
+            await QueryAsync(connection, "SELECT o.id FROM owners o WHERE EXISTS (SELECT 1 FROM items i WHERE i.owner = o.name AND i.qty > 97) ORDER BY o.id"));
+        Assert.Equal(
+            owners.Where(o => !items.Exists(i => i.Owner == o.Name)).Select(static o => $"{o.Id}"),
+            await QueryAsync(connection, "SELECT o.id FROM owners o WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.owner = o.name) ORDER BY o.id"));
+
+        // Una consulta como valor: en el WHERE, en la lista de columnas y en el ORDER BY.
+        Assert.Equal(
+            owners.Where(o => items.Count(i => i.Owner == o.Name) > 50).Select(o => $"{o.Name}|{items.Count(i => i.Owner == o.Name)}|{items.Where(i => i.Owner == o.Name).Max(static i => (int?)i.Qty)}"),
+            await QueryAsync(
+                connection,
+                """
+                SELECT o.name, (SELECT COUNT(*) FROM items i WHERE i.owner = o.name), (SELECT MAX(i.qty) FROM items i WHERE i.owner = o.name)
+                FROM owners o WHERE (SELECT COUNT(*) FROM items i WHERE i.owner = o.name) > 50 ORDER BY o.id
+                """));
+        Assert.Equal(
+            owners.OrderByDescending(o => items.Count(i => i.Owner == o.Name)).ThenBy(static o => o.Id).Select(static o => $"{o.Id}"),
+            await QueryAsync(connection, "SELECT o.id FROM owners o ORDER BY (SELECT COUNT(*) FROM items i WHERE i.owner = o.name) DESC, o.id"));
+        Assert.Equal(
+            owners.Select(o => $"{o.Id}|{items.Where(i => i.Owner == o.Name).OrderBy(static i => i.Id).Select(static i => (long?)i.Id).FirstOrDefault()}"),
+            await QueryAsync(connection, "SELECT o.id, (SELECT i.id FROM items i WHERE i.owner = o.name ORDER BY i.id LIMIT 1) FROM owners o ORDER BY o.id"));
+
+        // IN y NOT IN con una consulta; con un NULL en la lista, NOT IN no afirma nada.
+        Assert.Equal(
+            items.Where(i => i.Id < 60 && owners.Exists(o => o.Region == "north" && o.Name == i.Owner)).Select(static i => $"{i.Id}"),
+            await QueryAsync(connection, "SELECT id FROM items WHERE id < 60 AND owner IN (SELECT name FROM owners WHERE region = 'north') ORDER BY id"));
+        Assert.Equal(
+            items.Where(i => i.Id < 60 && !owners.Exists(o => o.Region == "north" && o.Name == i.Owner)).Select(static i => $"{i.Id}"),
+            await QueryAsync(connection, "SELECT id FROM items WHERE id < 60 AND owner NOT IN (SELECT name FROM owners WHERE region = 'north') ORDER BY id"));
+        Assert.Empty(await QueryAsync(connection, "SELECT id FROM items WHERE id < 60 AND code NOT IN (SELECT code FROM items WHERE id < 30)"));
+        Assert.Equal(
+            items.Where(static i => i.Id < 60 && i.Code is not null && i.Id < 30).Select(static i => $"{i.Id}"),
+            await QueryAsync(connection, "SELECT id FROM items WHERE id < 60 AND code IN (SELECT code FROM items WHERE id < 30) ORDER BY id"));
+
+        // Una dentro de otra, la de más adentro leyendo la de más afuera.
+        Assert.Equal(
+            owners.Where(o => items.Exists(i => i.Owner == o.Name && items.Exists(j => j.Qty == i.Qty && j.Id != i.Id && j.Owner == o.Name))).Select(static o => $"{o.Id}"),
+            await QueryAsync(
+                connection,
+                """
+                SELECT o.id FROM owners o
+                WHERE EXISTS (SELECT 1 FROM items i WHERE i.owner = o.name
+                    AND EXISTS (SELECT 1 FROM items j WHERE j.qty = i.qty AND j.id <> i.id AND j.owner = o.name))
+                ORDER BY o.id
+                """));
+
+        // Un nombre que la subconsulta da a una tabla suya es suyo, aunque afuera haya otro igual.
+        Assert.Equal(
+            owners.Select(static o => $"{o.Id}"),
+            await QueryAsync(connection, "SELECT o.id FROM owners o WHERE EXISTS (SELECT 1 FROM owners o WHERE o.id = 50) ORDER BY o.id"));
+
+        // Sin FROM, con parámetros; y la que no lee nada de afuera se calcula una vez.
+        Assert.Equal(["True|False|400"], await QueryAsync(
+            connection,
+            "SELECT EXISTS (SELECT 1 FROM items WHERE qty > @q), EXISTS (SELECT 1 FROM items WHERE qty > 1000), (SELECT COUNT(*) FROM items)",
+            ("q", 50)));
+
+        // CASE, con y sin sujeto, y sin ELSE.
+        Assert.Equal(
+            items.Take(30).Select(static i => $"{i.Id}|{(i.Qty < 30 ? "low" : i.Qty < 70 ? "mid" : "high")}|{(i.Active ? "yes" : "no")}|{(i.Code is null ? "none" : null)}"),
+            await QueryAsync(
+                connection,
+                """
+                SELECT id, CASE WHEN qty < 30 THEN 'low' WHEN qty < 70 THEN 'mid' ELSE 'high' END, CASE active WHEN TRUE THEN 'yes' ELSE 'no' END,
+                    CASE WHEN code IS NULL THEN 'none' END
+                FROM items WHERE id < 30 ORDER BY id
+                """));
+        Assert.Equal(
+            items.GroupBy(static i => i.Qty < 50 ? "low" : "high").Select(static g => $"{g.Key}|{g.Count()}").Order(StringComparer.Ordinal),
+            (await QueryAsync(
+                connection,
+                "SELECT CASE WHEN qty < 50 THEN 'low' ELSE 'high' END, COUNT(*) FROM items GROUP BY CASE WHEN qty < 50 THEN 'low' ELSE 'high' END")).Order(StringComparer.Ordinal));
+
+        // CAST, y las funciones de texto que comparan caracteres.
+        Assert.Equal(
+            ["43|7x|2|-3.5||True"],
+            await QueryAsync(connection, "SELECT CAST('42' AS INT) + 1, CAST(7 AS TEXT) || 'x', CAST(2.0 AS BIGINT), CAST('-3.5' AS DECIMAL), CAST(NULL AS INT), CAST(1 AS BOOLEAN)"));
+        Assert.Equal(
+            items.Where(static i => i.Id < 40 && i.Code is not null && i.Code.StartsWith("code-1", StringComparison.Ordinal) && i.Code.EndsWith('5') && i.Owner.Contains("ner", StringComparison.Ordinal)).Select(static i => $"{i.Id}"),
+            await QueryAsync(connection, "SELECT id FROM items WHERE id < 40 AND STARTSWITH(code, 'code-1') AND ENDSWITH(code, '5') AND CONTAINS(owner, 'ner') ORDER BY id"));
+        Assert.Equal(["False|False||"], await QueryAsync(connection, "SELECT STARTSWITH('Alpha', 'al'), CONTAINS('Alpha', 'PH'), ENDSWITH(NULL, 'a'), CONTAINS('a', NULL)"));
+        await RefusedAsync<TkSqlException>(connection, "SELECT CAST('abc' AS INT)", "cannot be stored");
+
+        // Lo que no se puede, se dice.
+        await RefusedAsync<TkSqlException>(connection, "SELECT (SELECT id FROM items) FROM owners", "at most one row");
+        await RefusedAsync<TkSqlException>(connection, "SELECT (SELECT id, qty FROM items WHERE id = 1) FROM owners", "must return one column");
+        await RefusedAsync<TkSqlException>(connection, "SELECT id FROM owners WHERE id IN (SELECT id, qty FROM items)", "must return one column");
+        await RefusedAsync<TkSqlException>(connection, "SELECT owner, (SELECT COUNT(*) FROM owners) FROM items GROUP BY owner", "A subquery cannot be used here");
+        await RefusedAsync<TkSqlException>(connection, "DELETE FROM items WHERE EXISTS (SELECT 1 FROM owners)", "A subquery cannot be used here");
+        await RefusedAsync<TkSqlException>(connection, "SELECT id FROM (SELECT id FROM items)", "an alias for the query in parentheses");
+        await RefusedAsync<TkSqlException>(connection, "SELECT CASE qty END FROM items", "Expected WHEN");
+        await AssertNoLeaksAsync(database);
+    }
+
+    [Fact]
+    public async Task Returning_gives_back_the_rows_written_and_a_missing_whole_number_key_is_the_next_one()
+    {
+        await using var database = await OpenAsync(NewDevice());
+        var (items, _) = await FillAsync(database);
+        await using var connection = new TkConnection(database);
+
+        // RETURNING: lo que se pide de cada fila escrita, y cuántas fueron.
+        await RunAsync(connection, "CREATE TABLE notes (id BIGINT PRIMARY KEY, body TEXT NOT NULL, stars INT)");
+        Assert.Equal(["1|first|", "2|second|4"], await QueryAsync(connection, "INSERT INTO notes (id, body, stars) VALUES (1, 'first', NULL), (2, 'second', 4) RETURNING *"));
+        Assert.Equal(["2|40|SECOND"], await QueryAsync(connection, "UPDATE notes SET stars = stars * 10 WHERE stars IS NOT NULL RETURNING id, stars AS s, UPPER(body)"));
+        Assert.Equal(["1"], await QueryAsync(connection, "UPDATE notes SET body = 'changed' WHERE id = 1 RETURNING 1"));
+        Assert.Empty(await QueryAsync(connection, "UPDATE notes SET body = 'nobody' WHERE id = 99 RETURNING 1"));
+        Assert.Equal(["changed"], await QueryAsync(connection, "DELETE FROM notes WHERE id = @id RETURNING body", ("id", 1L)));
+        Assert.Equal(["2"], await QueryAsync(connection, "SELECT id FROM notes"));
+        await using (var command = connection.CreateCommand())
+        {
+            // Las filas afectadas se informan igual, con o sin RETURNING.
+            command.CommandText = "UPDATE notes SET stars = 1 RETURNING id";
+            await using var reader = await command.ExecuteReaderAsync(Ct);
+            Assert.Equal(1, reader.RecordsAffected);
+            Assert.Equal(["id"], Enumerable.Range(0, reader.FieldCount).Select(reader.GetName));
+            Assert.Equal(typeof(long), reader.GetFieldType(0));
+        }
+
+        await RefusedAsync<TkSqlException>(connection, "DELETE FROM notes RETURNING nothing", "no column 'nothing'");
+
+        // Una clave entera que no se da es la siguiente a la más alta; dada, es la que se dio.
+        var model = new SortedDictionary<long, string> { [2] = "second" };
+        var random = new Random(4);
+        for (var step = 0; step < 300; step++)
+        {
+            switch (random.Next(5))
+            {
+                case 0:
+                    var given = random.Next(-50, 2000);
+                    if (!model.ContainsKey(given))
+                    {
+                        await RunAsync(connection, "INSERT INTO notes (id, body) VALUES (@id, @body)", ("id", (long)given), ("body", $"given {step}"));
+                        model[given] = $"given {step}";
+                    }
+
+                    break;
+
+                case 1 when model.Count > 0:
+                    var victim = model.Keys.ElementAt(random.Next(model.Count));
+                    await RunAsync(connection, "DELETE FROM notes WHERE id = @id", ("id", victim));
+                    model.Remove(victim);
+                    break;
+
+                default:
+                    var expected = model.Count == 0 ? 1 : model.Keys.Max() + 1;
+                    Assert.Equal([$"{expected}"], await QueryAsync(connection, "INSERT INTO notes (body) VALUES (@body) RETURNING id", ("body", $"auto {step}")));
+                    model[expected] = $"auto {step}";
+                    break;
+            }
+        }
+
+        Assert.Equal(model.Select(static pair => $"{pair.Key}|{pair.Value}"), await QueryAsync(connection, "SELECT id, body FROM notes ORDER BY id"));
+
+        // Varias filas en una sentencia reciben claves seguidas; y una tabla vacía empieza en 1.
+        await RunAsync(connection, "DELETE FROM notes");
+        Assert.Equal(["1", "2", "7", "3"], await QueryAsync(connection, "INSERT INTO notes (id, body) VALUES (NULL, 'a'), (NULL, 'b'), (7, 'c'), (NULL, 'd') RETURNING id"));
+        Assert.Equal(["8"], await QueryAsync(connection, "INSERT INTO notes (body) VALUES ('e') RETURNING id"));
+
+        // También en una tabla que declara un tipo de C#, y con clave INT; en el tope del tipo, se dice.
+        Assert.Equal([$"{items.Max(static i => i.Id) + 1}"], await QueryAsync(connection, "INSERT INTO items (owner, qty, price, active) VALUES ('new', 1, 1, TRUE) RETURNING id"));
+        await RunAsync(connection, "CREATE TABLE small (id INT PRIMARY KEY, v INT)");
+        await RunAsync(connection, "INSERT INTO small (id, v) VALUES (-5, 1)");
+        Assert.Equal(["-4"], await QueryAsync(connection, "INSERT INTO small (v) VALUES (2) RETURNING id"));
+        await RunAsync(connection, "INSERT INTO small (id, v) VALUES (2147483647, 3)");
+        await RefusedAsync<TkSqlException>(connection, "INSERT INTO small (v) VALUES (4)", "highest key its type holds");
+
+        // Una clave que no es un número entero no se inventa.
+        await RunAsync(connection, "CREATE TABLE named (id TEXT PRIMARY KEY, v INT)");
+        await RefusedAsync<TkSqlException>(connection, "INSERT INTO named (v) VALUES (1)", "cannot be NULL");
+        await AssertNoLeaksAsync(database);
     }
 
     internal static async Task<(List<Item> Items, List<(int Id, string Name, string Region)> Owners)> FillAsync(TekiumDb database)

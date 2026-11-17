@@ -5,6 +5,7 @@
     <Project Path="src/Tekium.Embedded.Generators/Tekium.Embedded.Generators.csproj" />
     <Project Path="src/Tekium.Embedded.Caching/Tekium.Embedded.Caching.csproj" />
     <Project Path="src/Tekium.Embedded.DataProtection/Tekium.Embedded.DataProtection.csproj" />
+    <Project Path="src/Tekium.Embedded.EntityFrameworkCore/Tekium.Embedded.EntityFrameworkCore.csproj" />
     <Project Path="src/Tekium.Embedded.HealthChecks/Tekium.Embedded.HealthChecks.csproj" />
     <Project Path="src/Tekium.Embedded.Linq/Tekium.Embedded.Linq.csproj" />
     <Project Path="src/Tekium.Embedded.Sql/Tekium.Embedded.Sql.csproj" />

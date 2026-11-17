@@ -25,15 +25,26 @@ internal sealed record Between(SqlExpr Operand, SqlExpr Low, SqlExpr High, bool 
 
 internal sealed record Like(SqlExpr Operand, SqlExpr Pattern, bool Negated) : SqlExpr;
 
+/// <summary>A query used as a value: <c>EXISTS (SELECT …)</c>, or <c>(SELECT …)</c> giving one value.</summary>
+internal sealed record Subquery(SelectStatement Query, bool Exists) : SqlExpr;
+
+/// <summary><c>x IN (SELECT …)</c>.</summary>
+internal sealed record InQuery(SqlExpr Operand, SelectStatement Query, bool Negated) : SqlExpr;
+
+/// <summary><c>CASE WHEN … THEN … ELSE … END</c>.</summary>
+internal sealed record Case(IReadOnlyList<(SqlExpr When, SqlExpr Then)> Branches, SqlExpr? Otherwise) : SqlExpr;
+
 /// <summary>A function: an aggregate (COUNT, SUM, MIN, MAX, AVG) or a scalar one.</summary>
 internal sealed record Call(string Name, IReadOnlyList<SqlExpr> Arguments, bool Star, bool Distinct) : SqlExpr;
 
 /// <summary>One thing a SELECT returns: an expression, <c>*</c>, or <c>table.*</c>.</summary>
 internal sealed record SelectItem(SqlExpr? Expression, string? Alias, bool Star, string? StarOf);
 
-internal sealed record TableRef(string Name, string Alias);
+/// <summary>A table or view by name, or a query in parentheses (then <c>Name</c> is its alias).</summary>
+internal sealed record TableRef(string Name, string Alias, SelectStatement? Query = null);
 
-internal sealed record JoinClause(TableRef Table, SqlExpr On);
+/// <summary>INNER JOIN, or LEFT JOIN: every row of what came before stays, with NULLs where nothing matches.</summary>
+internal sealed record JoinClause(TableRef Table, SqlExpr On, bool Left = false);
 
 internal sealed record OrderItem(SqlExpr Expression, bool Descending);
 
@@ -51,11 +62,14 @@ internal sealed record SelectStatement(
     SqlExpr? Offset,
     bool Distinct) : SqlStatement;
 
-internal sealed record InsertStatement(string Table, IReadOnlyList<string>? Columns, IReadOnlyList<IReadOnlyList<SqlExpr>> Rows) : SqlStatement;
+/// <summary>INSERT. <c>Returning</c>, here and in UPDATE and DELETE, is what to give back of each row written.</summary>
+internal sealed record InsertStatement(
+    string Table, IReadOnlyList<string>? Columns, IReadOnlyList<IReadOnlyList<SqlExpr>> Rows, IReadOnlyList<SelectItem>? Returning = null) : SqlStatement;
 
-internal sealed record UpdateStatement(string Table, IReadOnlyList<(string Column, SqlExpr Value)> Set, SqlExpr? Where) : SqlStatement;
+internal sealed record UpdateStatement(
+    string Table, IReadOnlyList<(string Column, SqlExpr Value)> Set, SqlExpr? Where, IReadOnlyList<SelectItem>? Returning = null, string? Alias = null) : SqlStatement;
 
-internal sealed record DeleteStatement(string Table, SqlExpr? Where) : SqlStatement;
+internal sealed record DeleteStatement(string Table, SqlExpr? Where, IReadOnlyList<SelectItem>? Returning = null, string? Alias = null) : SqlStatement;
 
 internal sealed record ColumnDefinition(string Name, TkColumnType Type, bool NotNull, bool PrimaryKey, bool Unique);
 

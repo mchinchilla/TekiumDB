@@ -40,7 +40,7 @@ TekiumDB guarda todo en un único archivo `.tkdb` y es código 100 % administrad
 | UUID v7 y fechas | `BLOB` con un índice encima | Tipos de primera clase, con rangos por fecha de creación y zone maps |
 | Modelo de datos | SQL sobre filas sin tipo | Clases de C# con serializadores generados en compilación; SQL y LINQ opcionales sobre las mismas tablas |
 
-Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (subconsultas, joins externos, optimización por costos). Su SQL es un subconjunto.
+Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (optimización por costos, reordenamiento de joins). Su SQL es un subconjunto.
 
 ## Características
 
@@ -83,7 +83,7 @@ Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (subconsultas,
 
 **Ecosistema**
 
-- SQL con proveedor ADO.NET (funciona con Dapper), LINQ y vectores, cada uno en su paquete.
+- SQL con proveedor ADO.NET (funciona con Dapper), proveedor de Entity Framework Core, LINQ y vectores, cada uno en su paquete.
 - Funciones y procedimientos escritos en C#, llamados desde SQL, y procedimientos guardados en el archivo (PL/Tk), apagados por defecto.
 - Sin reflexión en tiempo de ejecución: todo lo que depende de los tipos del usuario lo escribe un generador de código al compilar. Compatible con Native AOT y trimming.
 
@@ -95,6 +95,7 @@ Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (subconsultas,
 | `Tekium.Embedded.Sql` | SQL y proveedor ADO.NET |
 | `Tekium.Embedded.Linq` | Consultas con predicados de C# |
 | `Tekium.Embedded.Vectors` | Búsqueda vectorial |
+| `Tekium.Embedded.EntityFrameworkCore` | Proveedor de Entity Framework Core, sólo asíncrono. El único paquete que no es compatible con Native AOT, porque EF Core no lo es |
 | `Tekium.Embedded.Caching` | `IDistributedCache` en un archivo local |
 | `Tekium.Embedded.DataProtection` | Las claves de Data Protection de ASP.NET Core en la base |
 | `Tekium.Embedded.HealthChecks` | El estado de la base en los health checks de la aplicación |
@@ -247,14 +248,57 @@ var big = await connection.QueryAsync<Order>(
 
 | | |
 | --- | --- |
-| Sentencias | `SELECT` con `INNER JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`; `INSERT`, `UPDATE`, `DELETE`; `CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `CREATE PROCEDURE` y sus `DROP`; `CALL`; `EXPLAIN` |
+| Sentencias | `SELECT` con `INNER JOIN` y `LEFT JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`; `INSERT`, `UPDATE`, `DELETE`, cada uno con `RETURNING`; `CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `CREATE PROCEDURE` y sus `DROP`; `CALL`; `EXPLAIN` |
+| Subconsultas | `EXISTS (…)`, `x IN (…)`, una consulta como valor y una consulta en el `FROM`. Pueden leer la fila de la consulta de afuera, y se corren una vez por fila |
+| Expresiones | `CASE`, `CAST`, `LIKE`, `BETWEEN`, `IN`, aritmética, `||`, `COALESCE`, `LOWER`, `UPPER`, `LENGTH`, `ABS`, `STARTSWITH`, `ENDSWITH`, `CONTAINS` |
+| Claves | Una clave primaria entera que no se da en un `INSERT` es la siguiente a la más alta de la tabla |
 | Las mismas tablas | SQL lee las tablas que declaran los tipos con `[TkTable]`, y lo que escribe es lo que escribiría la API tipada, filas e índices. Una tabla con índices sobre expresiones, `CHECK` o claves foráneas se lee con SQL pero no se escribe |
 | Vistas | Consultas guardadas, de lectura; pueden usar otras vistas, y una que acabaría usándose a sí misma se rechaza al crearla |
 | `EXPLAIN` | El camino elegido, con las filas estimadas (desde la forma del árbol de cada índice) y las que salieron |
 | Sólo asíncrono | `OpenAsync`, `ExecuteReaderAsync`, `BeginTransactionAsync`…; los métodos síncronos de ADO.NET lanzan. Con Dapper: `QueryAsync`, `ExecuteAsync` |
-| Lo que no hay | Subconsultas, `UNION`, joins externos, `ALTER TABLE`, búsqueda vectorial desde SQL |
+| Lo que no hay | `UNION`, joins derechos y completos, `ALTER TABLE`, subconsultas en consultas con `GROUP BY` o en `UPDATE`/`DELETE`, búsqueda vectorial desde SQL |
 
 [Mediciones y detalle](docs/benchmarks/fase-12.md).
+
+### Entity Framework Core
+
+En su propio paquete, `Tekium.Embedded.EntityFrameworkCore`. Un modelo existente funciona sin reescribir la aplicación, siempre que use la API asíncrona.
+
+```csharp
+public sealed class Shop(DbContextOptions<Shop> options) : DbContext(options)
+{
+    public DbSet<Blog> Blogs => Set<Blog>();
+    public DbSet<Post> Posts => Set<Post>();
+}
+
+var options = new DbContextOptionsBuilder<Shop>()
+    .UseTekium("Data Source=app.tkdb;Password=…")          // o UseTekium(db), compartiendo un TekiumDb abierto
+    .Options;
+
+await using var shop = new Shop(options);
+await shop.Database.EnsureCreatedAsync();
+
+shop.Add(new Blog { Name = "Engine notes", Posts = { new Post { Title = "Copy-on-write" } } });
+await shop.SaveChangesAsync();
+
+var busy = await shop.Blogs
+    .Where(b => b.Posts.Any(p => p.Likes > 10))
+    .Include(b => b.Posts)
+    .OrderBy(b => b.Name)
+    .Take(20)
+    .ToListAsync();
+```
+
+| | |
+| --- | --- |
+| Funciona | `EnsureCreatedAsync` y `EnsureDeletedAsync`; `SaveChangesAsync` con altas, cambios y bajas, y su comprobación de concurrencia; `ExecuteUpdateAsync` y `ExecuteDeleteAsync`; consultas con `Where`, `OrderBy`, `Skip`/`Take`, `Include`/`ThenInclude` (en una consulta o divididas), `Any`, `All`, `Count`, `First`, `Single`, `Find`, `Min`, `Max`, `Sum`, `Average`, `GroupBy`, `Distinct`, `Join`, `SelectMany`, `Contains`, proyecciones y `FromSqlRaw`; transacciones |
+| Comprobado contra SQLite | Las pruebas hacen cada operación sobre TekiumDB y sobre el proveedor de SQLite de EF Core, con el mismo modelo, y exigen el mismo resultado |
+| Sólo asíncrono | `ToList()`, `SaveChanges()`, `EnsureCreated()` y los demás métodos síncronos lanzan `NotSupportedException`: TekiumDB no hace E/S síncrona |
+| Claves | De una columna. Una clave `int` o `long` la asigna la base; una `Guid`, EF Core |
+| Tipos | `bool`, `byte`, `short`, `int`, `long`, `float`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `TimeSpan`, `byte[]`, enumeraciones, y sus formas anulables. Las fechas con zona se comparan y ordenan como instantes, cosa que SQLite no sabe hacer |
+| Texto | `StartsWith`, `EndsWith` y `Contains` comparan caracteres, como en .NET: las mayúsculas cuentan |
+| Lo que no hay | Migraciones; claves de varias columnas; claves foráneas en la base (EF Core sigue arreglando y borrando en cascada lo que tiene cargado, pero nada impide una referencia a una fila que no existe); puntos de guardado; `Union`; y lo que EF Core no sabe traducir falla diciéndolo |
+| Native AOT | Este paquete no: EF Core arma sus consultas con reflexión y código generado en ejecución |
 
 ### Funciones y procedimientos en C#
 
@@ -580,8 +624,6 @@ builder.Services.AddHealthChecks().AddTekiumDb(_ => db);                // Tekiu
 | `TkXmlRepository` | Guarda el anillo de claves de Data Protection en la base: cifrado en reposo si la base lo está | La interfaz de Data Protection es síncrona, así que las claves se leen una vez al arrancar y se sirven desde memoria, y una clave nueva se escribe al archivo justo después de guardarse, sin bloquear. Si el proceso muere en esos milisegundos, la clave nueva se pierde. `FlushAsync` espera la escritura e informa si falló |
 | `TkHealthCheck` | Sano cuando la base está abierta y acepta escrituras. No hace E/S | Con `Verify = true` además lee y verifica cada página en uso: el daño es "unhealthy", las advertencias "degraded". Su costo crece con el archivo: para correrlo de vez en cuando, no cada pocos segundos |
 
-No hay proveedor de Entity Framework Core.
-
 ## Herramientas
 
 `tkdb` es una herramienta de línea de comandos para archivos `.tkdb` cerrados. Ninguno de sus comandos cambia el archivo que recibe, salvo `passwd`.
@@ -734,11 +776,11 @@ Lo que conviene saber antes de adoptarla:
 - **Un proceso por archivo.** No hay acceso concurrente desde varios procesos.
 - **Un escritor a la vez.** Las escrituras se serializan; muchos commits pequeños y durables son más lentos que en SQLite con WAL.
 - **Lectores largos hacen crecer el archivo**, y el archivo no se achica solo: se compacta con `tkdb compact`.
-- **SQL es un subconjunto:** sin subconsultas, `UNION`, joins externos ni `ALTER TABLE`.
+- **SQL es un subconjunto:** sin `UNION`, joins derechos o completos, ni `ALTER TABLE`; una subconsulta se corre una vez por fila de la consulta de afuera.
 - **LINQ traduce o rechaza:** sin `||`, `!=`, ordenar ni agrupar.
 - **Sin triggers, vistas materializadas, replicación ni borrado en cascada.** En su lugar: restricciones declarativas, índices sobre expresiones y change feed.
 - **El índice vectorial** no recupera el espacio de los vectores borrados hasta eliminarlo, y no se consulta desde SQL.
-- **Sin proveedor de Entity Framework Core.** Se usa la API tipada, LINQ, o SQL por ADO.NET y Dapper.
+- **El proveedor de Entity Framework Core es sólo asíncrono**, no tiene migraciones y no crea claves foráneas en la base.
 - **Formato de archivo sin estabilizar** hasta la primera versión publicada.
 
 ## Compilar y probar
@@ -770,6 +812,7 @@ src/
   Tekium.Embedded.Sql/           SQL, proveedor ADO.NET, rutinas de C# y procedimientos almacenados
   Tekium.Embedded.Linq/          Consultas con predicados de C#
   Tekium.Embedded.Vectors/       Búsqueda vectorial HNSW
+  Tekium.Embedded.EntityFrameworkCore/ Proveedor de Entity Framework Core
   Tekium.Embedded.Caching/       IDistributedCache
   Tekium.Embedded.DataProtection/ Almacén de claves de Data Protection
   Tekium.Embedded.HealthChecks/  Health check

@@ -211,6 +211,18 @@ static async Task<int> SqlAsync()
         var summary = await QueryAsync("SELECT place, people, best FROM by_place WHERE people > @least ORDER BY place", ("least", 50));
         var plan = await QueryAsync("EXPLAIN SELECT name FROM people WHERE city = 2 AND score > 100");
         var changed = await RunAsync("UPDATE people SET score = score + 1 WHERE id < 10");
+
+        // Lo que la Fase 16 agregó al SQL: LEFT JOIN, subconsultas que leen la fila de afuera, CASE, CAST, RETURNING y la clave entera que no se da.
+        await RunAsync("INSERT INTO cities (id, name) VALUES (3, 'Cusco')");
+        var empty = await QueryAsync("SELECT c.name FROM cities c LEFT JOIN people p ON p.city = c.id WHERE p.id IS NULL");
+        var crowded = await QueryAsync("SELECT c.name, (SELECT COUNT(*) FROM people p WHERE p.city = c.id) FROM cities c WHERE EXISTS (SELECT 1 FROM people p WHERE p.city = c.id AND p.id > 197) ORDER BY c.id");
+        var kinds = await QueryAsync("SELECT CASE WHEN id < 2 THEN 'first' ELSE CAST(id AS TEXT) END FROM people WHERE id < 4 ORDER BY id");
+        var born = await QueryAsync("INSERT INTO people (name, city) VALUES ('Latecomer', 3) RETURNING id, name");
+        if (empty is not ["Cusco"] || crowded is not ["Lima|100", "Quito|100"] || kinds is not ["first", "first", "2", "3"] || born is not ["200|Latecomer"])
+        {
+            await Console.Error.WriteLineAsync($"SQL of phase 16 failed: {string.Join(" ; ", empty)} / {string.Join(" ; ", crowded)} / {string.Join(" ; ", kinds)} / {string.Join(" ; ", born)}");
+            return 1;
+        }
         if (summary is ["Lima|100|297.0", "Quito|100|298.5"] && changed == 10 && plan.Exists(static line => line.Contains("Index by_city of people", StringComparison.Ordinal)))
         {
             return 0;

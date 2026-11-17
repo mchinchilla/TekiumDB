@@ -35,6 +35,8 @@ internal static class Binder
         InList list => HasAggregate(list.Operand) || list.Items.Any(HasAggregate),
         Between between => HasAggregate(between.Operand) || HasAggregate(between.Low) || HasAggregate(between.High),
         Like like => HasAggregate(like.Operand) || HasAggregate(like.Pattern),
+        Case choice => choice.Branches.Any(static branch => HasAggregate(branch.When) || HasAggregate(branch.Then)) || HasAggregate(choice.Otherwise),
+        InQuery inQuery => HasAggregate(inQuery.Operand),
         _ => false,
     };
 
@@ -49,6 +51,10 @@ internal static class Binder
         InList list => ReadsColumns(list.Operand) || list.Items.Any(ReadsColumns),
         Between between => ReadsColumns(between.Operand) || ReadsColumns(between.Low) || ReadsColumns(between.High),
         Like like => ReadsColumns(like.Operand) || ReadsColumns(like.Pattern),
+        Case choice => choice.Branches.Any(static branch => ReadsColumns(branch.When) || ReadsColumns(branch.Then)) || (choice.Otherwise is not null && ReadsColumns(choice.Otherwise)),
+
+        // A query is computed for each row: never a constant to bound a search with.
+        Subquery or InQuery => true,
         _ => false,
     };
 
@@ -65,6 +71,10 @@ internal static class Binder
         Between between => $"W({between.Negated},{Key(between.Operand)},{Key(between.Low)},{Key(between.High)})",
         Like like => $"K({like.Negated},{Key(like.Operand)},{Key(like.Pattern)})",
         Call call => $"F({call.Name},{call.Star},{call.Distinct},{string.Join(',', call.Arguments.Select(Key))})",
+        Case choice => $"X({string.Join(',', choice.Branches.Select(static branch => $"{Key(branch.When)}:{Key(branch.Then)}"))},{(choice.Otherwise is null ? string.Empty : Key(choice.Otherwise))})",
+
+        // Two queries are the same expression only if they are the same node.
+        Subquery or InQuery => $"Q({System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(expression)})",
         _ => expression.ToString(),
     };
 
@@ -193,6 +203,26 @@ internal static class Binder
                 var unlike = like.Negated;
                 return row => matched(row) is { } text && pattern(row) is { } wildcard ? Matches(Text(text), Text(wildcard)) != unlike : null;
 
+            case Case choice:
+                var branches = choice.Branches.Select(branch => (When: Bind(branch.When, resolve, parameters, special), Then: Bind(branch.Then, resolve, parameters, special))).ToArray();
+                var otherwise = choice.Otherwise is null ? null : Bind(choice.Otherwise, resolve, parameters, special);
+                return row =>
+                {
+                    foreach (var (when, then) in branches)
+                    {
+                        if (Truth(when(row)) == true)
+                        {
+                            return then(row);
+                        }
+                    }
+
+                    return otherwise?.Invoke(row);
+                };
+
+            case Subquery or InQuery:
+                throw new TkSqlException(
+                    "A subquery cannot be used here: only in the WHERE, the select list and the ORDER BY of a query that does not group, and not in an UPDATE, DELETE or INSERT.");
+
             case Call call when IsAggregate(call):
                 throw new TkSqlException($"{call.Name} is an aggregate and cannot be used here.");
 
@@ -303,6 +333,14 @@ internal static class Binder
                 };
             case "ABS" when arguments.Length == 1:
                 return row => arguments[0](row) is { } number ? Compare(number, 0L) < 0 ? Arithmetic("-", 0L, number) : number : null;
+            case "STARTSWITH" when arguments.Length == 2:
+                return row => arguments[0](row) is { } text && arguments[1](row) is { } start ? Text(text).StartsWith(Text(start), StringComparison.Ordinal) : null;
+            case "ENDSWITH" when arguments.Length == 2:
+                return row => arguments[0](row) is { } text && arguments[1](row) is { } end ? Text(text).EndsWith(Text(end), StringComparison.Ordinal) : null;
+            case "CONTAINS" when arguments.Length == 2:
+                return row => arguments[0](row) is { } text && arguments[1](row) is { } part ? Text(text).Contains(Text(part), StringComparison.Ordinal) : null;
+            case "CAST" when arguments.Length == 2 && call.Arguments[1] is Literal { Value: string name } && Enum.TryParse<TkColumnType>(name, out var target):
+                return row => arguments[0](row) is { } value ? Cast(value, target) : null;
             case "COALESCE" when arguments.Length > 0:
                 return row =>
                 {
@@ -327,7 +365,7 @@ internal static class Binder
         if (!context.Routines.TryGetValue(call.Name, out var routine))
         {
             throw new TkSqlException(
-                $"Unknown function {call.Name} with {arguments.Length} arguments. There are LOWER, UPPER, LENGTH, ABS and COALESCE, the aggregates COUNT, SUM, MIN, MAX and AVG, and the functions the application registers.");
+                $"Unknown function {call.Name} with {arguments.Length} arguments. There are LOWER, UPPER, LENGTH, ABS, COALESCE, CAST, STARTSWITH, ENDSWITH and CONTAINS, the aggregates COUNT, SUM, MIN, MAX and AVG, and the functions the application registers.");
         }
 
         if (routine.Procedure is not null)
@@ -428,6 +466,23 @@ internal static class Binder
 
             return result;
         };
+    }
+
+    /// <summary>CAST: like storing the value in a column of the type, and besides, anything becomes text and text that is a number becomes one.</summary>
+    private static object Cast(object value, TkColumnType type)
+    {
+        if (type == TkColumnType.Text)
+        {
+            return Text(value);
+        }
+
+        if (value is string text && SqlValues.IsNumber(SqlValues.Zero(type))
+            && decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
+        {
+            value = number;
+        }
+
+        return SqlValues.Convert(value, type, "the result of CAST");
     }
 
     private static string Text(object value) => value switch

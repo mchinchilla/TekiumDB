@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
     <PackageReference Include="CsCheck" />
     <PackageReference Include="Dapper" />
     <!-- Para ejecutar el generador de código dentro de una prueba y examinar lo que produce. -->
@@ -20,6 +21,7 @@
     <ProjectReference Include="..\..\src\Tekium.Embedded.Core\Tekium.Embedded.Core.csproj" />
     <ProjectReference Include="..\..\src\Tekium.Embedded.Caching\Tekium.Embedded.Caching.csproj" />
     <ProjectReference Include="..\..\src\Tekium.Embedded.DataProtection\Tekium.Embedded.DataProtection.csproj" />
+    <ProjectReference Include="..\..\src\Tekium.Embedded.EntityFrameworkCore\Tekium.Embedded.EntityFrameworkCore.csproj" />
     <ProjectReference Include="..\..\src\Tekium.Embedded.HealthChecks\Tekium.Embedded.HealthChecks.csproj" />
     <ProjectReference Include="..\..\src\Tekium.Embedded.Linq\Tekium.Embedded.Linq.csproj" />
     <ProjectReference Include="..\..\src\Tekium.Embedded.Sql\Tekium.Embedded.Sql.csproj" />

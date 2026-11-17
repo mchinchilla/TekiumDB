@@ -22,15 +22,28 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
 
     private readonly List<Source> _sources = [];
 
+    /// <summary>Where the result of each subquery goes: a position past the columns of the tables, in every row.</summary>
+    private readonly Dictionary<SqlExpr, int> _slots = new(ReferenceEqualityComparer.Instance);
+    private int _width;
+
     /// <summary>Runs a query. <paramref name="plan"/> receives the steps taken, with their row counts, if it is given.</summary>
     public async ValueTask<SqlResult> RunAsync(SelectStatement query, PlanNode? plan, IReadOnlyList<string> views)
     {
         if (query.From is null)
         {
             // A SELECT of values: one row.
-            var constants = query.Items.Select(item => item.Expression is { } expression
-                ? Binder.Constant(expression, parameters)
-                : throw new TkSqlException("SELECT * needs a FROM.")).ToArray();
+            var values = query.Items.Select(static item => item.Expression ?? throw new TkSqlException("SELECT * needs a FROM.")).ToArray();
+            object?[] only = [];
+            await foreach (var row in Apply(Replay([[]]), values, views).ConfigureAwait(false))
+            {
+                only = row;
+            }
+
+            var constants = values.Select(expression => Binder.Bind(
+                expression,
+                static column => throw new TkSqlException($"Column '{column.Name}' cannot be used here: the query has no FROM."),
+                parameters,
+                Special)(only)).ToArray();
             return Result([.. query.Items.Select((item, i) => item.Alias ?? $"column{i + 1}")], [constants], new Type?[constants.Length]);
         }
 
@@ -41,16 +54,19 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
         }
 
         var width = _sources.Sum(static source => source.Columns.Length);
+        _width = width;
         var rows = await BaseAsync(query.Where, width).ConfigureAwait(false);
         var top = _sources[0].Node;
         for (var i = 0; i < query.Joins.Count; i++)
         {
-            (rows, top) = await JoinAsync(rows, top, i + 1, query.Joins[i].On).ConfigureAwait(false);
+            (rows, top) = await JoinAsync(rows, top, i + 1, query.Joins[i].On, query.Joins[i].Left).ConfigureAwait(false);
         }
 
         if (query.Where is not null)
         {
-            var condition = Binder.Bind(query.Where, Resolve, parameters, null);
+            // The subqueries of the WHERE are computed for each row before it is filtered.
+            rows = Apply(rows, [query.Where], views);
+            var condition = Binder.Bind(query.Where, Resolve, parameters, Special);
             var node = new PlanNode($"Filter: {Show(query.Where)}", null);
             node.Children.Add(top);
             (rows, top) = (Filter(rows, condition, node), node);
@@ -59,7 +75,13 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
         // What the select list is made of, and whether the rows are grouped first.
         var items = Expand(query.Items);
         var grouped = query.GroupBy.Count > 0 || items.Any(item => Binder.HasAggregate(item.Expression)) || Binder.HasAggregate(query.Having);
-        Func<SqlExpr, Evaluator> bind = expression => Binder.Bind(expression, Resolve, parameters, null);
+        Func<SqlExpr, Evaluator> bind = expression => Binder.Bind(expression, Resolve, parameters, Special);
+        if (!grouped)
+        {
+            // Those of the select list and the ORDER BY, only for the rows that passed the filter.
+            rows = Apply(rows, items.Select(static item => item.Expression).Concat(query.OrderBy.Select(static item => item.Expression)), views);
+        }
+
         if (grouped)
         {
             var (aggregated, groupBind) = await GroupAsync(rows, query, items).ConfigureAwait(false);
@@ -169,9 +191,9 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
     }
 
     /// <summary>The rows of one table that meet a condition, for UPDATE and DELETE: reached like the first table of a query.</summary>
-    public async ValueTask<List<object?[]>> MatchingAsync(SqlTable table, SqlExpr? where)
+    public async ValueTask<List<object?[]>> MatchingAsync(SqlTable table, SqlExpr? where, string? alias = null)
     {
-        _sources.Add(new Source(table.Name, table) { Offset = 0 });
+        _sources.Add(new Source(alias ?? table.Name, table) { Offset = 0 });
         var rows = await BaseAsync(where, table.Columns.Length).ConfigureAwait(false);
         if (where is not null)
         {
@@ -220,8 +242,272 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
                 column.Table is null ? $"There is no column '{column.Name}' in the tables of the query." : $"There is no column '{column.Table}.{column.Name}' in the query.");
     }
 
+    /// <summary>
+    /// Computes, for each row, the subqueries of some expressions, and leaves each result in a position of
+    /// its own past the columns of the row. A subquery that reads nothing of the row is computed once.
+    /// </summary>
+    private IAsyncEnumerable<object?[]> Apply(IAsyncEnumerable<object?[]> rows, IEnumerable<SqlExpr?> expressions, IReadOnlyList<string> views)
+    {
+        var found = new List<SqlExpr>();
+        foreach (var expression in expressions)
+        {
+            Subqueries(expression, found);
+        }
+
+        if (found.Count == 0)
+        {
+            return rows;
+        }
+
+        var prepared = found.Select(Prepare).ToArray();
+        var width = _width;
+        return Extended();
+
+        async IAsyncEnumerable<object?[]> Extended()
+        {
+            var once = new object?[prepared.Length];
+            var known = new bool[prepared.Length];
+            await foreach (var row in rows.ConfigureAwait(false))
+            {
+                var extended = new object?[Math.Max(width, row.Length)];
+                row.CopyTo(extended, 0);
+                for (var i = 0; i < prepared.Length; i++)
+                {
+                    var (node, query, outer, slot) = prepared[i];
+                    if (outer.Count > 0)
+                    {
+                        extended[slot] = await ComputeAsync(node, query, outer, row, views).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (!known[i])
+                    {
+                        once[i] = await ComputeAsync(node, query, outer, row, views).ConfigureAwait(false);
+                        known[i] = true;
+                    }
+
+                    extended[slot] = once[i];
+                }
+
+                yield return extended;
+            }
+        }
+    }
+
+    /// <summary>Gives a subquery its position in the row, and turns what it reads of the outer query into parameters.</summary>
+    private (SqlExpr Node, SelectStatement Query, List<int> Outer, int Slot) Prepare(SqlExpr node)
+    {
+        var query = node is Subquery subquery ? subquery.Query : ((InQuery)node).Query;
+        var own = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        Names(query, own);
+        var outer = new List<int>();
+        var rewritten = (SelectStatement)Procedures.SqlRewriter.Statement(query, column =>
+        {
+            // A column belongs to the outer query when it names a table the subquery does not have and the outer one does.
+            if (column.Table is null || own.Contains(column.Table) || Find(column) is not { } position)
+            {
+                return null;
+            }
+
+            if (!outer.Contains(position))
+            {
+                outer.Add(position);
+            }
+
+            return new Parameter(OuterName(position));
+        });
+
+        // EXISTS only asks whether there is a row: one is enough.
+        if (node is Subquery { Exists: true } && rewritten.Limit is null && rewritten.GroupBy.Count == 0
+            && !rewritten.Items.Any(static item => Binder.HasAggregate(item.Expression)))
+        {
+            rewritten = rewritten with { Limit = new Literal(1L) };
+        }
+
+        var slot = _width++;
+        _slots[node] = slot;
+        return (node, rewritten, outer, slot);
+    }
+
+    private async ValueTask<object?> ComputeAsync(SqlExpr node, SelectStatement query, List<int> outer, object?[] row, IReadOnlyList<string> views)
+    {
+        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var (name, value) in parameters.Values)
+        {
+            values[name] = value;
+        }
+
+        foreach (var position in outer)
+        {
+            values[OuterName(position)] = row[position];
+        }
+
+        var result = await new SelectRunner(transaction, new StatementContext(values, parameters.Routines), cancellationToken)
+            .RunAsync(query, null, views).ConfigureAwait(false);
+        if (node is Subquery { Exists: true })
+        {
+            return result.Rows.Count > 0;
+        }
+
+        if (result.Names.Length != 1)
+        {
+            throw new TkSqlException($"A subquery used as a value must return one column; this one returns {result.Names.Length}.");
+        }
+
+        if (node is InQuery)
+        {
+            return result.Rows.Select(static found => found[0]).ToArray();
+        }
+
+        return result.Rows.Count switch
+        {
+            0 => null,
+            1 => result.Rows[0][0],
+            _ => throw new TkSqlException($"A subquery used as a value must return at most one row; this one returned {result.Rows.Count}."),
+        };
+    }
+
+    /// <summary>How an expression that is a subquery is evaluated: by reading the position its result was left in.</summary>
+    private Evaluator? Special(SqlExpr expression)
+    {
+        if (!_slots.TryGetValue(expression, out var slot))
+        {
+            return null;
+        }
+
+        if (expression is not InQuery inQuery)
+        {
+            return row => row[slot];
+        }
+
+        var operand = Binder.Bind(inQuery.Operand, Resolve, parameters, Special);
+        var negated = inQuery.Negated;
+        return row =>
+        {
+            if (operand(row) is not { } needle)
+            {
+                return null;
+            }
+
+            var unknown = false;
+            foreach (var candidate in (object?[])row[slot]!)
+            {
+                if (candidate is null)
+                {
+                    unknown = true;
+                }
+                else if (Binder.Compare(needle, candidate) == 0)
+                {
+                    return !negated;
+                }
+            }
+
+            // Not found among values of which one is unknown: it cannot be said that it is not there.
+            return unknown ? null : negated;
+        };
+    }
+
+    private static string OuterName(int position) => string.Create(CultureInfo.InvariantCulture, $"\u0001outer{position}");
+
+    private int? Find(ColumnRef column)
+    {
+        try
+        {
+            return Resolve(column);
+        }
+        catch (TkSqlException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The subqueries of an expression, not counting those inside other subqueries.</summary>
+    private static void Subqueries(SqlExpr? expression, List<SqlExpr> found)
+    {
+        switch (expression)
+        {
+            case Subquery:
+                found.Add(expression);
+                break;
+            case InQuery inQuery:
+                found.Add(expression);
+                Subqueries(inQuery.Operand, found);
+                break;
+            case Binary binary:
+                Subqueries(binary.Left, found);
+                Subqueries(binary.Right, found);
+                break;
+            case Unary unary:
+                Subqueries(unary.Operand, found);
+                break;
+            case IsNull isNull:
+                Subqueries(isNull.Operand, found);
+                break;
+            case InList list:
+                Subqueries(list.Operand, found);
+                list.Items.ToList().ForEach(item => Subqueries(item, found));
+                break;
+            case Between between:
+                Subqueries(between.Operand, found);
+                Subqueries(between.Low, found);
+                Subqueries(between.High, found);
+                break;
+            case Like like:
+                Subqueries(like.Operand, found);
+                Subqueries(like.Pattern, found);
+                break;
+            case Call call:
+                call.Arguments.ToList().ForEach(argument => Subqueries(argument, found));
+                break;
+            case Case choice:
+                foreach (var (when, then) in choice.Branches)
+                {
+                    Subqueries(when, found);
+                    Subqueries(then, found);
+                }
+
+                Subqueries(choice.Otherwise, found);
+                break;
+            default:
+                break;
+        }
+    }
+
+    /// <summary>The names a query, and the queries inside it, give to their own tables.</summary>
+    private static void Names(SelectStatement query, HashSet<string> names)
+    {
+        foreach (var table in (query.From is null ? [] : new[] { query.From }).Concat(query.Joins.Select(static join => join.Table)))
+        {
+            names.Add(table.Alias);
+            names.Add(table.Name);
+            if (table.Query is not null)
+            {
+                Names(table.Query, names);
+            }
+        }
+
+        var inside = new List<SqlExpr>();
+        foreach (var expression in query.Items.Select(static item => item.Expression)
+            .Append(query.Where).Append(query.Having)
+            .Concat(query.Joins.Select(static join => join.On))
+            .Concat(query.GroupBy)
+            .Concat(query.OrderBy.Select(static item => item.Expression)))
+        {
+            Subqueries(expression, inside);
+        }
+
+        foreach (var nested in inside)
+        {
+            Names(nested is Subquery subquery ? subquery.Query : ((InQuery)nested).Query, names);
+        }
+    }
+
     private static string Show(SqlExpr expression) => expression switch
     {
+        Subquery { Exists: true } => "EXISTS (subquery)",
+        Subquery => "(subquery)",
+        InQuery inQuery => $"{Show(inQuery.Operand)} {(inQuery.Negated ? "NOT " : string.Empty)}IN (subquery)",
+        Case => "CASE … END",
         Literal literal => SqlValues.Show(literal.Value),
         Parameter parameter => $"@{parameter.Name}",
         ColumnRef column => column.Table is null ? column.Name : $"{column.Table}.{column.Name}",
@@ -369,6 +655,16 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
         }
 
         var offset = _sources.Sum(static source => source.Columns.Length);
+        if (reference.Query is { } derived)
+        {
+            // A query in the place of a table: run whole, and read like a table.
+            var inside = new PlanNode($"Query {reference.Alias}", null);
+            var result = await new SelectRunner(transaction, parameters, cancellationToken).RunAsync(derived, inside, views).ConfigureAwait(false);
+            inside.Actual = result.Rows.Count;
+            _sources.Add(new Source(reference.Alias, reference.Alias, result.Names, result.Rows, inside) { Offset = offset });
+            return;
+        }
+
         if (await SqlTable.OpenAsync(transaction, reference.Name, cancellationToken).ConfigureAwait(false) is { } table)
         {
             _sources.Add(new Source(reference.Alias, table) { Offset = offset });
@@ -591,7 +887,7 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
 
     /// <summary>Joins the rows so far with one more source, by the conditions of its ON.</summary>
     private async ValueTask<(IAsyncEnumerable<object?[]> Rows, PlanNode Node)> JoinAsync(
-        IAsyncEnumerable<object?[]> left, PlanNode leftNode, int index, SqlExpr on)
+        IAsyncEnumerable<object?[]> left, PlanNode leftNode, int index, SqlExpr on, bool keepUnmatched)
     {
         var source = _sources[index];
         var condition = Binder.Bind(on, Resolve, parameters, null);
@@ -669,15 +965,24 @@ internal sealed class SelectRunner(TkTransaction transaction, StatementContext p
         {
             await foreach (var row in left.ConfigureAwait(false))
             {
+                var matched = false;
                 await foreach (var match in matches(row).ConfigureAwait(false))
                 {
                     var combined = (object?[])row.Clone();
                     match.CopyTo(combined, source.Offset);
                     if (Binder.Truth(condition(combined)) == true)
                     {
+                        matched = true;
                         node.Actual++;
                         yield return combined;
                     }
+                }
+
+                // LEFT JOIN: a row with nothing to match stays, with NULLs in the columns of this source.
+                if (keepUnmatched && !matched)
+                {
+                    node.Actual++;
+                    yield return (object?[])row.Clone();
                 }
             }
         }

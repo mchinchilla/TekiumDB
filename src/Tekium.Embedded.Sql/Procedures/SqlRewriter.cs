@@ -23,18 +23,31 @@ internal static class SqlRewriter
         },
         Like like => like with { Operand = Expression(like.Operand, replace), Pattern = Expression(like.Pattern, replace) },
         Call call => call with { Arguments = [.. call.Arguments.Select(argument => Expression(argument, replace))] },
+        Case choice => choice with
+        {
+            Branches = [.. choice.Branches.Select(branch => (Expression(branch.When, replace), Expression(branch.Then, replace)))],
+            Otherwise = choice.Otherwise is null ? null : Expression(choice.Otherwise, replace),
+        },
+        Subquery subquery => subquery with { Query = (SelectStatement)Statement(subquery.Query, replace) },
+        InQuery inQuery => inQuery with { Operand = Expression(inQuery.Operand, replace), Query = (SelectStatement)Statement(inQuery.Query, replace) },
         _ => expression,
     };
 
     public static SqlStatement Statement(SqlStatement statement, Func<ColumnRef, SqlExpr?> replace)
     {
         SqlExpr? Maybe(SqlExpr? expression) => expression is null ? null : Expression(expression, replace);
+        IReadOnlyList<SelectItem>? Items(IReadOnlyList<SelectItem>? items) => items is null ? null : [.. items.Select(item => item with { Expression = Maybe(item.Expression) })];
         return statement switch
         {
             SelectStatement select => select with
             {
                 Items = [.. select.Items.Select(item => item with { Expression = Maybe(item.Expression) })],
-                Joins = [.. select.Joins.Select(join => join with { On = Expression(join.On, replace) })],
+                From = select.From is { Query: { } derived } first ? first with { Query = (SelectStatement)Statement(derived, replace) } : select.From,
+                Joins = [.. select.Joins.Select(join => join with
+                {
+                    On = Expression(join.On, replace),
+                    Table = join.Table.Query is { } joined ? join.Table with { Query = (SelectStatement)Statement(joined, replace) } : join.Table,
+                })],
                 Where = Maybe(select.Where),
                 GroupBy = [.. select.GroupBy.Select(key => Expression(key, replace))],
                 Having = Maybe(select.Having),
@@ -45,13 +58,15 @@ internal static class SqlRewriter
             InsertStatement insert => insert with
             {
                 Rows = [.. insert.Rows.Select(row => (IReadOnlyList<SqlExpr>)[.. row.Select(value => Expression(value, replace))])],
+                Returning = Items(insert.Returning),
             },
             UpdateStatement update => update with
             {
                 Set = [.. update.Set.Select(set => (set.Column, Expression(set.Value, replace)))],
                 Where = Maybe(update.Where),
+                Returning = Items(update.Returning),
             },
-            DeleteStatement delete => delete with { Where = Maybe(delete.Where) },
+            DeleteStatement delete => delete with { Where = Maybe(delete.Where), Returning = Items(delete.Returning) },
             _ => statement,
         };
     }
@@ -59,7 +74,8 @@ internal static class SqlRewriter
     /// <summary>The tables a statement names.</summary>
     public static IEnumerable<string> Tables(SqlStatement statement) => statement switch
     {
-        SelectStatement select => (select.From is null ? [] : new[] { select.From.Name }).Concat(select.Joins.Select(static join => join.Table.Name)),
+        SelectStatement select => (select.From is null ? [] : new[] { select.From }).Concat(select.Joins.Select(static join => join.Table))
+            .SelectMany(static table => table.Query is null ? [table.Name] : Tables(table.Query)),
         InsertStatement insert => [insert.Table],
         UpdateStatement update => [update.Table],
         DeleteStatement delete => [delete.Table],

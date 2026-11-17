@@ -291,12 +291,23 @@ internal sealed class SqlEngine
             rows.Add(row);
         }
 
+        // A whole-number key that was not given is the next after the highest in the table.
+        var keyColumn = table.Columns[table.KeyColumn];
+        if (keyColumn.Type is TkColumnType.I32 or TkColumnType.I64 && rows.Exists(row => row[table.KeyColumn] is null))
+        {
+            var next = await table.NextKeyAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var row in rows.Where(row => row[table.KeyColumn] is null))
+            {
+                row[table.KeyColumn] = SqlValues.Convert(next++, keyColumn.Type, keyColumn.Name);
+            }
+        }
+
         foreach (var row in rows)
         {
             await table.InsertAsync(row, cancellationToken).ConfigureAwait(false);
         }
 
-        return new SqlResult { RecordsAffected = rows.Count };
+        return Returned(table, rows, insert.Returning, parameters);
     }
 
     private static async ValueTask<SqlResult> UpdateAsync(
@@ -306,13 +317,15 @@ internal sealed class SqlEngine
         var runner = new SelectRunner(writer, parameters, cancellationToken);
 
         // Every row to change is found before any is changed: the search never sees its own writes.
-        var matching = await runner.MatchingAsync(table, update.Where).ConfigureAwait(false);
+        var matching = await runner.MatchingAsync(table, update.Where, update.Alias).ConfigureAwait(false);
         var assignments = update.Set.Select(set => (
             Column: table.Column(set.Column) is >= 0 and var at ? at : throw new TkSqlException($"Table '{table.Name}' has no column '{set.Column}'."),
             Value: Binder.Bind(set.Value, runner.Resolve, parameters, null))).ToArray();
+        var written = new List<object?[]>(matching.Count);
         foreach (var old in matching)
         {
             var row = (object?[])old.Clone();
+            written.Add(row);
             foreach (var (column, value) in assignments)
             {
                 row[column] = value(old) is { } computed ? SqlValues.Convert(computed, table.Columns[column].Type, table.Columns[column].Name) : null;
@@ -330,20 +343,47 @@ internal sealed class SqlEngine
             }
         }
 
-        return new SqlResult { RecordsAffected = matching.Count };
+        return Returned(table, written, update.Returning, parameters);
+    }
+
+    /// <summary>What a statement that writes gives back: how many rows, and what its RETURNING asks of each.</summary>
+    private static SqlResult Returned(SqlTable table, List<object?[]> rows, IReadOnlyList<SelectItem>? returning, StatementContext parameters)
+    {
+        if (returning is null)
+        {
+            return new SqlResult { RecordsAffected = rows.Count };
+        }
+
+        var items = returning.SelectMany(item => item.Star
+            ? table.Columns.Select(static column => new SelectItem(new ColumnRef(null, column.Name), column.Name, false, null))
+            : [item]).ToList();
+        var values = items.Select(item => Binder.Bind(
+            item.Expression!,
+            column => table.Column(column.Name) is >= 0 and var at ? at : throw new TkSqlException($"Table '{table.Name}' has no column '{column.Name}'."),
+            parameters,
+            null)).ToArray();
+        var returned = rows.Select(row => Array.ConvertAll(values, value => value(row))).ToList();
+        return new SqlResult
+        {
+            Names = [.. items.Select(static (item, i) => item.Alias ?? (item.Expression as ColumnRef)?.Name ?? $"column{i + 1}")],
+            Types = [.. items.Select((item, i) => returned.Select(row => row[i]).FirstOrDefault(static value => value is not null)?.GetType()
+                ?? (item.Expression is ColumnRef column ? SqlValues.ClrType(table.Columns[table.Column(column.Name)].Type) : typeof(object)))],
+            Rows = returned,
+            RecordsAffected = rows.Count,
+        };
     }
 
     private static async ValueTask<SqlResult> DeleteAsync(
         TkWriteTransaction writer, DeleteStatement delete, StatementContext parameters, CancellationToken cancellationToken)
     {
         var table = await TableAsync(writer, delete.Table, cancellationToken).ConfigureAwait(false);
-        var matching = await new SelectRunner(writer, parameters, cancellationToken).MatchingAsync(table, delete.Where).ConfigureAwait(false);
+        var matching = await new SelectRunner(writer, parameters, cancellationToken).MatchingAsync(table, delete.Where, delete.Alias).ConfigureAwait(false);
         foreach (var row in matching)
         {
             await table.DeleteAsync(row, cancellationToken).ConfigureAwait(false);
         }
 
-        return new SqlResult { RecordsAffected = matching.Count };
+        return Returned(table, matching, delete.Returning, parameters);
     }
 
     private static async ValueTask<SqlResult> CreateTableAsync(TkWriteTransaction writer, CreateTableStatement create, CancellationToken cancellationToken)

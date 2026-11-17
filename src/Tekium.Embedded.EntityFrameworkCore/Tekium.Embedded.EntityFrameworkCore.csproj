@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Tekium.Embedded.EntityFrameworkCore</RootNamespace>
+    <PackageId>Tekium.Embedded.EntityFrameworkCore</PackageId>
+    <Description>TekiumDB: proveedor de Entity Framework Core, sólo asíncrono.</Description>
+    <!-- EF Core construye sus consultas con reflexión y código generado en ejecución: este paquete, y sólo éste, no es compatible con Native AOT. -->
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Tekium.Embedded.Core\Tekium.Embedded.Core.csproj" />
+    <ProjectReference Include="..\Tekium.Embedded.Sql\Tekium.Embedded.Sql.csproj" />
+  </ItemGroup>
+
+</Project>

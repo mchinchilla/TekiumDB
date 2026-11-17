@@ -16,7 +16,7 @@ internal sealed partial class SqlParser
         "SELECT", "FROM", "WHERE", "GROUP", "BY", "HAVING", "ORDER", "LIMIT", "OFFSET", "INNER", "JOIN", "ON", "AS", "AND", "OR", "NOT",
         "IS", "NULL", "IN", "BETWEEN", "LIKE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "DROP", "TABLE", "INDEX",
         "VIEW", "UNIQUE", "PRIMARY", "KEY", "EXPLAIN", "DISTINCT", "ASC", "DESC", "TRUE", "FALSE", "IF", "EXISTS", "REPLACE", "LEFT", "RIGHT",
-        "OUTER", "CROSS", "UNION",
+        "OUTER", "CROSS", "UNION", "RETURNING", "CASE", "WHEN", "THEN", "ELSE", "END",
     };
 
     private readonly string _text;
@@ -245,7 +245,8 @@ internal sealed partial class SqlParser
         {
             Expect("FROM");
             var table = Name("a table name");
-            return new DeleteStatement(table, Accept("WHERE") ? Expression() : null);
+            var alias = Accept("AS") ? Name("an alias") : IsName() ? Name("an alias") : null;
+            return new DeleteStatement(table, Accept("WHERE") ? Expression() : null, Returning(), alias);
         }
 
         if (Accept("CREATE"))
@@ -324,12 +325,18 @@ internal sealed partial class SqlParser
             from = Table();
             while (true)
             {
-                if (Is("LEFT") || Is("RIGHT") || Is("CROSS") || Is("OUTER"))
+                if (Is("RIGHT") || Is("CROSS") || Is("OUTER"))
                 {
-                    throw Error("INNER JOIN (outer and cross joins are not supported)");
+                    throw Error("INNER JOIN or LEFT JOIN (right, full and cross joins are not supported)");
                 }
 
-                if (Accept("INNER"))
+                var left = Accept("LEFT");
+                if (left)
+                {
+                    Accept("OUTER");
+                    Expect("JOIN");
+                }
+                else if (Accept("INNER"))
                 {
                     Expect("JOIN");
                 }
@@ -340,7 +347,7 @@ internal sealed partial class SqlParser
 
                 var joined = Table();
                 Expect("ON");
-                joins.Add(new JoinClause(joined, Expression()));
+                joins.Add(new JoinClause(joined, Expression(), left));
             }
 
             if (Is(","))
@@ -392,9 +399,14 @@ internal sealed partial class SqlParser
 
     private TableRef Table()
     {
-        if (Is("("))
+        if (Accept("("))
         {
-            throw Error("a table or view name (a subquery in FROM is not supported: create a view)");
+            // A query in the place of a table: it needs a name to be referred to by.
+            var query = Select();
+            Expect(")");
+            Accept("AS");
+            var named = Name("an alias for the query in parentheses");
+            return new TableRef(named, named, query);
         }
 
         var name = Name("a table or view name");
@@ -433,12 +445,13 @@ internal sealed partial class SqlParser
             rows.Add(row);
         }
         while (Accept(","));
-        return new InsertStatement(table, columns, rows);
+        return new InsertStatement(table, columns, rows, Returning());
     }
 
     private UpdateStatement Update()
     {
         var table = Name("a table name");
+        var alias = Accept("AS") ? Name("an alias") : IsName() ? Name("an alias") : null;
         Expect("SET");
         var set = new List<(string, SqlExpr)>();
         do
@@ -448,7 +461,32 @@ internal sealed partial class SqlParser
             set.Add((column, Expression()));
         }
         while (Accept(","));
-        return new UpdateStatement(table, set, Accept("WHERE") ? Expression() : null);
+        return new UpdateStatement(table, set, Accept("WHERE") ? Expression() : null, Returning(), alias);
+    }
+
+    /// <summary>RETURNING: what to give back of each row an INSERT, UPDATE or DELETE writes.</summary>
+    private List<SelectItem>? Returning()
+    {
+        if (!Accept("RETURNING"))
+        {
+            return null;
+        }
+
+        var items = new List<SelectItem>();
+        do
+        {
+            if (Accept("*"))
+            {
+                items.Add(new SelectItem(null, null, true, null));
+            }
+            else
+            {
+                var expression = Expression();
+                items.Add(new SelectItem(expression, Accept("AS") ? Name("a name for the column") : IsName() ? Name("a name") : null, false, null));
+            }
+        }
+        while (Accept(","));
+        return items;
     }
 
     private SqlStatement Create()
@@ -719,7 +757,9 @@ internal sealed partial class SqlParser
             Expect("(");
             if (Is("SELECT"))
             {
-                throw Error("a list of values (a subquery is not supported)");
+                var query = Select();
+                Expect(")");
+                return new InQuery(left, query, negated);
             }
 
             var items = new List<SqlExpr>();
@@ -804,7 +844,9 @@ internal sealed partial class SqlParser
                 _position++;
                 if (Is("SELECT"))
                 {
-                    throw Error("an expression (a subquery is not supported)");
+                    var scalar = Select();
+                    Expect(")");
+                    return new Subquery(scalar, false);
                 }
 
                 var inner = Expression();
@@ -815,6 +857,33 @@ internal sealed partial class SqlParser
                 _position++;
                 var operand = Primary();
                 return operand is Literal { Value: { } number } && Storage.SqlValues.IsNumber(number) ? new Literal(Negate(number)) : new Unary("-", operand);
+
+            case Kind.Word when Is("EXISTS"):
+                _position++;
+                Expect("(");
+                var exists = Select();
+                Expect(")");
+                return new Subquery(exists, true);
+
+            case Kind.Word when Is("CASE"):
+                _position++;
+                var subject = Is("WHEN") ? null : Expression();
+                var branches = new List<(SqlExpr When, SqlExpr Then)>();
+                while (Accept("WHEN"))
+                {
+                    var when = Expression();
+                    Expect("THEN");
+                    branches.Add((subject is null ? when : new Binary("=", subject, when), Expression()));
+                }
+
+                if (branches.Count == 0)
+                {
+                    throw Error("WHEN");
+                }
+
+                var otherwise = Accept("ELSE") ? Expression() : null;
+                Expect("END");
+                return new Case(branches, otherwise);
 
             case Kind.Word when Is("NULL"):
                 _position++;
@@ -833,6 +902,16 @@ internal sealed partial class SqlParser
                 _position++;
                 if (token.Kind == Kind.Word && Accept("("))
                 {
+                    if (token.Text.Equals("CAST", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // CAST(value AS type): a function of the value and the name of the type.
+                        var value = Expression();
+                        Expect("AS");
+                        var type = ColumnType();
+                        Expect(")");
+                        return new Call("CAST", [value, new Literal(type.ToString())], false, false);
+                    }
+
                     return FunctionCall(token.Text);
                 }
 

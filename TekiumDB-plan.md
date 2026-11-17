@@ -672,7 +672,7 @@ Estrictamente secuenciales. Cada fase termina con su criterio de salida cumplido
 | 13 | Funciones y procedimientos en C# por generador de código | Un UDF escalar y uno vectorizado corren bajo PublishAot, sin reflexión ni Expression.Compile |
 | 14 | PL/Tk: parser, compilador a bytecode y máquina virtual | Un procedimiento con bucle y SQL embebido corre; el límite de instrucciones corta un bucle infinito |
 | 15 | Adaptadores de ecosistema: IDistributedCache, Data Protection, HealthChecks | Cada adaptador en su propio paquete; el núcleo no gana ni una dependencia nueva |
-| 16 | Proveedor de EF Core (separado de la 15 el 2026-11-17: necesita antes LEFT JOIN, subconsultas y ALTER TABLE en la capa SQL, y decidir qué hacer con las rutas síncronas de ADO.NET) | Por fijar al empezar la fase |
+| 16 | Proveedor de EF Core, sólo asíncrono (decidido el 2026-11-17: las APIs síncronas de EF lanzan). Antes, LEFT JOIN y subconsultas en la capa SQL | Sobre un modelo con entidades relacionadas, EnsureCreatedAsync, SaveChangesAsync (altas, cambios, bajas) y consultas con Where, OrderBy, Skip/Take, Include, Any, Count y First dan lo mismo que el proveedor de SQLite sobre los mismos datos; lo que EF pida y no exista falla diciendo qué. Sin migraciones |
 
 Las fases 0 a 4 son el riesgo real del proyecto. Si esas cuatro quedan sólidas, el resto es trabajo conocido.
 
