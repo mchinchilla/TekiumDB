@@ -250,6 +250,59 @@ public sealed class TekiumDb : IAsyncDisposable
     }
 
     /// <summary>
+    /// Starts reading the database as it was when a past transaction committed. Nothing that happened
+    /// afterwards is seen. If no commit has that id (a transaction that was rolled back, or a number
+    /// between two commits), the state is that of the last commit before it.
+    /// </summary>
+    /// <remarks>
+    /// Past states are kept only as far back as <see cref="DbOptions.ChangeRetention"/> says: that many
+    /// commits before the current one. While the transaction returned lives, the state it reads is not
+    /// let go of, however far the writer moves on: dispose it.
+    /// </remarks>
+    /// <param name="transactionId">
+    /// The transaction, as given by <see cref="TkWriteTransaction.TransactionId"/>,
+    /// <see cref="LastTransactionId"/> or the changes of <see cref="WatchAsync{T}"/>.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A read transaction over that state. <see cref="TkReadTransaction.TransactionId"/> says which commit it is.</returns>
+    /// <exception cref="TkStateUnavailableException">The state is older than the database keeps.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The transaction has not happened yet.</exception>
+    public async ValueTask<TkReadTransaction> AsOfAsync(ulong transactionId, CancellationToken cancellationToken = default)
+    {
+        var read = ReadTransaction.Begin(Pager);
+        try
+        {
+            var current = read.Id.Value;
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(transactionId, current);
+            if (transactionId == current)
+            {
+                return new TkReadTransaction(this, read);
+            }
+
+            // Each commit wrote down where the state before it was: the one in force at that transaction
+            // is the last of those at or before it.
+            var found = _retention == 0
+                ? default
+                : await HistoryStore.FindAsync(read, read.Root, transactionId, cancellationToken).ConfigureAwait(false);
+
+            // Held by itself, so that the writer may trim the history past it without taking its pages.
+            // The state from before the first commit is in the history too: the empty database.
+            if (!found.HasBasis || !Pager.TryRetain(found.BasisTransaction, out var pin))
+            {
+                throw new TkStateUnavailableException(
+                    $"The state as of transaction {transactionId} is no longer kept: the database keeps the last {_retention} commits before the current one (DbOptions.ChangeRetention).");
+            }
+
+            return new TkReadTransaction(this, read, found.Basis, found.BasisTransaction, pin);
+        }
+        catch
+        {
+            await read.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Checks the database as its last commit left it, while it stays open and in use: every page in use
     /// is read from the file and checked (its checksum, or its authentication tag if the database is
     /// encrypted), every tree is checked to be well formed, and the list of free pages is checked not to

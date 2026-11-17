@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 10.4 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Todavía no hay capa SQL ni LINQ ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 10.6 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Todavía no hay capa SQL ni LINQ ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -357,6 +357,21 @@ El recall depende de los datos: con vectores sin ninguna estructura es mucho má
 
 El índice no está atado a una tabla: quien escribe la fila escribe también su vector, en la misma transacción. Declararlo como columna (`[TkVector]`) y que la tabla lo mantenga sola todavía no existe.
 
+### Viaje en el tiempo
+
+Leer la base como estaba cuando confirmó una transacción pasada, hasta donde alcance el horizonte (`ChangeRetention`, el mismo del change feed; apagado por defecto):
+
+```csharp
+var db = await TekiumDb.OpenAsync(new DbOptions { Path = "app.tkdb", ChangeRetention = 100 });
+
+await using var past = await db.AsOfAsync(transactionId);
+var before = await orders.GetAsync(past, id);               // la fila como estaba entonces
+await foreach (var order in orders.QueryAsync(past, filter)) // consultas e índices, también
+    Compare(order);
+```
+
+El número de transacción lo dan `TkWriteTransaction.TransactionId`, `LastTransactionId` y los cambios del change feed. Más atrás del horizonte se lanza `TkStateUnavailableException`. Mientras `past` viva su estado no se suelta; al cerrarlo, su espacio vuelve a usarse. El archivo crece con el horizonte y ahí se queda. Detalle en [docs/benchmarks/fase-10.6.md](docs/benchmarks/fase-10.6.md).
+
 ### Backup en caliente
 
 Con la base abierta y en uso. La copia tiene exactamente lo que dejó el último commit al empezar; lo que se escriba mientras tanto no entra, y nada entra a medias.
@@ -502,7 +517,7 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 10 | Herramientas: `tkdb` para inspeccionar, reparar, cambiar la contraseña y compactar | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.md); Windows sin verificar |
 | 10.2 | Backup en caliente desde un snapshot fijado | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.2.md); Windows sin verificar |
 | 10.4 | `VerifyAsync` y contadores de diagnóstico por `Meter` | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.4.md); Windows sin verificar |
-| 10.6 | Viaje en el tiempo: abrir la base en una transacción pasada | Pendiente |
+| 10.6 | Viaje en el tiempo: leer la base como estaba en una transacción pasada | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.6.md); Windows sin verificar |
 | 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |
 | 13 – 14 | Funciones y procedimientos: C# por generador y PL/Tk | Pendiente |
 | 15 | Adaptadores: EF Core, `IDistributedCache`, Data Protection, HealthChecks | Pendiente |

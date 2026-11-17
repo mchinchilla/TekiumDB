@@ -361,6 +361,30 @@ static async Task<int> TypedRoundTripAsync()
                 }
             }
 
+            // Viaje en el tiempo: la base como estaba antes del último commit de esta sesión.
+            var present = database.LastTransactionId;
+            await using (var extra = await database.BeginWriteAsync())
+            {
+                await events.DeleteAsync(extra, second);
+                await extra.CommitAsync();
+            }
+
+            await using (var past = await database.AsOfAsync(present))
+            {
+                if (past.TransactionId != present || await events.GetAsync(past, second) is null || await events.GetAsync(second) is not null)
+                {
+                    await Console.Error.WriteLineAsync("Time travel failed: the past state does not hold the row deleted since.");
+                    return 1;
+                }
+            }
+
+            await using (var restore = await database.BeginWriteAsync())
+            {
+                await using var before = await database.AsOfAsync(present);
+                await events.InsertAsync(restore, (await events.GetAsync(before, second))!);
+                await restore.CommitAsync();
+            }
+
             var recent = await events.GetAsync(second);
             if (old is { Title: "written as version 1", Place: null, Cost: null, Mood: Mood.Calm, Weight: 0 }
                 && old.At == at

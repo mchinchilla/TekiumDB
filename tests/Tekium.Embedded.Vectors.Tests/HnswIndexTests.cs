@@ -763,6 +763,37 @@ public abstract class HnswIndexTests : IAsyncLifetime
         await AssertNoLeaksAsync(database);
     }
 
+    [Fact]
+    public async Task A_search_as_of_a_past_transaction_finds_what_the_index_held_then()
+    {
+        await using var database = await TekiumDb.OpenAsync(
+            _ => NewDevice(),
+            new DbOptions { InMemory = true, PageSize = 4096, CacheSizeMb = 16, ChangeRetention = 10, KeyDerivation = new Argon2Parameters(MemoryKiB: 64, Iterations: 1, Parallelism: 1) },
+            Ct);
+        var index = database.VectorIndex<int>("history", new VectorIndexOptions { Dimensions = 8, Metric = VectorMetric.Euclidean });
+        var vectors = VectorData.Clustered(900, 8, seed: 121);
+        await InsertAsync(database, index, vectors[..300]);
+        var then = database.LastTransactionId;
+        await InsertAsync(database, index, vectors[300..]);
+        await using (var writer = await database.BeginWriteAsync(Ct))
+        {
+            for (var i = 0; i < 300; i++)
+            {
+                await index.RemoveAsync(writer, i, Ct);
+            }
+
+            await writer.CommitAsync(Ct);
+        }
+
+        // Ahora ninguno de los primeros trescientos existe; entonces eran los únicos.
+        Assert.All(await index.SearchAsync(vectors[5], 20, cancellationToken: Ct), static hit => Assert.InRange(hit.Key, 300, 899));
+        await using var past = await database.AsOfAsync(then, Ct);
+        Assert.Equal(300, await index.CountAsync(past, Ct));
+        var hits = await index.SearchAsync(past, vectors[5], 20, cancellationToken: Ct);
+        Assert.Equal(5, hits[0].Key);
+        Assert.All(hits, static hit => Assert.InRange(hit.Key, 0, 299));
+    }
+
     private protected abstract TestDevice CreateDevice();
 
     private TestDevice NewDevice()

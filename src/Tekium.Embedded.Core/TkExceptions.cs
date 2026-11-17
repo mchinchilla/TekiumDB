@@ -170,3 +170,30 @@ public sealed class TkChangeFeedException : Exception
     {
     }
 }
+
+/// <summary>
+/// The state of the database as of a past transaction is no longer kept: it is older than the horizon
+/// set by <see cref="DbOptions.ChangeRetention"/>, and its pages may have been reused.
+/// </summary>
+public sealed class TkStateUnavailableException : Exception
+{
+    /// <summary>Initializes a new instance of the <see cref="TkStateUnavailableException"/> class.</summary>
+    public TkStateUnavailableException()
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="TkStateUnavailableException"/> class.</summary>
+    /// <param name="message">Which state, and why it is gone.</param>
+    public TkStateUnavailableException(string message)
+        : base(message)
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="TkStateUnavailableException"/> class.</summary>
+    /// <param name="message">Which state, and why it is gone.</param>
+    /// <param name="innerException">The cause.</param>
+    public TkStateUnavailableException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}

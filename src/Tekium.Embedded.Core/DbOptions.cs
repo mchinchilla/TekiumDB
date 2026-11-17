@@ -36,9 +36,10 @@ public sealed class DbOptions
     public int CompressionLevel { get; init; } = 3;
 
     /// <summary>
-    /// Gets how many past commits stay readable so that their changes can be watched with
-    /// <see cref="TekiumDb.WatchAsync{T}"/>, also after reopening. Zero, the default, keeps none and
-    /// turns the change feed off. The pages of those commits are not reused meanwhile: the file is larger.
+    /// Gets how many past commits stay readable, also after reopening: so that their changes can be
+    /// watched with <see cref="TekiumDb.WatchAsync{T}"/>, and so that the database can be read as it was
+    /// at any of them with <see cref="TekiumDb.AsOfAsync"/>. Zero, the default, keeps none: no change
+    /// feed and no past. The pages of those commits are not reused meanwhile: the file is larger.
     /// </summary>
     public int ChangeRetention { get; init; }
 
