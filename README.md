@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 10.6 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Todavía no hay capa SQL ni LINQ ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 11 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Hay también una capa LINQ. Todavía no hay capa SQL ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -170,6 +170,30 @@ var plan = await orders.ExplainAsync(recent);                  // IndexScan, "Cu
 | Índice parcial | `Where` nombra una propiedad `bool` cuyo cuerpo compara columnas con constantes unidas por `&&`. Sólo se usa cuando la consulta implica esa condición; si el motor no puede probarlo, lo ignora |
 | Cambios de índices | Declarar uno nuevo, cambiarlo o quitarlo no requiere migración: la primera escritura con el tipo nuevo lo construye, reconstruye o elimina. Hasta entonces las consultas recorren la tabla |
 | Límite | Los valores indexados de una fila más su clave no pueden pasar de 1/16 de página (512 bytes con páginas de 8 KiB): una fila que lo exceda se rechaza con `TkIndexKeyTooLargeException` |
+
+### Consultas con LINQ
+
+En su propio paquete, `Tekium.Embedded.Linq`. El predicado se traduce al mismo filtro que se escribiría con `Fields`, sin compilar nada en caliente, y funciona bajo Native AOT:
+
+```csharp
+using Tekium.Embedded.Linq;
+
+var recent = await orders
+    .Where(o => o.Customer == customerId && o.IssuedAt >= since && !o.Paid)
+    .Take(50)
+    .ToListAsync();
+
+await foreach (var order in orders.Where(o => o.Total > 1000m))
+    Process(order);
+```
+
+| | |
+| --- | --- |
+| Se puede | Comparar una propiedad guardada con un valor (`==`, `<`, `<=`, `>`, `>=`), unir con `&&`, preguntar por nulos, banderas `bool`, enumeraciones. El valor puede ser cualquier cosa que no dependa de la fila, y se calcula una vez |
+| No se puede | `||`, `!=`, métodos sobre una propiedad, comparar dos propiedades: `NotSupportedException` al construir la consulta, diciendo qué parte y por qué |
+| No compila | Ordenar, agrupar, unir: la consulta no es un `IQueryable` ni un `IAsyncEnumerable`, así que el compilador rechaza lo que el motor no hace, en vez de resolverlo en memoria sin avisar. Para hacerlo en memoria hay que pedirlo: `AsAsyncEnumerable()` |
+
+Detalle en [docs/benchmarks/fase-11.md](docs/benchmarks/fase-11.md).
 
 ### Fechas y series de tiempo
 
@@ -518,7 +542,8 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 10.2 | Backup en caliente desde un snapshot fijado | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.2.md); Windows sin verificar |
 | 10.4 | `VerifyAsync` y contadores de diagnóstico por `Meter` | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.4.md); Windows sin verificar |
 | 10.6 | Viaje en el tiempo: leer la base como estaba en una transacción pasada | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.6.md); Windows sin verificar |
-| 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |
+| 11 | Capa LINQ | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-11.md); Windows sin verificar |
+| 12 | Capa SQL con proveedor ADO.NET | Pendiente |
 | 13 – 14 | Funciones y procedimientos: C# por generador y PL/Tk | Pendiente |
 | 15 | Adaptadores: EF Core, `IDistributedCache`, Data Protection, HealthChecks | Pendiente |
 
@@ -558,6 +583,7 @@ src/
   Tekium.Embedded.Cli/           tkdb: herramienta de línea de comandos
   Tekium.Embedded.Core/          Núcleo del motor y API pública
   Tekium.Embedded.Generators/    Generador de código fuente: serializador, campos, índices y restricciones de cada [TkTable]
+  Tekium.Embedded.Linq/          Consultas con predicados de C#, traducidos a filtros del motor
   Tekium.Embedded.Vectors/       Búsqueda vectorial HNSW, en su propio paquete
 tests/
   Tekium.Embedded.Core.Tests/    Pruebas unitarias

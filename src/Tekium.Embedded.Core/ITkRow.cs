@@ -48,6 +48,14 @@ public interface ITkRow<TSelf>
     static virtual void WriteField(ref TkKeyWriter writer, TSelf row, int field) =>
         throw new NotSupportedException("This row type declares no fields to index or filter by.");
 
+    /// <summary>
+    /// Finds the field of a stored property, or of an indexed expression, by the name of the property.
+    /// The generator implements it with the fields of the nested <c>Fields</c> class: no reflection.
+    /// </summary>
+    /// <param name="name">The name of the property, as written in the row type.</param>
+    /// <returns>The field, or <see langword="null"/> if the row type stores no such property.</returns>
+    static virtual TkField<TSelf>? FindField(string name) => null;
+
     /// <summary>Gets the CHECK constraints declared on the type.</summary>
     static virtual ReadOnlySpan<TkCheck> Checks => default;
 

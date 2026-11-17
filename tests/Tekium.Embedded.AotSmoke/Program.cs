@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using Tekium.Embedded;
 using Tekium.Embedded.AotSmoke;
 using Tekium.Embedded.Indexing;
+using Tekium.Embedded.Linq;
 using Tekium.Embedded.Security;
 using Tekium.Embedded.Storage;
 using Tekium.Embedded.Transactions;
@@ -359,6 +360,26 @@ static async Task<int> TypedRoundTripAsync()
                     await Console.Error.WriteLineAsync($"Bulk load failed: {loaded} loaded, {counted} found by index.");
                     return 1;
                 }
+            }
+
+            // LINQ: un predicado de C# traducido sin compilar nada, con una variable capturada y una llamada del lado del valor.
+            var wanted = second;
+            var byLinq = await events.Where(e => e.Id == wanted && e.At >= at.AddMinutes(-1)).ToListAsync();
+            var refused = false;
+            try
+            {
+                _ = events.Where(e => e.Title != "nothing");
+            }
+            catch (NotSupportedException)
+            {
+                refused = true;
+            }
+
+            if (byLinq.Count != 1 || byLinq[0].Id != second || !refused
+                || await events.Where(e => e.Id == wanted).ExplainAsync() is not { Access: TkAccess.KeyLookup })
+            {
+                await Console.Error.WriteLineAsync($"LINQ failed: {byLinq.Count} rows, refused: {refused}.");
+                return 1;
             }
 
             // Viaje en el tiempo: la base como estaba antes del último commit de esta sesión.

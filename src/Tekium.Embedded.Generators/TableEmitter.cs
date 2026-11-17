@@ -175,6 +175,16 @@ internal static class TableEmitter
         source.AppendLine("    }");
         source.AppendLine("#pragma warning restore CS0108");
         source.AppendLine();
+        source.AppendLine($"    static {Root}TkField<{table.Name}>? {row}.FindField(string name) => name switch");
+        source.AppendLine("    {");
+        foreach (var field in fields)
+        {
+            source.AppendLine($"        \"{field.Property}\" => Fields.{field.Property},");
+        }
+
+        source.AppendLine("        _ => null,");
+        source.AppendLine("    };");
+        source.AppendLine();
 
         if (table.Computed.Count > 0)
         {
