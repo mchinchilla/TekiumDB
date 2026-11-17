@@ -532,6 +532,24 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
     }
 
     /// <summary>
+    /// Reads a committed page straight from the file into a buffer of its own, checked like any other,
+    /// without going through the cache: a backup reads every page once and must not push out of the
+    /// cache what the application is using. The caller holds a snapshot that keeps the page from being reused.
+    /// </summary>
+    internal async ValueTask<PageLease> ReadDirectAsync(PageNumber number, CancellationToken cancellationToken)
+    {
+        if (number.Value < FileHeader.MetaPages || number.Value >= Current.PageCount)
+        {
+            throw new InvalidDataException($"Page {number.Value} is referenced but is not part of the database.");
+        }
+
+        var buffer = GC.AllocateUninitializedArray<byte>(PageSize.Bytes);
+        await _device.ReadAsync(number.Value * (long)PageSize.Bytes, buffer, cancellationToken).ConfigureAwait(false);
+        _protector.Unprotect(buffer, number);
+        return new PageLease(buffer);
+    }
+
+    /// <summary>
     /// A pager over a state chosen by the caller, for reading only: nothing is checked on the way in and
     /// the free-list is not loaded, so it can be built over a file the engine would refuse to open.
     /// Whatever is damaged shows when the page is read.

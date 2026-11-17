@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 10 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Todavía no hay capa SQL ni LINQ ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 10.2 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Todavía no hay capa SQL ni LINQ ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -357,6 +357,20 @@ El recall depende de los datos: con vectores sin ninguna estructura es mucho má
 
 El índice no está atado a una tabla: quien escribe la fila escribe también su vector, en la misma transacción. Declararlo como columna (`[TkVector]`) y que la tabla lo mantenga sola todavía no existe.
 
+### Backup en caliente
+
+Con la base abierta y en uso. La copia tiene exactamente lo que dejó el último commit al empezar; lo que se escriba mientras tanto no entra, y nada entra a medias.
+
+```csharp
+var report = await db.BackupAsync("respaldo.tkdb");
+Console.WriteLine($"Respaldado hasta la transacción {report.TransactionId}");
+
+// Una base cifrada no se respalda sin cifrar por omisión:
+await db.BackupAsync("respaldo.tkdb", new TkBackupOptions { Password = backupPassword });
+```
+
+No bloquea al escritor ni desaloja la caché (lee el archivo directamente). Medido sobre un millón de filas, con backups corriendo uno tras otro: la mediana del commit durable no cambia (13,0 ms contra 13,1 ms sin backup), el p95 sube de 16 a 19 ms porque comparten el disco, y cada backup tarda 0,35 s. Mientras corre, las páginas del estado que copia no se reutilizan, así que una base con mucha escritura puede crecer durante un backup largo. Detalle en [docs/benchmarks/fase-10.2.md](docs/benchmarks/fase-10.2.md).
+
 ### Herramientas
 
 `tkdb` es una herramienta de línea de comandos para archivos `.tkdb` cerrados. Ninguno de sus comandos cambia el archivo que recibe, salvo `passwd`.
@@ -464,7 +478,8 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 8 | Índice UUID v7 | Hecho en macOS y Linux, [medido](docs/benchmarks/fase-8.md): criterio cumplido con hasta decenas de UUID por milisegundo (96–99 % de ocupación); no con cientos por milisegundo creados en un bucle (68 %); Windows sin verificar |
 | 9 | Índice vectorial HNSW | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-9.md) (recall@10 de 0,98 sobre un millón de vectores con estructura); Windows sin verificar |
 | 10 | Herramientas: `tkdb` para inspeccionar, reparar, cambiar la contraseña y compactar | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.md); Windows sin verificar |
-| 10.2 – 10.6 | Backup en caliente, verificación con contadores de diagnóstico y viaje en el tiempo | Pendiente |
+| 10.2 | Backup en caliente desde un snapshot fijado | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.2.md); Windows sin verificar |
+| 10.4 – 10.6 | Verificación con contadores de diagnóstico y viaje en el tiempo | Pendiente |
 | 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |
 | 13 – 14 | Funciones y procedimientos: C# por generador y PL/Tk | Pendiente |
 | 15 | Adaptadores: EF Core, `IDistributedCache`, Data Protection, HealthChecks | Pendiente |

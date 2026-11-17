@@ -708,6 +708,56 @@ public abstract class HnswIndexTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task A_hot_backup_takes_the_vector_index_as_it_was_when_it_started()
+    {
+        await using var database = await OpenAsync(NewDevice(), cacheMb: 16);
+        var options = new VectorIndexOptions { Dimensions = 16, Metric = VectorMetric.Euclidean };
+        var index = database.VectorIndex<int>("live", options);
+        var vectors = VectorData.Clustered(1200, 16, seed: 111);
+        await InsertAsync(database, index, vectors[..600]);
+        var expected = new List<int[]>();
+        foreach (var query in vectors[..15])
+        {
+            expected.Add([.. (await index.SearchAsync(query, 5, cancellationToken: Ct)).Select(static hit => hit.Key)]);
+        }
+
+        // Con el estado ya fijado, el índice sigue creciendo y pierde vectores.
+        var target = NewDevice();
+        var report = await database.BackupAsync(
+            _ => target,
+            null,
+            async () =>
+            {
+                await using var writer = await database.BeginWriteAsync(Ct);
+                for (var i = 600; i < 1200; i++)
+                {
+                    await index.UpsertAsync(writer, i, vectors[i], Ct);
+                }
+
+                for (var i = 0; i < 300; i++)
+                {
+                    await index.RemoveAsync(writer, i, Ct);
+                }
+
+                await writer.CommitAsync(Ct);
+            },
+            Ct);
+
+        Assert.True(report.TransactionId < database.LastTransactionId);
+        await using var copy = await OpenAsync(target);
+        var copied = copy.VectorIndex<int>("live", options);
+        await using var read = copy.BeginRead();
+        Assert.Equal(600, await copied.CountAsync(read, Ct));
+        for (var i = 0; i < expected.Count; i++)
+        {
+            Assert.Equal(expected[i], (await copied.SearchAsync(vectors[i], 5, cancellationToken: Ct)).Select(static hit => hit.Key));
+        }
+
+        await AssertNoLeaksAsync(copy);
+        await AssertNoLeaksAsync(database);
+    }
+
     private protected abstract TestDevice CreateDevice();
 
     private TestDevice NewDevice()

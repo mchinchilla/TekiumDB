@@ -11,7 +11,7 @@ namespace Tekium.Embedded.Maintenance;
 /// should, is noted and skipped with everything that hangs from it; the walk goes on. Nothing is trusted:
 /// every page number is checked before it is followed and every page is checked when it is read.
 /// </summary>
-internal sealed class TreeWalker(Pager pager, long pageCount, List<TkFinding> findings, CancellationToken cancellationToken)
+internal sealed class TreeWalker(IPageSource pager, long pageCount, List<TkFinding> findings, CancellationToken cancellationToken)
 {
     private const int MaxDepth = 16;
     private const int OverflowHeaderSize = 4;

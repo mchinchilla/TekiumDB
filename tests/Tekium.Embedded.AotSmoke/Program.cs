@@ -76,6 +76,20 @@ static async Task<int> MaintenanceAsync()
             }
         }
 
+        // Backup en caliente: con la base abierta, a un archivo con su propia contraseña.
+        var backup = Path.Combine(directory, "backup.tkdb");
+        database = await TekiumDb.OpenAsync(new DbOptions { Path = source, Password = "aot tools password".AsMemory(), CacheSizeMb = 8 });
+        await using (database)
+        {
+            var taken = await database.BackupAsync(backup, new TkBackupOptions { Password = "aot backup password".AsMemory() });
+            var copied = await TkInspector.InspectAsync(backup, "aot backup password".AsMemory());
+            if (taken.TransactionId != database.LastTransactionId || !copied.IsHealthy || copied.Trees.Count != 5)
+            {
+                await Console.Error.WriteLineAsync($"Backup failed: transaction {taken.TransactionId}, {copied.Findings.Count} findings.");
+                return 1;
+            }
+        }
+
         var password = new TkCopyOptions { Password = "aot tools password".AsMemory(), NewPassword = ReadOnlyMemory<char>.Empty };
         var healthy = await TkInspector.InspectAsync(source, "aot tools password".AsMemory());
         var compacted = Path.Combine(directory, "compacted.tkdb");

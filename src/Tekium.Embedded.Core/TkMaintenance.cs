@@ -93,34 +93,56 @@ public static class TkMaintenance
             }
 
             ThrowIfDamaged(file.Findings, salvage);
-            var database = await TekiumDb.OpenAsync(
-                destination,
-                new DbOptions
-                {
-                    PageSize = pageSize.Bytes,
-                    Password = options.NewPassword ?? options.Password,
-                    Compression = file.IsCompressed,
-                },
-                cancellationToken).ConfigureAwait(false);
-            await using (database.ConfigureAwait(false))
+            var (entries, bytes, dropped) = await CopyTreesAsync(
+                pager, current.Root, file.ReadablePages, pageSize, file.IsCompressed, file.Findings, destination,
+                options.NewPassword ?? options.Password, salvage, null, cancellationToken).ConfigureAwait(false);
+            return new TkCopyReport
             {
-                var writer = await database.BeginWriteAsync(cancellationToken).ConfigureAwait(false);
-                await using (writer.ConfigureAwait(false))
-                {
-                    var copier = new DatabaseCopier(database, writer.Inner, salvage, cancellationToken);
-                    var walker = new TreeWalker(pager, file.ReadablePages, file.Findings, cancellationToken);
-                    await DatabaseWalk.TreesAsync(walker, current.Root, file.Findings, [], copier).ConfigureAwait(false);
-                    ThrowIfDamaged(file.Findings, salvage);
-                    await writer.CommitAsync(cancellationToken).ConfigureAwait(false);
-                    return new TkCopyReport
-                    {
-                        SourceBytes = file.FileLength,
-                        DestinationBytes = (long)database.Pager.Current.PageCount * pageSize.Bytes,
-                        EntriesCopied = copier.Entries,
-                        Dropped = copier.Dropped,
-                        Findings = file.Findings,
-                    };
-                }
+                SourceBytes = file.FileLength,
+                DestinationBytes = bytes,
+                EntriesCopied = entries,
+                Dropped = dropped,
+                Findings = file.Findings,
+            };
+        }
+    }
+
+    /// <summary>
+    /// Writes into a new database every tree reachable from <paramref name="catalogRoot"/>, read through
+    /// <paramref name="source"/>. Shared by compaction, repair and the backup of an open database.
+    /// </summary>
+    internal static async ValueTask<(long Entries, long Bytes, IReadOnlyList<string> Dropped)> CopyTreesAsync(
+        IPageSource source,
+        PageNumber catalogRoot,
+        long pageCount,
+        PageSize pageSize,
+        bool compressed,
+        List<TkFinding> findings,
+        Func<DbOptions, IStorageDevice> destination,
+        ReadOnlyMemory<char> password,
+        bool salvage,
+        Func<ValueTask>? beforeCopying,
+        CancellationToken cancellationToken)
+    {
+        var database = await TekiumDb.OpenAsync(
+            destination, new DbOptions { PageSize = pageSize.Bytes, Password = password, Compression = compressed }, cancellationToken)
+            .ConfigureAwait(false);
+        await using (database.ConfigureAwait(false))
+        {
+            if (beforeCopying is not null)
+            {
+                await beforeCopying().ConfigureAwait(false);
+            }
+
+            var writer = await database.BeginWriteAsync(cancellationToken).ConfigureAwait(false);
+            await using (writer.ConfigureAwait(false))
+            {
+                var copier = new DatabaseCopier(database, writer.Inner, salvage, cancellationToken);
+                var walker = new TreeWalker(source, pageCount, findings, cancellationToken);
+                await DatabaseWalk.TreesAsync(walker, catalogRoot, findings, [], copier).ConfigureAwait(false);
+                ThrowIfDamaged(findings, salvage);
+                await writer.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return (copier.Entries, (long)database.Pager.Current.PageCount * pageSize.Bytes, copier.Dropped);
             }
         }
     }
@@ -157,7 +179,7 @@ public static class TkMaintenance
     {
         if (!salvage && findings.Find(static finding => finding.Severity == TkSeverity.Error) is { } damage)
         {
-            throw new InvalidDataException($"The database is damaged and was not compacted: {damage.Message} Repair it instead.");
+            throw new InvalidDataException($"The database is damaged and was not copied: {damage.Message} Repair it instead.");
         }
     }
 }

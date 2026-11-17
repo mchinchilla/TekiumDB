@@ -194,6 +194,75 @@ public sealed class TekiumDb : IAsyncDisposable
     public ValueTask ChangePasswordAsync(ReadOnlyMemory<char> newPassword, CancellationToken cancellationToken = default) =>
         Pager.ChangePasswordAsync(newPassword.Span, cancellationToken);
 
+    /// <summary>
+    /// Writes a copy of the database as it is at this moment, while it stays open and in use. The copy
+    /// holds exactly what the last commit left: whatever is written while the backup runs is not in it,
+    /// and nothing is ever half in it. Writers are not blocked and readers are not slowed: the backup
+    /// reads the file directly, past the cache.
+    /// </summary>
+    /// <remarks>
+    /// While it runs, the pages of the state being copied are not reused, so a database under heavy
+    /// writing grows for as long as the backup takes. The copy is compact (every page full, none free),
+    /// has a file key of its own and does not carry the retained history of changes.
+    /// </remarks>
+    /// <param name="destination">The file to create. It must not exist.</param>
+    /// <param name="options">The password of the copy, if any.</param>
+    /// <param name="cancellationToken">Cancels the backup. The destination is removed.</param>
+    /// <returns>What was copied, and as of which transaction.</returns>
+    /// <exception cref="ArgumentException">The database is encrypted and the options do not say how to protect the copy.</exception>
+    /// <exception cref="InvalidDataException">A damaged page was found: there is no backup.</exception>
+    public async ValueTask<TkBackupReport> BackupAsync(
+        string destination, TkBackupOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(destination);
+        var created = false;
+        try
+        {
+            return await BackupAsync(
+                _ =>
+                {
+                    var device = FileStorageDevice.Open(destination, FileMode.CreateNew);
+                    created = true;
+                    return device;
+                },
+                options,
+                null,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch when (created)
+        {
+            // A backup that did not finish is not left behind to be mistaken for one that did.
+            File.Delete(destination);
+            throw;
+        }
+    }
+
+    /// <summary>Backs up onto the device <paramref name="destination"/> returns. <paramref name="afterSnapshot"/> runs once the state to copy is fixed.</summary>
+    internal async ValueTask<TkBackupReport> BackupAsync(
+        Func<DbOptions, IStorageDevice> destination, TkBackupOptions? options, Func<ValueTask>? afterSnapshot, CancellationToken cancellationToken)
+    {
+        options ??= new TkBackupOptions();
+        if (options.Unencrypted ? !options.Password.IsEmpty : IsEncrypted && options.Password.IsEmpty)
+        {
+            throw new ArgumentException(
+                options.Unencrypted
+                    ? "A backup cannot be both unencrypted and protected by a password."
+                    : "The database is encrypted: give the backup a password, or say explicitly that it is to be left unencrypted.",
+                nameof(options));
+        }
+
+        // The snapshot keeps every page of this state from being reused until the copy is done.
+        var snapshot = ReadTransaction.Begin(Pager);
+        await using (snapshot.ConfigureAwait(false))
+        {
+            var transaction = snapshot.Id.Value;
+            var (entries, bytes, _) = await TkMaintenance.CopyTreesAsync(
+                new Maintenance.DirectPageSource(Pager), snapshot.Root, Pager.Current.PageCount, Pager.PageSize, IsCompressed, [], destination,
+                options.Password, salvage: false, afterSnapshot, cancellationToken).ConfigureAwait(false);
+            return new TkBackupReport { TransactionId = transaction, EntriesCopied = entries, Bytes = bytes };
+        }
+    }
+
     /// <summary>Closes the database.</summary>
     /// <returns>A task that completes when the file is closed.</returns>
     public ValueTask DisposeAsync() => Pager.DisposeAsync();
