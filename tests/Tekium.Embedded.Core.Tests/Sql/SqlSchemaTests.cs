@@ -162,6 +162,14 @@ public abstract class SqlSchemaTests : DatabaseTests
 
         Assert.Equal(["x"], await QueryAsync(connection, "SELECT name FROM tags"));
 
+        // Una clave de texto que es el comienzo de otra no es la otra: quitar 'ab' no pregunta por quien se refiere a 'abc'.
+        await RunAsync(connection, "INSERT INTO tags (name) VALUES ('ab'), ('abc')");
+        await RunAsync(connection, "INSERT INTO files (id, folder, tag) VALUES (950, 1, 'abc')");
+        Assert.Equal(1, await RunAsync(connection, "DELETE FROM tags WHERE name = 'ab'"));
+        await Assert.ThrowsAsync<TkConstraintException>(async () => await RunAsync(connection, "DELETE FROM tags WHERE name = 'abc'"));
+        Assert.Equal(1, await RunAsync(connection, "DELETE FROM files WHERE id = 950"));
+        Assert.Equal(1, await RunAsync(connection, "DELETE FROM tags WHERE name = 'abc'"));
+
         var folders = new Dictionary<int, int?> { [1] = null, [2] = 1 };
         var files = new Dictionary<long, (int Folder, string? Tag)> { [1] = (1, "x") };
         var tags = new HashSet<string> { "x" };
@@ -449,6 +457,17 @@ public abstract class SqlSchemaTests : DatabaseTests
         await using (var reader = database.BeginRead())
         {
             Assert.Equal(5, (await SqlTable.OpenAsync(reader, "players", Ct))!.Version);
+        }
+
+        // Única y sin valor en ninguna fila sí puede ser: los NULL no se repiten. Con un valor por omisión, no, y no queda nada.
+        await RunAsync(connection, "ALTER TABLE players ADD COLUMN Code TEXT UNIQUE");
+        Assert.Equal(1, await RunAsync(connection, "UPDATE players SET Code = 'c1' WHERE Id = 1"));
+        await Assert.ThrowsAsync<TkConstraintException>(async () => await RunAsync(connection, "UPDATE players SET Code = 'c1' WHERE Id = 2"));
+        await using (var transaction = await connection.BeginTransactionAsync(Ct))
+        {
+            await RefusedAsync<TkSqlException>(connection, "ALTER TABLE players ADD COLUMN Badge TEXT DEFAULT 'x' UNIQUE", "cannot be unique");
+            await RefusedAsync<TkSqlException>(connection, "SELECT Badge FROM players", "Badge");
+            await transaction.RollbackAsync(Ct);
         }
 
         // Una tabla tiene 255 versiones de esquema, y se dice cuando se acaban.

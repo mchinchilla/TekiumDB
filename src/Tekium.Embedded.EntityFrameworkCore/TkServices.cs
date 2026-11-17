@@ -213,11 +213,6 @@ public sealed class TkMigrationsSqlGenerator(MigrationsSqlGeneratorDependencies 
         IReadOnlyList<MigrationOperation> operations, IModel? model = null, MigrationsSqlGenerationOptions options = MigrationsSqlGenerationOptions.Default)
     {
         ArgumentNullException.ThrowIfNull(operations);
-        if (options.HasFlag(MigrationsSqlGenerationOptions.Idempotent))
-        {
-            throw new NotSupportedException("TekiumDB cannot run an idempotent script: its SQL has nothing to decide with. Apply migrations with Database.MigrateAsync().");
-        }
-
         // A foreign key is checked with an index that starts with its column, and makes one if there is none.
         // The ones declared with a table wait until the tables and the indexes of the migration are there:
         // they use the index EF creates for them, and may refer to a table created later.

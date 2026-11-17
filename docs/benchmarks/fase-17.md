@@ -1,6 +1,6 @@
 # Fase 17 — claves foráneas desde SQL y migraciones de EF Core
 
-**Criterio de salida cumplido en macOS; Linux está pendiente y las pruebas de mutación van por la mitad.** SQL crea y comprueba las mismas claves foráneas que la API tipada, y una cadena de migraciones de EF Core aplicada con `MigrateAsync` deja el mismo esquema, los mismos datos y el mismo historial que en SQLite. Windows no se ha verificado.
+**Criterio de salida cumplido en macOS y en Linux.** SQL crea y comprueba las mismas claves foráneas que la API tipada, y una cadena de migraciones de EF Core aplicada con `MigrateAsync` deja el mismo esquema, los mismos datos y el mismo historial que en SQLite. Windows no se ha verificado.
 
 Hecho el 2026-11-17. Esta fase no tiene criterio de rendimiento y no se midieron tiempos.
 
@@ -82,13 +82,31 @@ Sobre archivo y sobre memoria.
 
 ### Las pruebas detectan el código roto
 
-**En curso.** De 73 roturas preparadas se han corrido 39: 36 detectadas, una que sobrevive (buscar una clave de texto sin escapar en el índice de quien se refiere a ella) y dos cuya forma no compilaba. Faltan 34, repetir las dos, y decidir qué prueba pide la que sobrevive.
+Setenta y tres roturas hechas a mano, una por una. Sesenta y ocho se detectaron a la primera; para dos agregué pruebas; dos hubo que repetirlas porque la primera forma no compilaba; y una mostró código que sobraba, que quité.
+
+| Rotura | Detectada |
+| --- | --- |
+| Claves foráneas al escribir: no comprobar; no dejar que una fila se refiera a sí misma, o dejar que cualquiera pase por eso; dar por encontrada una clave imposible; no abortar la transacción | Sí |
+| Claves foráneas al borrar: no preguntar; que una fila que se refiere a sí misma no se pueda borrar, o que se borre una a la que otra de su tabla se refiere; buscar sin la marca de columna anulable; no abortar la transacción | Sí |
+| Al borrar: buscar una clave de texto sin escapar en el índice | No al principio: sólo se nota si una clave es el comienzo de otra. Se agregó ese caso (`'ab'` y `'abc'`) |
+| Usar un índice parcial para comprobar; escribir con SQL una tabla con `CHECK` | Sí |
+| Declarar: nombre por omisión con la columna como se tecleó; referirse a una columna que no es la clave; tipos distintos; dos restricciones con el mismo nombre; no comprobar las filas que hay; hacer siempre un índice, o tomar cualquiera; no avisar a la tabla referida; guardar mal si la columna admite NULL; ignorar las de `CREATE TABLE` | Sí |
+| Quitar: dejar la nota en la tabla referida; `IF EXISTS` al revés; quitar las otras | Sí |
+| Borrar el índice que una clave usa; borrar una tabla a la que otra se refiere; no poder borrar una que se refiere a sí misma; dejar anotada la tabla borrada | Sí (una repetida) |
+| `ADD COLUMN`: como clave primaria; repetida; la versión 256; `NOT NULL DEFAULT NULL`; no dar el valor a las filas; reescribir con un valor que es el cero; `NOT NULL` al revés; que el tipo de fila no vuelva a mirar las columnas; ignorar `UNIQUE`; cambiar una tabla que SQL no escribe | Sí (una repetida) |
+| `ADD COLUMN … UNIQUE`: agregar primero y fallar después | Sí |
+| `ADD COLUMN … UNIQUE`: rechazar la que no tiene valor y aceptar la que tiene valor por omisión | No al principio. Se agregaron los dos casos |
+| Analizador: aceptar `ON DELETE CASCADE` u `ON UPDATE SET NULL`; varias columnas; `REFERENCES` en `ADD COLUMN`; perder el signo del `DEFAULT`; no distinguir `DEFAULT NULL`; ignorar `IF EXISTS`; aceptar una expresión como `DEFAULT` | Sí |
+| Migraciones: no declarar las claves foráneas de un `CreateTable`, o declararlas antes de las tablas o de los índices; callar un valor por omisión o un `CHECK`; `NOT NULL` al revés; no escribir el valor por omisión ni la columna referida; aceptar varias columnas, un filtro o el orden descendente; restricción de unicidad como índice común; `DROP INDEX` sin su tabla | Sí |
+| Migraciones: que quitar una columna, cambiarla o renombrar una tabla no hagan nada y no digan nada | Sí |
+| Historial: decir siempre que existe, o que nunca; crearlo sin `IF NOT EXISTS`; dar un candado a la versión síncrona. `EnsureDeletedAsync`: dejar el historial; no quitar antes las claves foráneas | Sí |
+| Migraciones: escribir un script idempotente | No, y no hacía falta: el historial ya lo rechaza. La comprobación repetida en el generador se quitó |
 
 ## Verificación
 
 | Dónde | Qué | Resultado |
 | --- | --- | --- |
-| macOS (arm64) | `dotnet test -c Release` | 897 pasan, 3 explícitas omitidas (antes de agregar los últimos casos a las pruebas; las clases tocadas se volvieron a correr y pasan) |
+| macOS (arm64) | `dotnet test -c Release` | 897 pasan, 3 explícitas omitidas |
 | macOS (arm64) | Smoke de Native AOT | Pasa |
-| Linux (arm64, contenedor) | `scripts/test-linux.sh` | PENDIENTE |
+| Linux (arm64, contenedor) | `scripts/test-linux.sh`: build, las mismas pruebas y el smoke de AOT | 897 pasan, 3 omitidas; smoke pasa |
 | Windows | — | Sin verificar |
