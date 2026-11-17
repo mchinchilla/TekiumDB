@@ -1,6 +1,6 @@
 # Fase 18 — migraciones de EF Core que cambian columnas y nombres
 
-**Criterio de salida cumplido en macOS; las pruebas de mutación y Linux están pendientes.** Las operaciones que EF Core genera al renombrar una columna o una tabla, al cambiar el tipo o la nulabilidad de una propiedad y al quitarla se aplican con `MigrateAsync`. Dejan las mismas columnas, los mismos datos y el mismo historial que en SQLite, también hacia atrás. Lo que no cabe en las filas falla antes de tocar nada, y el costo en una tabla de un millón de filas está medido. Windows no se ha verificado.
+**Criterio de salida cumplido en macOS y en Linux.** Las operaciones que EF Core genera al renombrar una columna o una tabla, al cambiar el tipo o la nulabilidad de una propiedad y al quitarla se aplican con `MigrateAsync`. Dejan las mismas columnas, los mismos datos y el mismo historial que en SQLite, también hacia atrás. Lo que no cabe en las filas falla antes de tocar nada, y el costo en una tabla de un millón de filas está medido. Windows no se ha verificado.
 
 Hecho el 2026-11-17, después de que decidieras seguir con esto en vez de la cascada en el motor, los tipos nuevos o las mediciones.
 
@@ -100,7 +100,12 @@ Sobre archivo y sobre memoria.
 
 ### Las pruebas detectan el código roto
 
-**En curso.** De 56 roturas preparadas se han corrido 41, y 15 siguen sin correr: las de `StoredIndex.Redefine`, `ForgetAsync`, el analizador y el generador de migraciones.
+Cincuenta y seis roturas hechas a mano, una por una. Treinta y ocho se detectaron a la primera; para trece agregué pruebas; tres hubo que repetirlas porque la primera forma no compilaba; y dos no cambian ningún resultado.
+
+**Dos de las que sobrevivieron eran defectos reales**, y están corregidos:
+
+- **Renombrar una columna de la condición de un índice parcial** dejaba la condición con el nombre viejo, y la tabla quedaba de sólo lectura para SQL.
+- **`RENAME TO` con el mismo nombre borraba la tabla del catálogo**: ponía la entrada con el nombre nuevo y después borraba la vieja, que era la misma. Ahora no hace nada.
 
 | Rotura | Detectada |
 | --- | --- |
@@ -112,12 +117,18 @@ Sobre archivo y sobre memoria.
 | Que el escritor recuerde el nombre viejo; aceptar `ADD PRIMARY KEY` de otra columna | No al principio. Se agregaron los casos |
 | Ignorar el `DEFAULT` de `ALTER COLUMN`; ignorar el valor de relleno; no preguntar a los procedimientos | Sí (repetidas: la primera forma no compilaba) |
 | Reconstruir todos los índices | No, y no cambia ningún resultado: los que no cambian se reescriben con las mismas entradas. Sólo es trabajo de más |
+| Analizador: `DROP COLUMN` leído como `DROP CONSTRAINT`; perder el `NOT NULL` de `ALTER COLUMN`; tomar `TYPE` como el nombre del tipo | Sí |
+| `StoredIndex.Redefine`: no escribir el tipo ni la nulabilidad de un campo | Sí |
+| `StoredIndex.Redefine`: no renombrar la condición de un índice parcial | No, y era un defecto: tampoco lo hacía `RewriteAsync`. Corregido, con su caso |
+| `ForgetAsync`: no borrar los índices quitados antes en la transacción | No al principio. Se agregó quitar un índice y renombrar la tabla en la misma transacción |
+| Generador de migraciones: `DROP COLUMN` como otra cosa; escribir un `AlterColumn` que no cambia nada; `NULL` a `NOT NULL` sin valor; la nulabilidad al revés; rechazar el par de clave primaria de una tabla renombrada o callar uno suelto; el nombre del índice renombrado | Sí |
+| Generador de migraciones: escribir `RENAME TO` con el mismo nombre | No, y mostró el defecto de `RENAME TO` de arriba. Ya corregido en SQL, la sentencia no hace nada: no cambia ningún resultado |
 
 ## Verificación
 
 | Dónde | Qué | Resultado |
 | --- | --- | --- |
-| macOS (arm64) | `dotnet test -c Release` | 907 pasan, 3 explícitas omitidas |
+| macOS (arm64) | `dotnet test -c Release` | 909 pasan, 3 explícitas omitidas |
 | macOS (arm64) | Smoke de Native AOT | Pasa |
-| Linux (arm64, contenedor) | `scripts/test-linux.sh` | PENDIENTE |
+| Linux (arm64, contenedor) | `scripts/test-linux.sh`: build, las mismas pruebas y el smoke de AOT | 909 pasan, 3 omitidas; smoke pasa |
 | Windows | — | Sin verificar |

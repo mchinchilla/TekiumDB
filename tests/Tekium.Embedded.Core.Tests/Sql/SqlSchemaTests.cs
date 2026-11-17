@@ -782,6 +782,33 @@ public abstract class SqlSchemaTests : DatabaseTests
         Assert.Equal(["10", "20", "30", "40"], await QueryAsync(connection, "SELECT id FROM later ORDER BY id"));
         await RunAsync(connection, "ALTER TABLE later RENAME TO late");
 
+        // Renombrar a su propio nombre no hace nada; con otras mayúsculas, es otro nombre.
+        await RunAsync(connection, "ALTER TABLE late RENAME TO late");
+        Assert.Equal(["10", "20", "30", "40"], await QueryAsync(connection, "SELECT id FROM late ORDER BY id"));
+
+        // Un índice quitado antes de renombrar, en la misma transacción, no queda colgado del nombre viejo.
+        await RunAsync(connection, "CREATE INDEX by_b ON late (b)");
+        await using (var transaction = await connection.BeginTransactionAsync(Ct))
+        {
+            await RunAsync(connection, "DROP INDEX by_b ON late");
+            await RunAsync(connection, "ALTER TABLE late RENAME TO later");
+            await transaction.CommitAsync(Ct);
+        }
+
+        await using (var reader = database.BeginRead())
+        {
+            Assert.Empty(await CatalogStore.ReadAsync(reader.Source, reader.CatalogRoot, CatalogStore.IndexKey(CatalogStore.TableKey("late"), "by_b"), Ct));
+        }
+
+        await RunAsync(connection, "CREATE TABLE late (id INT PRIMARY KEY)");
+        await using (var reader = database.BeginRead())
+        {
+            Assert.Empty((await SqlTable.OpenAsync(reader, "late", Ct))!.Indexes);
+        }
+
+        await RunAsync(connection, "DROP TABLE late");
+        await RunAsync(connection, "ALTER TABLE later RENAME TO late");
+
         // Un cambio que no cambia nada no gasta una versión ni escribe filas.
         await using (var reader = database.BeginRead())
         {
@@ -815,6 +842,12 @@ public abstract class SqlSchemaTests : DatabaseTests
         await RefusedAsync<TkSqlException>(connection, "ALTER TABLE chores ALTER COLUMN Done BOOLEAN NULL", "partial index 'pending'");
         await RunAsync(connection, "ALTER TABLE chores ALTER COLUMN Due BIGINT");
         Assert.Equal(["1"], await QueryAsync(connection, "SELECT Id FROM chores WHERE Due = 3 AND NOT Done"));
+
+        // Renombrar la columna de la condición sí se puede: el índice parcial sigue siendo de SQL.
+        await RunAsync(connection, "ALTER TABLE chores RENAME COLUMN Done TO Finished");
+        Assert.Equal(1, await RunAsync(connection, "INSERT INTO chores (Id, Due, Finished, Title) VALUES (2, 3, FALSE, 'two')"));
+        Assert.Equal(["1", "2"], await QueryAsync(connection, "SELECT Id FROM chores WHERE Due = 3 AND NOT Finished ORDER BY Id"));
+        await RunAsync(connection, "ALTER TABLE chores RENAME COLUMN Finished TO Done");
 
         // Un tipo de fila que ya escribió en la transacción vuelve a mirar los índices después de una reescritura.
         await using (var writer = await database.BeginWriteAsync(Ct))

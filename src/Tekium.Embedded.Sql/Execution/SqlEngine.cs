@@ -658,7 +658,9 @@ internal sealed class SqlEngine
         var plans = new List<(StoredIndex Old, byte[] Definition, bool Rebuild)>();
         foreach (var index in table.Indexes)
         {
-            var uses = index.Columns.Where(static column => column >= 0).Select(column => table.Columns[column].Name).ToArray();
+            // The columns of the key and those of the conditions of a partial index: both name their column.
+            var uses = index.Columns.Concat(index.Where.Select(static condition => condition.Column)).Where(static column => column >= 0)
+                .Select(column => table.Columns[column].Name).Distinct(StringComparer.Ordinal).ToArray();
             if (!uses.Any(changed.ContainsKey))
             {
                 plans.Add((index, index.Definition, false));
@@ -811,6 +813,11 @@ internal sealed class SqlEngine
     /// </summary>
     private static async ValueTask RenameTableAsync(TkWriteTransaction writer, SqlTable table, string newName, CancellationToken cancellationToken)
     {
+        if (string.Equals(newName, table.Name, StringComparison.Ordinal))
+        {
+            return;
+        }
+
         if (await SqlTable.ResolveAsync(writer, newName, cancellationToken).ConfigureAwait(false) is { } taken && !string.Equals(taken, table.Name, StringComparison.Ordinal))
         {
             throw new TkSqlException($"There is already a table '{taken}'.");
