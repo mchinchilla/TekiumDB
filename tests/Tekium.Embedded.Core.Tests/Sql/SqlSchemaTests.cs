@@ -477,6 +477,7 @@ public abstract class SqlSchemaTests : DatabaseTests
         }
 
         await RefusedAsync<TkSqlException>(connection, "ALTER TABLE wide ADD COLUMN last INT", "all 255 schema versions");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE wide RENAME COLUMN c2 TO d2", "all 255 schema versions");
         Assert.True((await database.VerifyAsync(Ct)).IsHealthy);
         await AssertNoLeaksAsync(database);
     }
@@ -668,6 +669,25 @@ public abstract class SqlSchemaTests : DatabaseTests
         Assert.Equal("supporters", referred.Table);
         Assert.Equal("rival", (await Assert.ThrowsAsync<TkConstraintException>(async () => await RunAsync(connection, "DELETE FROM supporters WHERE id = 1"))).Constraint);
         await RefusedAsync<TkSqlException>(connection, "DROP TABLE clubs", "rows of 'supporters' refer to it");
+        Assert.Equal(1, await RunAsync(connection, "INSERT INTO supporters (id, team, rival, name) VALUES (4, 2, 1, 'dora')"));
+        Assert.Equal(1, await RunAsync(connection, "DELETE FROM supporters WHERE id = 4"));
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE supporters ALTER COLUMN team BIGINT", "FOREIGN KEY 'fk_team' is on it");
+
+        // Nada del nombre viejo queda en el catálogo.
+        await using (var reader = database.BeginRead())
+        {
+            foreach (var old in new[] { "teams", "fans" })
+            {
+                var key = CatalogStore.TableKey(old);
+                for (var version = 1; version <= 255; version++)
+                {
+                    Assert.Empty(await CatalogStore.ReadAsync(reader.Source, reader.CatalogRoot, CatalogStore.SchemaKey(key, (byte)version), Ct));
+                }
+
+                Assert.Empty(await CatalogStore.ReadAsync(reader.Source, reader.CatalogRoot, CatalogStore.ConstraintsKey(key), Ct));
+                Assert.Empty(await CatalogStore.ReadAsync(reader.Source, reader.CatalogRoot, CatalogStore.ReferrersKey(key), Ct));
+            }
+        }
 
         await RefusedAsync<TkSqlException>(connection, "ALTER INDEX by_title ON clubs RENAME TO by_title", "already has an index 'by_title'");
 
@@ -731,6 +751,97 @@ public abstract class SqlSchemaTests : DatabaseTests
         await RunAsync(connection, "DROP PROCEDURE close_orders");
         await RunAsync(connection, "ALTER TABLE orders RENAME TO sales");
         Assert.Empty(await QueryAsync(connection, "SELECT id FROM sales"));
+    }
+
+    [Fact]
+    public async Task What_a_rewrite_must_keep_the_key_the_foreign_keys_and_the_bindings_of_a_row_type()
+    {
+        await using var database = await OpenAsync(NewDevice());
+        await using var connection = new TkConnection(database);
+
+        // Una clave que no es la primera columna: quitar una de antes la mueve de lugar.
+        await RunAsync(connection, "CREATE TABLE late (a INT, id INT PRIMARY KEY, b TEXT)");
+        await RunAsync(connection, "INSERT INTO late (a, id, b) VALUES (1, 10, 'x'), (2, 20, 'y')");
+        await RunAsync(connection, "ALTER TABLE late DROP COLUMN a");
+        Assert.Equal(["20|y"], await QueryAsync(connection, "SELECT id, b FROM late WHERE id = 20"));
+        await Assert.ThrowsAsync<TkDuplicateKeyException>(async () => await RunAsync(connection, "INSERT INTO late (id, b) VALUES (10, 'again')"));
+        Assert.Equal(1, await RunAsync(connection, "INSERT INTO late (id, b) VALUES (30, 'z')"));
+        Assert.Equal(["10|x", "20|y", "30|z"], await QueryAsync(connection, "SELECT id, b FROM late ORDER BY id"));
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE late ADD PRIMARY KEY (b)", "does not change");
+        await RunAsync(connection, "ALTER TABLE late ADD PRIMARY KEY (id)");
+
+        // Una tabla cambiada y renombrada en la misma transacción no reaparece con el nombre viejo al confirmar.
+        await using (var transaction = await connection.BeginTransactionAsync(Ct))
+        {
+            await RunAsync(connection, "INSERT INTO late (id, b) VALUES (40, 'w')");
+            await RunAsync(connection, "ALTER TABLE late RENAME TO later");
+            await transaction.CommitAsync(Ct);
+        }
+
+        await RefusedAsync<TkSqlException>(connection, "SELECT id FROM late", "no table or view 'late'");
+        Assert.Equal(["10", "20", "30", "40"], await QueryAsync(connection, "SELECT id FROM later ORDER BY id"));
+        await RunAsync(connection, "ALTER TABLE later RENAME TO late");
+
+        // Un cambio que no cambia nada no gasta una versión ni escribe filas.
+        await using (var reader = database.BeginRead())
+        {
+            Assert.Equal(2, (await SqlTable.OpenAsync(reader, "late", Ct))!.Version);
+        }
+
+        await RunAsync(connection, "ALTER TABLE late ALTER COLUMN b TEXT");
+        await using (var reader = database.BeginRead())
+        {
+            Assert.Equal(2, (await SqlTable.OpenAsync(reader, "late", Ct))!.Version);
+        }
+
+        // Una clave foránea sobre una columna que deja de admitir NULL se sigue buscando bien al borrar.
+        await RunAsync(connection, "CREATE TABLE owners (id INT PRIMARY KEY)");
+        await RunAsync(connection, "CREATE TABLE pets (id INT PRIMARY KEY, owner INT REFERENCES owners)");
+        await RunAsync(connection, "INSERT INTO owners (id) VALUES (1), (2)");
+        await RunAsync(connection, "INSERT INTO pets (id, owner) VALUES (1, 1)");
+        await RunAsync(connection, "ALTER TABLE pets ALTER COLUMN owner INT NOT NULL");
+        Assert.Equal("fk_owner", (await Assert.ThrowsAsync<TkConstraintException>(async () => await RunAsync(connection, "DELETE FROM owners WHERE id = 1"))).Constraint);
+        await RunAsync(connection, "ALTER TABLE pets ALTER COLUMN owner INT NULL");
+        Assert.Equal("fk_owner", (await Assert.ThrowsAsync<TkConstraintException>(async () => await RunAsync(connection, "DELETE FROM owners WHERE id = 1"))).Constraint);
+        Assert.Equal(1, await RunAsync(connection, "DELETE FROM owners WHERE id = 2"));
+
+        // Un índice parcial está escrito para su columna como es: esa columna no cambia.
+        await using (var writer = await database.BeginWriteAsync(Ct))
+        {
+            await database.Table<Chore>().InsertAsync(writer, new Chore { Id = 1, Due = 3, Title = "one" }, Ct);
+            await writer.CommitAsync(Ct);
+        }
+
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE chores ALTER COLUMN Done BOOLEAN NULL", "partial index 'pending'");
+        await RunAsync(connection, "ALTER TABLE chores ALTER COLUMN Due BIGINT");
+        Assert.Equal(["1"], await QueryAsync(connection, "SELECT Id FROM chores WHERE Due = 3 AND NOT Done"));
+
+        // Un tipo de fila que ya escribió en la transacción vuelve a mirar los índices después de una reescritura.
+        await using (var writer = await database.BeginWriteAsync(Ct))
+        {
+            await database.Table<Team>().InsertAsync(writer, new Team { Id = 1, Name = "one" }, Ct);
+            await database.Table<Team>().InsertAsync(writer, new Team { Id = 2, Name = "two" }, Ct);
+
+            // SQL sólo ve una tabla que el tipo creó cuando ya está confirmada.
+            await database.Table<Player>().InsertAsync(writer, new Player { Id = 99, Name = "nobody's" }, Ct);
+            await writer.CommitAsync(Ct);
+        }
+
+        await using (var writer = await database.BeginWriteAsync(Ct))
+        {
+            var players = database.Table<Player>();
+            await players.InsertAsync(writer, new Player { Id = 100, Team = 2, Name = "first" }, Ct);
+            var sql = new TkContext(database, writer);
+            await sql.ExecuteAsync("ALTER TABLE players ALTER COLUMN Name TEXT NULL", cancellationToken: Ct);
+            await sql.ExecuteAsync("ALTER TABLE players ALTER COLUMN Name TEXT NOT NULL", cancellationToken: Ct);
+            await players.InsertAsync(writer, new Player { Id = 101, Team = 1, Name = "second" }, Ct);
+            await writer.CommitAsync(Ct);
+        }
+
+        Assert.Equal("fk_Team", (await Assert.ThrowsAsync<TkConstraintException>(async () => await RunAsync(connection, "DELETE FROM teams WHERE Id = 1"))).Constraint);
+        Assert.Equal(["101"], await QueryAsync(connection, "SELECT Id FROM players WHERE Team = 1"));
+        Assert.True((await database.VerifyAsync(Ct)).IsHealthy);
+        await AssertNoLeaksAsync(database);
     }
 }
 

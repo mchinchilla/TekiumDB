@@ -100,7 +100,18 @@ Sobre archivo y sobre memoria.
 
 ### Las pruebas detectan el código roto
 
-**En curso.** De 56 roturas preparadas se corrieron 30: 17 detectadas, 3 cuya forma no compilaba y 10 que sobreviven. Las que sobreviven: cambiar el tipo de una columna con clave foránea; cambiar una columna de la condición de un índice parcial; reescribir aunque nada cambie; pasar de la versión 255; no mover la posición de la clave al quitar una columna anterior; reconstruir todos los índices; que el tipo de fila no vuelva a mirar los índices; no actualizar la nulabilidad de una clave foránea; dejar las versiones de esquema viejas al renombrar; que la clave foránea de una tabla a sí misma conserve el nombre viejo. Cada una pide una prueba.
+**En curso.** De 56 roturas preparadas se han corrido 41, y 15 siguen sin correr: las de `StoredIndex.Redefine`, `ForgetAsync`, el analizador y el generador de migraciones.
+
+| Rotura | Detectada |
+| --- | --- |
+| Quitar la clave o una columna que un índice usa; no preguntar a vistas y procedimientos al quitar, renombrar una columna o renombrar la tabla; renombrar sobre otra columna; `ALTER COLUMN` sin `NULL` ni `NOT NULL` que deja la columna anulable; cambiar el tipo de la clave; no convertir; dejar un `NULL` en `NOT NULL`; no reconstruir un índice cuyo tipo cambia; saltarse la comprobación de unicidad; dejar las entradas viejas de un índice reconstruido o su definición vieja | Sí |
+| Renombrar sobre otra tabla o sobre una vista; dejar las entradas viejas de los índices; que las tablas de los dos lados de una clave foránea conserven el nombre viejo; renombrar un índice sobre otro, dejar su nombre viejo en el catálogo o en la clave foránea que lo usa | Sí |
+| Aceptar una conversión que pierde algo; no leer un número escrito como texto; dejar escapar el error de formato | Sí |
+| Cambiar el tipo de una columna con clave foránea; cambiar la columna de la condición de un índice parcial; reescribir aunque nada cambie; pasar de la versión 255; no mover la posición de la clave al quitar una columna anterior; no actualizar la nulabilidad de una clave foránea; dejar las versiones de esquema viejas al renombrar; que la clave foránea de una tabla a sí misma conserve el nombre viejo | No al principio. Se agregaron los casos |
+| Que el tipo de fila no vuelva a mirar los índices después de reescribir | No al principio: necesitaba una escritura tipada antes y otra después en la misma transacción. Se agregó |
+| Que el escritor recuerde el nombre viejo; aceptar `ADD PRIMARY KEY` de otra columna | No al principio. Se agregaron los casos |
+| Ignorar el `DEFAULT` de `ALTER COLUMN`; ignorar el valor de relleno; no preguntar a los procedimientos | Sí (repetidas: la primera forma no compilaba) |
+| Reconstruir todos los índices | No, y no cambia ningún resultado: los que no cambian se reescriben con las mismas entradas. Sólo es trabajo de más |
 
 ## Verificación
 
