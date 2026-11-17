@@ -15,7 +15,9 @@ internal sealed class HnswHeader
     public const uint NoNode = uint.MaxValue;
 
     private const byte Format = 1;
-    private const int DefinitionSize = 16;
+    private const byte Trees = 4;
+    private const int DefinitionOffset = 18;
+    private const int DefinitionSize = 14;
 
     public VectorMetric Metric { get; private init; }
 
@@ -67,48 +69,51 @@ internal sealed class HnswHeader
 
     public static HnswHeader Decode(ReadOnlySpan<byte> entry)
     {
-        if (entry.Length != Size || entry[0] != Format)
+        if (entry.Length != Size || entry[0] != Format || entry[1] != Trees)
         {
             throw new InvalidDataException("The catalog entry of a vector index is not one this version understands.");
         }
 
         return new HnswHeader
         {
-            Metric = (VectorMetric)entry[1],
-            Quantized = (entry[2] & 1) != 0,
-            M = entry[3],
-            Dimensions = BinaryPrimitives.ReadUInt16LittleEndian(entry[4..]),
-            QuantizationMin = BinaryPrimitives.ReadSingleLittleEndian(entry[8..]),
-            QuantizationMax = BinaryPrimitives.ReadSingleLittleEndian(entry[12..]),
-            NextId = BinaryPrimitives.ReadUInt32LittleEndian(entry[16..]),
-            Count = BinaryPrimitives.ReadUInt32LittleEndian(entry[20..]),
-            Entry = BinaryPrimitives.ReadUInt32LittleEndian(entry[24..]),
-            MaxLevel = entry[28],
-            Nodes = new PageNumber(BinaryPrimitives.ReadUInt32LittleEndian(entry[29..])),
-            Links = new PageNumber(BinaryPrimitives.ReadUInt32LittleEndian(entry[33..])),
-            Keys = new PageNumber(BinaryPrimitives.ReadUInt32LittleEndian(entry[37..])),
-            Exact = new PageNumber(BinaryPrimitives.ReadUInt32LittleEndian(entry[41..])),
+            Nodes = new PageNumber(BinaryPrimitives.ReadUInt32LittleEndian(entry[2..])),
+            Links = new PageNumber(BinaryPrimitives.ReadUInt32LittleEndian(entry[6..])),
+            Keys = new PageNumber(BinaryPrimitives.ReadUInt32LittleEndian(entry[10..])),
+            Exact = new PageNumber(BinaryPrimitives.ReadUInt32LittleEndian(entry[14..])),
+            Metric = (VectorMetric)entry[DefinitionOffset],
+            Quantized = (entry[DefinitionOffset + 1] & 1) != 0,
+            M = entry[DefinitionOffset + 2],
+            Dimensions = BinaryPrimitives.ReadUInt16LittleEndian(entry[(DefinitionOffset + 4)..]),
+            QuantizationMin = BinaryPrimitives.ReadSingleLittleEndian(entry[(DefinitionOffset + 6)..]),
+            QuantizationMax = BinaryPrimitives.ReadSingleLittleEndian(entry[(DefinitionOffset + 10)..]),
+            NextId = BinaryPrimitives.ReadUInt32LittleEndian(entry[32..]),
+            Count = BinaryPrimitives.ReadUInt32LittleEndian(entry[36..]),
+            Entry = BinaryPrimitives.ReadUInt32LittleEndian(entry[40..]),
+            MaxLevel = entry[44],
         };
     }
 
     public void Encode(Span<byte> entry)
     {
+        // The format byte, the number of trees and their roots come first: the engine follows them
+        // without knowing the rest (CatalogStore.TryReadVectorRoots).
         entry[..Size].Clear();
         entry[0] = Format;
-        entry[1] = (byte)Metric;
-        entry[2] = (byte)(Quantized ? 1 : 0);
-        entry[3] = (byte)M;
-        BinaryPrimitives.WriteUInt16LittleEndian(entry[4..], (ushort)Dimensions);
-        BinaryPrimitives.WriteSingleLittleEndian(entry[8..], QuantizationMin);
-        BinaryPrimitives.WriteSingleLittleEndian(entry[12..], QuantizationMax);
-        BinaryPrimitives.WriteUInt32LittleEndian(entry[16..], NextId);
-        BinaryPrimitives.WriteUInt32LittleEndian(entry[20..], Count);
-        BinaryPrimitives.WriteUInt32LittleEndian(entry[24..], Entry);
-        entry[28] = (byte)MaxLevel;
-        BinaryPrimitives.WriteUInt32LittleEndian(entry[29..], Nodes.Value);
-        BinaryPrimitives.WriteUInt32LittleEndian(entry[33..], Links.Value);
-        BinaryPrimitives.WriteUInt32LittleEndian(entry[37..], Keys.Value);
-        BinaryPrimitives.WriteUInt32LittleEndian(entry[41..], Exact.Value);
+        entry[1] = Trees;
+        BinaryPrimitives.WriteUInt32LittleEndian(entry[2..], Nodes.Value);
+        BinaryPrimitives.WriteUInt32LittleEndian(entry[6..], Links.Value);
+        BinaryPrimitives.WriteUInt32LittleEndian(entry[10..], Keys.Value);
+        BinaryPrimitives.WriteUInt32LittleEndian(entry[14..], Exact.Value);
+        entry[DefinitionOffset] = (byte)Metric;
+        entry[DefinitionOffset + 1] = (byte)(Quantized ? 1 : 0);
+        entry[DefinitionOffset + 2] = (byte)M;
+        BinaryPrimitives.WriteUInt16LittleEndian(entry[(DefinitionOffset + 4)..], (ushort)Dimensions);
+        BinaryPrimitives.WriteSingleLittleEndian(entry[(DefinitionOffset + 6)..], QuantizationMin);
+        BinaryPrimitives.WriteSingleLittleEndian(entry[(DefinitionOffset + 10)..], QuantizationMax);
+        BinaryPrimitives.WriteUInt32LittleEndian(entry[32..], NextId);
+        BinaryPrimitives.WriteUInt32LittleEndian(entry[36..], Count);
+        BinaryPrimitives.WriteUInt32LittleEndian(entry[40..], Entry);
+        entry[44] = (byte)MaxLevel;
     }
 
     /// <summary>Whether the index was declared the way <paramref name="other"/> is: what cannot change once it holds vectors.</summary>
@@ -118,6 +123,6 @@ internal sealed class HnswHeader
         Span<byte> theirs = stackalloc byte[Size];
         Encode(mine);
         other.Encode(theirs);
-        return mine[..DefinitionSize].SequenceEqual(theirs[..DefinitionSize]);
+        return mine.Slice(DefinitionOffset, DefinitionSize).SequenceEqual(theirs.Slice(DefinitionOffset, DefinitionSize));
     }
 }

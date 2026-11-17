@@ -44,12 +44,67 @@ failures += await RoundTripAsync("memory", static () => new MemoryStorageDevice(
 failures += await EncryptedRoundTripAsync();
 failures += await TypedRoundTripAsync();
 failures += await VectorRoundTripAsync();
+failures += await MaintenanceAsync();
 
 await Console.Out.WriteLineAsync(
     $"TekiumDB AOT smoke: {(failures == 0 ? "OK" : "FAILED")} " +
     $"(dynamic code supported: {RuntimeFeature.IsDynamicCodeSupported})");
 
 return failures;
+
+// Herramientas: inspeccionar sin abrir, compactar a un archivo nuevo, y diagnosticar y reparar uno dañado a mano.
+static async Task<int> MaintenanceAsync()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"tekium-aot-tools-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    var source = Path.Combine(directory, "source.tkdb");
+    var index = new VectorIndexOptions { Dimensions = 8, Metric = VectorMetric.Euclidean };
+    try
+    {
+        var database = await TekiumDb.OpenAsync(new DbOptions { Path = source, Password = "aot tools password".AsMemory(), CacheSizeMb = 8 });
+        await using (database)
+        {
+            for (var round = 0; round < 3; round++)
+            {
+                await using var writer = await database.BeginWriteAsync();
+                for (var i = 0; i < 400; i++)
+                {
+                    await database.VectorIndex<int>("points", index).UpsertAsync(writer, i, new float[] { i, round, 1, 2, 3, 4, 5, 6 });
+                }
+
+                await writer.CommitAsync();
+            }
+        }
+
+        var password = new TkCopyOptions { Password = "aot tools password".AsMemory(), NewPassword = ReadOnlyMemory<char>.Empty };
+        var healthy = await TkInspector.InspectAsync(source, "aot tools password".AsMemory());
+        var compacted = Path.Combine(directory, "compacted.tkdb");
+        var report = await TkMaintenance.CompactAsync(source, compacted, password);
+        var copy = await TkInspector.InspectAsync(compacted);
+
+        // Un byte cambiado en la última página en uso: se nombra, compactar se niega y reparar escribe lo demás.
+        var bytes = await File.ReadAllBytesAsync(compacted);
+        bytes[((int)copy.RootSlots[copy.CurrentSlot].RootPage * copy.PageSize) + 300] ^= 0xFF;
+        await File.WriteAllBytesAsync(compacted, bytes);
+        var damaged = await TkInspector.InspectAsync(compacted);
+        var repaired = Path.Combine(directory, "repaired.tkdb");
+        var repair = await TkMaintenance.RepairAsync(compacted, repaired);
+        if (healthy.IsHealthy && healthy.Trees.Count == 5 && copy.IsHealthy && !copy.IsEncrypted
+            && report.DestinationBytes < report.SourceBytes
+            && !damaged.IsHealthy && damaged.Findings[0].Page == copy.RootSlots[copy.CurrentSlot].RootPage
+            && repair.Findings.Count > 0 && (await TkInspector.InspectAsync(repaired)).IsHealthy)
+        {
+            return 0;
+        }
+
+        await Console.Error.WriteLineAsync($"Maintenance failed: {healthy.Findings.Count} + {copy.Findings.Count} findings, {damaged.Findings.Count} after damage.");
+        return 1;
+    }
+    finally
+    {
+        Directory.Delete(directory, recursive: true);
+    }
+}
 
 // Búsqueda vectorial: construir, cerrar, reabrir y encontrar, con y sin cuantización, sobre una base cifrada.
 static async Task<int> VectorRoundTripAsync()

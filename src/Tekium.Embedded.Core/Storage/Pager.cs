@@ -531,6 +531,28 @@ internal sealed class Pager : IPageSource, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// A pager over a state chosen by the caller, for reading only: nothing is checked on the way in and
+    /// the free-list is not loaded, so it can be built over a file the engine would refuse to open.
+    /// Whatever is damaged shows when the page is read.
+    /// </summary>
+    internal static Pager ForInspection(
+        IStorageDevice device, PageSize pageSize, IPageProtector protector, bool compressed, Snapshot state, int slot) =>
+        new(device, pageSize, new PagerOptions { PageSize = pageSize, CachePages = 256 }, protector, compressed, state, slot);
+
+    /// <summary>Recovers the file key from either copy of the header, or returns <see langword="null"/> if the password does not open it.</summary>
+    internal static AesGcmPageProtector? TryUnlock(byte[] first, byte[] second, PasswordBytes password)
+    {
+        try
+        {
+            return Unlock(first, second, password);
+        }
+        catch (CryptographicException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>Recovers the file key from either copy of the header.</summary>
     private static AesGcmPageProtector Unlock(byte[] first, byte[] second, PasswordBytes password)
     {

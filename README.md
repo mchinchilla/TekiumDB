@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 9 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Todavía no hay capa SQL ni LINQ ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 10 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Todavía no hay capa SQL ni LINQ ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -357,6 +357,59 @@ El recall depende de los datos: con vectores sin ninguna estructura es mucho má
 
 El índice no está atado a una tabla: quien escribe la fila escribe también su vector, en la misma transacción. Declararlo como columna (`[TkVector]`) y que la tabla lo mantenga sola todavía no existe.
 
+### Herramientas
+
+`tkdb` es una herramienta de línea de comandos para archivos `.tkdb` cerrados. Ninguno de sus comandos cambia el archivo que recibe, salvo `passwd`.
+
+```bash
+tkdb info    app.tkdb                              # lo que dice la cabecera; no pide contraseña
+tkdb check   app.tkdb                              # lee cada página y dice qué está mal, sin abrir la base
+tkdb compact app.tkdb -o compacta.tkdb             # una copia sin el espacio que dejaron los cambios
+tkdb repair  dañada.tkdb -o recuperada.tkdb        # una copia con todo lo que todavía se puede leer
+tkdb passwd  app.tkdb --password-env OLD --new-password-env NEW
+```
+
+```
+$ tkdb check app.tkdb
+app.tkdb: 4194304 bytes
+Format version 2, pages of 8192 bytes, not encrypted
+Root slot 0: transaction 2, 318 pages, root page 315
+Root slot 1 (current): transaction 3, 443 pages, root page 440
+
+Pages in use: 191; free: 247
+  catalog: 7 entries in 1 pages
+  table tickets: 5000 entries in 81 pages
+  index tickets.Due: 5000 entries in 12 pages
+  index tickets.Owner: 4717 entries in 24 pages, 1 DAMAGED
+  index tickets.Owner_Priority: 5000 entries in 26 pages
+  index tickets.TitleLower: 5000 entries in 32 pages
+  index tickets.open: 5000 entries in 14 pages
+
+ERROR: Page 57 of index tickets.Owner cannot be read: Page 57 failed its checksum: the file is corrupt.
+
+The file has problems.
+
+$ tkdb repair app.tkdb -o recuperada.tkdb
+25000 entries copied to recuperada.tkdb
+4194304 bytes became 1359872
+Left out: index tickets.Owner
+
+ERROR: Page 57 of index tickets.Owner cannot be read: Page 57 failed its checksum: the file is corrupt.
+```
+
+(Salida real, sobre un archivo de prueba al que se le cambió un byte de la página 57.)
+
+| Comando | Qué hace |
+| --- | --- |
+| `check` | Revisa las dos copias de la cabecera, los dos registros de dónde está la base, cada página en uso (su suma de verificación o su etiqueta de cifrado, y que el árbol esté bien formado) y la lista de páginas libres. Nombra cada página dañada y a qué tabla o índice pertenece. Lee archivos que el motor se niega a abrir |
+| `compact` | Reconstruye cada árbol con sus páginas llenas en un archivo nuevo. Se niega si el archivo está dañado |
+| `repair` | Lo mismo, pero copia lo que se puede leer y dice qué dejó fuera. Las filas de las páginas dañadas se pierden; un índice dañado, o cuya tabla perdió filas, no se copia y la primera escritura en esa tabla lo vuelve a construir |
+| `passwd` | Cambia la contraseña en el mismo archivo: sólo reescribe la cabecera |
+| Contraseñas | Nunca en la línea de comandos: de una variable de entorno, de un archivo o de la entrada estándar. `compact` y `repair` pueden dar a la copia otra contraseña o ninguna, y siempre le dan una clave de archivo nueva |
+| Código de salida | 0 nada mal, 1 el archivo tiene problemas, 2 el comando no pudo correr |
+
+Lo mismo está en el núcleo, para usarlo desde código: `TkInspector.InspectAsync`, `TkMaintenance.CompactAsync` y `TkMaintenance.RepairAsync`. Compactar y reparar no copian el historial del change feed. Detalle en [docs/benchmarks/fase-10.md](docs/benchmarks/fase-10.md).
+
 Reglas de la API:
 
 - Toda operación de E/S devuelve `ValueTask` o `IAsyncEnumerable<T>` y acepta `CancellationToken`. No hay métodos síncronos salvo `Dispose`.
@@ -410,7 +463,8 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 7 | Índice temporal con zone maps y split 100/0 | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-7.md); Windows sin verificar |
 | 8 | Índice UUID v7 | Hecho en macOS y Linux, [medido](docs/benchmarks/fase-8.md): criterio cumplido con hasta decenas de UUID por milisegundo (96–99 % de ocupación); no con cientos por milisegundo creados en un bucle (68 %); Windows sin verificar |
 | 9 | Índice vectorial HNSW | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-9.md) (recall@10 de 0,98 sobre un millón de vectores con estructura); Windows sin verificar |
-| 10 – 10.6 | Herramientas, backup en caliente, verificación y viaje en el tiempo | Pendiente |
+| 10 | Herramientas: `tkdb` para inspeccionar, reparar, cambiar la contraseña y compactar | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.md); Windows sin verificar |
+| 10.2 – 10.6 | Backup en caliente, verificación con contadores de diagnóstico y viaje en el tiempo | Pendiente |
 | 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |
 | 13 – 14 | Funciones y procedimientos: C# por generador y PL/Tk | Pendiente |
 | 15 | Adaptadores: EF Core, `IDistributedCache`, Data Protection, HealthChecks | Pendiente |
@@ -448,6 +502,7 @@ Las pruebas usan xUnit v3 sobre Microsoft.Testing.Platform, por eso los filtros 
 
 ```
 src/
+  Tekium.Embedded.Cli/           tkdb: herramienta de línea de comandos
   Tekium.Embedded.Core/          Núcleo del motor y API pública
   Tekium.Embedded.Generators/    Generador de código fuente: serializador, campos, índices y restricciones de cada [TkTable]
   Tekium.Embedded.Vectors/       Búsqueda vectorial HNSW, en su propio paquete

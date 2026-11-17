@@ -47,6 +47,37 @@ internal static class CatalogStore
         return key;
     }
 
+    /// <summary>
+    /// The roots of the trees a vector index keeps. Its entry starts with a format byte, how many trees it
+    /// has and their roots: the engine can follow them (to check, copy or compact the file) without
+    /// knowing what the rest of the entry means.
+    /// </summary>
+    public static bool TryReadVectorRoots(ReadOnlySpan<byte> entry, out PageNumber[] roots)
+    {
+        roots = [];
+        if (entry.Length < 2 || entry.Length < 2 + (entry[1] * sizeof(uint)))
+        {
+            return false;
+        }
+
+        roots = new PageNumber[entry[1]];
+        for (var i = 0; i < roots.Length; i++)
+        {
+            roots[i] = new PageNumber(BinaryPrimitives.ReadUInt32LittleEndian(entry[(2 + (i * sizeof(uint)))..]));
+        }
+
+        return true;
+    }
+
+    /// <summary>Writes other roots into the entry of a vector index, leaving the rest as it is.</summary>
+    public static void WriteVectorRoots(Span<byte> entry, ReadOnlySpan<PageNumber> roots)
+    {
+        for (var i = 0; i < roots.Length; i++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(entry[(2 + (i * sizeof(uint)))..], roots[i].Value);
+        }
+    }
+
     /// <summary>Whether a catalog key is the entry of a vector index.</summary>
     public static bool IsVectorIndexKey(ReadOnlySpan<byte> key) => key.Length > 1 && key[0] == VectorPrefix;
 

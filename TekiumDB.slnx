@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Tekium.Embedded.Cli/Tekium.Embedded.Cli.csproj" />
     <Project Path="src/Tekium.Embedded.Core/Tekium.Embedded.Core.csproj" />
     <Project Path="src/Tekium.Embedded.Generators/Tekium.Embedded.Generators.csproj" />
     <Project Path="src/Tekium.Embedded.Vectors/Tekium.Embedded.Vectors.csproj" />

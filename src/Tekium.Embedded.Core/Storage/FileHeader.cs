@@ -61,6 +61,15 @@ internal static class FileHeader
     private const uint EncryptedFlag = 1;
     private const uint CompressedFlag = 2;
 
+    /// <summary>What is wrong with the fixed fields of a header copy.</summary>
+    internal enum Problem
+    {
+        None,
+        NotADatabase,
+        UnsupportedFormat,
+        Corrupt,
+    }
+
     private static ReadOnlySpan<byte> Magic => "TekiumDB"u8;
 
     private static ReadOnlySpan<byte> ReservationLabel => "TKRESV01"u8;
@@ -89,33 +98,42 @@ internal static class FileHeader
         }
     }
 
-    public static PageSize ReadPageSize(ReadOnlySpan<byte> header)
+    public static PageSize ReadPageSize(ReadOnlySpan<byte> header) =>
+        Check(header, out var size, out var message) == Problem.None ? size : throw new InvalidDataException(message);
+
+    /// <summary>Reads the fields that never change, saying what is wrong instead of throwing.</summary>
+    public static Problem Check(ReadOnlySpan<byte> header, out PageSize size, out string message)
     {
+        size = default;
+        message = string.Empty;
         if (!header[..Magic.Length].SequenceEqual(Magic))
         {
-            throw new InvalidDataException("The file is not a TekiumDB database.");
+            message = "The file is not a TekiumDB database.";
+            return Problem.NotADatabase;
         }
 
         var version = BinaryPrimitives.ReadUInt16LittleEndian(header[VersionOffset..]);
         if (version != FormatVersion)
         {
-            throw new InvalidDataException(
-                $"The file uses format version {version}; this build reads version {FormatVersion}.");
+            message = $"The file uses format version {version}; this build reads version {FormatVersion}.";
+            return Problem.UnsupportedFormat;
         }
 
         if (BinaryPrimitives.ReadUInt16LittleEndian(header[SlotCountOffset..]) != SlotCount
-            || !PageSize.TryFromBytes(BinaryPrimitives.ReadUInt16LittleEndian(header[PageSizeOffset..]), out var size))
+            || !PageSize.TryFromBytes(BinaryPrimitives.ReadUInt16LittleEndian(header[PageSizeOffset..]), out size))
         {
-            throw new InvalidDataException("The database header is corrupt.");
+            message = "The database header is corrupt.";
+            return Problem.Corrupt;
         }
 
         // A flag this build does not know changes how the file is read: better to refuse than to guess.
         if ((BinaryPrimitives.ReadUInt32LittleEndian(header[FlagsOffset..]) & ~(EncryptedFlag | CompressedFlag)) != 0)
         {
-            throw new InvalidDataException("The file uses features this build does not know.");
+            message = "The file uses features this build does not know.";
+            return Problem.UnsupportedFormat;
         }
 
-        return size;
+        return Problem.None;
     }
 
     public static bool IsEncrypted(ReadOnlySpan<byte> header) =>

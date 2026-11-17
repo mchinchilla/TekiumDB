@@ -56,6 +56,38 @@ internal sealed class FreeList
     /// <summary>Gets the number of pages the list itself occupies: trunks and directory.</summary>
     public int MetadataPageCount => _batches.Count + _directory.Count;
 
+    /// <summary>Gets every free page, whether or not it can be reused yet.</summary>
+    public IEnumerable<uint> FreePages
+    {
+        get
+        {
+            foreach (var batch in _batches)
+            {
+                for (var i = batch.Start; i < batch.Pages.Length; i++)
+                {
+                    yield return batch.Pages[i];
+                }
+            }
+        }
+    }
+
+    /// <summary>Gets the pages the list itself occupies: trunks and directory.</summary>
+    public IEnumerable<uint> MetadataPages
+    {
+        get
+        {
+            foreach (var batch in _batches)
+            {
+                yield return batch.Trunk.Value;
+            }
+
+            foreach (var page in _directory)
+            {
+                yield return page.Value;
+            }
+        }
+    }
+
     public static FreeList Empty(PageSize pageSize) => new(pageSize, [], []);
 
     public static async ValueTask<FreeList> LoadAsync(

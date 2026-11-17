@@ -646,6 +646,68 @@ public abstract class HnswIndexTests : IAsyncLifetime
         }
     }
 
+    /// <summary>Las herramientas del núcleo siguen los árboles del índice vectorial sin saber qué guardan.</summary>
+    [Fact]
+    public async Task The_file_tools_inspect_compact_and_repair_a_database_with_vector_indexes()
+    {
+        var device = NewDevice();
+        var options = new VectorIndexOptions { Dimensions = 16, Metric = VectorMetric.Euclidean, Quantize = true, QuantizationMin = -4, QuantizationMax = 4 };
+        var vectors = VectorData.Clustered(800, 16, seed: 101);
+        var expected = new List<int[]>();
+        await using (var database = await OpenAsync(device))
+        {
+            await InsertAsync(database, database.VectorIndex<int>("kept", options), vectors);
+            await InsertAsync(database, database.VectorIndex<int>("hurt", options), vectors[..300]);
+            foreach (var query in vectors[..20])
+            {
+                expected.Add([.. (await database.VectorIndex<int>("kept", options).SearchAsync(query, 5, cancellationToken: Ct)).Select(static hit => hit.Key)]);
+            }
+        }
+
+        var inspection = await TkInspector.InspectAsync(() => device, default, Ct);
+        Assert.True(inspection.IsHealthy);
+        Assert.Equal(
+            ["vector index kept, tree 1", "vector index kept, tree 2", "vector index kept, tree 3", "vector index kept, tree 4"],
+            inspection.Trees.Select(static tree => tree.Name).Where(static name => name.Contains("kept", StringComparison.Ordinal)));
+        Assert.Equal(800, inspection.Trees.Single(static tree => tree.Name == "vector index kept, tree 1").Entries);
+
+        // Compactar: el índice responde igual desde la copia.
+        var compacted = NewDevice();
+        var report = await TkMaintenance.CopyAsync(() => device, _ => compacted, null, salvage: false, Ct);
+        Assert.True(report.DestinationBytes < report.SourceBytes);
+        await using (var database = await OpenAsync(compacted))
+        {
+            var index = database.VectorIndex<int>("kept", options);
+            for (var i = 0; i < expected.Count; i++)
+            {
+                Assert.Equal(expected[i], (await index.SearchAsync(vectors[i], 5, cancellationToken: Ct)).Select(static hit => hit.Key));
+            }
+
+            await AssertNoLeaksAsync(database);
+        }
+
+        // Reparar con un árbol del índice dañado: ese índice no se copia (un grafo incompleto no se nota), el otro sí.
+        uint page;
+        await using (var database = await OpenAsync(device))
+        {
+            using var read = database.Pager.BeginRead();
+            page = HnswHeader.Decode(await CatalogStore.ReadAsync(database.Pager, read.Root, CatalogStore.VectorIndexKey("hurt"), Ct)).Links.Value;
+        }
+
+        await device.CorruptAsync(((long)page * 4096) + 300);
+        var damaged = await TkInspector.InspectAsync(() => device, default, Ct);
+        Assert.Equal("vector index hurt, tree 2", Assert.Single(damaged.Findings).Where);
+        var repaired = NewDevice();
+        report = await TkMaintenance.CopyAsync(() => device, _ => repaired, null, salvage: true, Ct);
+        Assert.Equal(["vector index hurt"], report.Dropped);
+        await using (var database = await OpenAsync(repaired))
+        {
+            Assert.Empty(await database.VectorIndex<int>("hurt", options).SearchAsync(vectors[0], 5, cancellationToken: Ct));
+            Assert.Equal(expected[0], (await database.VectorIndex<int>("kept", options).SearchAsync(vectors[0], 5, cancellationToken: Ct)).Select(static hit => hit.Key));
+            await AssertNoLeaksAsync(database);
+        }
+    }
+
     private protected abstract TestDevice CreateDevice();
 
     private TestDevice NewDevice()
