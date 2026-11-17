@@ -20,6 +20,9 @@ public sealed class Table<T> : TekiumDb.ITable
     private readonly TekiumDb _database;
     private readonly TkColumnType _keyType;
     private readonly IndexDefinition[] _indexes;
+
+    // How many of them hold an entry per row, as opposed to zone maps, which do not.
+    private readonly int _entryIndexes;
     private readonly ConstraintSet _constraints;
 
     // The catalog key of the table each FOREIGN KEY refers to.
@@ -70,6 +73,7 @@ public sealed class Table<T> : TekiumDb.ITable
         foreach (var index in _indexes)
         {
             _whereScratch = Math.Max(_whereScratch, IndexDefinition.ScratchSize(index.Where));
+            _entryIndexes += index.IsZoneMap ? 0 : 1;
         }
     }
 
@@ -297,7 +301,7 @@ public sealed class Table<T> : TekiumDb.ITable
 
             // Whatever indexes the table has must be the ones this type can keep, even if it declares none.
             await transaction.BindIndexesAsync(this, state, cancellationToken).ConfigureAwait(false);
-            if (_indexes.Length > 0)
+            if (_entryIndexes > 0)
             {
                 var old = await FetchAsync(
                     transaction.Inner, state.Root, stored, transaction.CatalogRoot, transaction, cancellationToken)
@@ -406,7 +410,7 @@ public sealed class Table<T> : TekiumDb.ITable
             var key = keyBuffer.AsMemory(0, T.WriteKey(row, keyBuffer.AsSpan(0, tree.MaxKeySize)));
             rowBuffer = Encode(row, state.Schema!.Version, tree.MaxEntrySize, out var rowLength);
             var exists = false;
-            if (_indexes.Length > 0)
+            if (_entryIndexes > 0)
             {
                 // The row being replaced says which index entries to take out.
                 var old = await FetchAsync(
@@ -446,6 +450,10 @@ public sealed class Table<T> : TekiumDb.ITable
                 state.Root = await tree.PutAsync(
                     transaction.Inner, state.Root, key, rowBuffer.AsMemory(0, rowLength), cancellationToken)
                     .ConfigureAwait(false);
+                if (_entryIndexes < _indexes.Length)
+                {
+                    NoteZones(state, row, key.Span);
+                }
             }
             catch
             {
@@ -561,6 +569,13 @@ public sealed class Table<T> : TekiumDb.ITable
             var scratch = changes.Scratch;
             for (var i = 0; i < _indexes.Length; i++)
             {
+                if (_indexes[i].IsZoneMap)
+                {
+                    // A zone map has no entry per row.
+                    changes.OldLength(i) = changes.NewLength(i) = -1;
+                    continue;
+                }
+
                 changes.OldLength(i) = old is null
                     ? -1
                     : IndexKey(_indexes[i], old, primaryKey, changes.Old(i, maxKey).Span, scratch, out _, out _);
@@ -583,12 +598,20 @@ public sealed class Table<T> : TekiumDb.ITable
     }
 
     private async ValueTask ApplyAsync(
-        TkWriteTransaction transaction, TkWriteTransaction.TableState state, KeyChanges changes, CancellationToken cancellationToken)
+        TkWriteTransaction transaction,
+        TkWriteTransaction.TableState state,
+        KeyChanges changes,
+        CancellationToken cancellationToken)
     {
         var tree = _database.Tree;
         for (var i = 0; i < _indexes.Length; i++)
         {
             var entry = state.Bound[i];
+            if (_indexes[i].IsZoneMap)
+            {
+                continue;
+            }
+
             var oldLength = changes.OldLength(i);
             var newLength = changes.NewLength(i);
             if (oldLength >= 0 && newLength >= 0 && changes.Old(i, oldLength).Span.SequenceEqual(changes.New(i, newLength).Span))
@@ -954,6 +977,12 @@ public sealed class Table<T> : TekiumDb.ITable
             for (var i = 0; i < _indexes.Length; i++)
             {
                 var index = state.Bound[i];
+                if (load.Zones[i] is { } zone)
+                {
+                    await WidenZonesAsync(inner, index, zone, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
                 var old = index.Root;
                 index.Root = await MergeEntriesAsync(transaction, _indexes[i], old, load.Entries[i], cancellationToken).ConfigureAwait(false);
                 index.Dirty = true;
@@ -1121,6 +1150,192 @@ public sealed class Table<T> : TekiumDb.ITable
         }
     }
 
+    /// <summary>
+    /// Remembers, for every zone map, that the window of this row holds its key. It stays in memory until
+    /// the commit, or until something needs to read the zone map: a transaction that writes a thousand
+    /// rows of the same hour writes that hour once.
+    /// </summary>
+    private void NoteZones(TkWriteTransaction.TableState state, T row, ReadOnlySpan<byte> primaryKey)
+    {
+        var pending = state.PendingZones;
+        if (pending is null)
+        {
+            state.PendingZones = pending = new ZoneWindows?[_indexes.Length];
+            state.FlushZones = (transaction, cancellationToken) => FlushZonesAsync(transaction, state, cancellationToken);
+        }
+
+        for (var i = 0; i < _indexes.Length; i++)
+        {
+            if (_indexes[i].IsZoneMap && TryWindow(_indexes[i], row, out var window))
+            {
+                (pending[i] ??= new ZoneWindows()).Add(window, primaryKey);
+            }
+        }
+    }
+
+    /// <summary>Writes to the zone maps what the transaction has learnt about them.</summary>
+    private async ValueTask FlushZonesAsync(TkWriteTransaction transaction, TkWriteTransaction.TableState state, CancellationToken cancellationToken)
+    {
+        var pending = state.PendingZones;
+        state.PendingZones = null;
+        state.FlushZones = null;
+        if (pending is null)
+        {
+            return;
+        }
+
+        try
+        {
+            for (var i = 0; i < pending.Length; i++)
+            {
+                if (pending[i] is { } windows)
+                {
+                    await WidenZonesAsync(transaction.Inner, state.Bound[i], windows, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+        catch
+        {
+            transaction.Fail();
+            throw;
+        }
+    }
+
+    /// <summary>The window of a zone map the date of a row falls in. False if the row has no date.</summary>
+    private static bool TryWindow(IndexDefinition zone, T row, out long window)
+    {
+        Span<byte> encoded = stackalloc byte[16];
+        var writer = new TkKeyWriter(encoded);
+        T.WriteField(ref writer, row, zone.Fields[0]);
+        return TryWindow(zone, writer.Written, out window);
+    }
+
+    /// <summary>
+    /// The window a date falls in, from the date as a key holds it. False if those bytes are not a date:
+    /// no value, or one of the marks that bound the values of a nullable field.
+    /// </summary>
+    private static bool TryWindow(IndexDefinition zone, ReadOnlySpan<byte> encoded, out long window)
+    {
+        window = 0;
+        if (zone.Nullable[0])
+        {
+            if (encoded.IsEmpty || encoded[0] != 1)
+            {
+                return false;
+            }
+
+            encoded = encoded[1..];
+        }
+
+        long value;
+        if (zone.ZoneInDays)
+        {
+            if (encoded.Length != sizeof(int))
+            {
+                return false;
+            }
+
+            value = (int)(BinaryPrimitives.ReadUInt32BigEndian(encoded) ^ 0x8000_0000);
+        }
+        else
+        {
+            if (encoded.Length != sizeof(long))
+            {
+                return false;
+            }
+
+            value = (long)(BinaryPrimitives.ReadUInt64BigEndian(encoded) ^ 0x8000_0000_0000_0000);
+        }
+
+        window = Math.DivRem(value, zone.ZoneWidth, out var rest);
+        if (rest < 0)
+        {
+            window--;
+        }
+
+        return true;
+    }
+
+    /// <summary>The key of a window in the tree of a zone map: it sorts like the window.</summary>
+    private static void ZoneKey(long window, Span<byte> destination) =>
+        BinaryPrimitives.WriteUInt64BigEndian(destination, (ulong)window ^ 0x8000_0000_0000_0000);
+
+    /// <summary>
+    /// Makes a window of a zone map take in a range of keys: the lowest and highest key of the rows whose
+    /// date falls in the window only ever move outwards.
+    /// </summary>
+    private async ValueTask WidenZoneAsync(
+        WriteTransaction inner,
+        TkWriteTransaction.IndexEntry entry,
+        long window,
+        ReadOnlyMemory<byte> lowest,
+        ReadOnlyMemory<byte> highest,
+        CancellationToken cancellationToken)
+    {
+        var tree = _database.Tree;
+        var room = sizeof(ushort) + (2 * tree.MaxKeySize);
+        var buffer = ArrayPool<byte>.Shared.Rent(sizeof(long) + (2 * room));
+        try
+        {
+            var key = buffer.AsMemory(0, sizeof(long));
+            ZoneKey(window, key.Span);
+            var stored = buffer.AsMemory(sizeof(long), room);
+            var length = await BTree.GetAsync(inner, entry.Root, key, stored, cancellationToken).ConfigureAwait(false);
+            if (length != BTree.NotFound)
+            {
+                var (low, high) = ZoneRange(stored.Span[..length]);
+                var below = lowest.Span.SequenceCompareTo(low) < 0;
+                var above = highest.Span.SequenceCompareTo(high) > 0;
+                if (!below && !above)
+                {
+                    return;
+                }
+
+                lowest = below ? lowest : low.ToArray();
+                highest = above ? highest : high.ToArray();
+            }
+
+            var widened = buffer.AsMemory(sizeof(long) + room, sizeof(ushort) + lowest.Length + highest.Length);
+            BinaryPrimitives.WriteUInt16LittleEndian(widened.Span, (ushort)lowest.Length);
+            lowest.Span.CopyTo(widened.Span[sizeof(ushort)..]);
+            highest.Span.CopyTo(widened.Span[(sizeof(ushort) + lowest.Length)..]);
+            entry.Root = await tree.PutAsync(inner, entry.Root, key, widened, cancellationToken).ConfigureAwait(false);
+            entry.Dirty = true;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>The lowest and highest key a window of a zone map holds, from its entry.</summary>
+    private ReadOnlySpan<byte> ZoneRange(ReadOnlySpan<byte> entry, out ReadOnlySpan<byte> high)
+    {
+        if (entry.Length < sizeof(ushort) || BinaryPrimitives.ReadUInt16LittleEndian(entry) is var length && length > entry.Length - sizeof(ushort))
+        {
+            throw new InvalidDataException($"A zone map of table '{Name}' has a damaged entry.");
+        }
+
+        high = entry[(sizeof(ushort) + length)..];
+        return entry.Slice(sizeof(ushort), length);
+    }
+
+    private (byte[] Low, byte[] High) ZoneRange(ReadOnlySpan<byte> entry)
+    {
+        var low = ZoneRange(entry, out var high);
+        return (low.ToArray(), high.ToArray());
+    }
+
+    /// <summary>Writes into a zone map the windows a build or a bulk load worked out in memory.</summary>
+    private async ValueTask WidenZonesAsync(
+        WriteTransaction inner, TkWriteTransaction.IndexEntry entry, ZoneWindows windows, CancellationToken cancellationToken)
+    {
+        foreach (var (window, range) in windows.Ranges)
+        {
+            await WidenZoneAsync(inner, entry, window, range.Low, range.High, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     /// <summary>Fills an index that did not exist with the rows the table already has.</summary>
     internal async ValueTask BuildIndexAsync(
         TkWriteTransaction transaction,
@@ -1131,6 +1346,25 @@ public sealed class Table<T> : TekiumDb.ITable
     {
         if (state.Root.IsNone)
         {
+            return;
+        }
+
+        if (index.IsZoneMap)
+        {
+            // Few windows, many rows: they are worked out in memory and written at the end.
+            var windows = new ZoneWindows();
+            var all = BTree.RangeAsync(transaction.Inner, state.Root, default, default, cancellationToken);
+            await foreach (var row in all.ConfigureAwait(false))
+            {
+                var plan = await PlanAsync(row.Value, transaction.Inner, transaction.CatalogRoot, transaction, cancellationToken)
+                    .ConfigureAwait(false);
+                if (TryWindow(index, Decode(row.Value.Span, plan), out var window))
+                {
+                    windows.Add(window, row.Key.Span);
+                }
+            }
+
+            await WidenZonesAsync(transaction.Inner, entry, windows, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -1232,6 +1466,12 @@ public sealed class Table<T> : TekiumDb.ITable
             yield break;
         }
 
+        if (writer is not null && _entryIndexes < _indexes.Length)
+        {
+            // What the transaction has learnt about its zone maps is in memory: a query needs it in them.
+            await writer.FlushZonesAsync(Name, cancellationToken).ConfigureAwait(false);
+        }
+
         var states = await IndexStatesAsync(source, catalogRoot, snapshotId, writer, cancellationToken).ConfigureAwait(false);
         var choice = Choose(terms, states);
         if (choice.Access == TkAccess.Nothing)
@@ -1250,6 +1490,39 @@ public sealed class Table<T> : TekiumDb.ITable
                 if (row is not null && Matches(row, terms, scratch))
                 {
                     yield return row;
+                }
+            }
+            else if (choice.Access == TkAccess.ZoneScan)
+            {
+                // The stretches of keys the windows hold, joined where they touch, and each read in key order.
+                var stretches = new List<(byte[] Low, byte[] High)>();
+                var entries = BTree.RangeAsync(source, states[choice.Index].Root, choice.From, choice.To, cancellationToken);
+                await foreach (var entry in entries.ConfigureAwait(false))
+                {
+                    stretches.Add(ZoneRange(entry.Value.Span));
+                }
+
+                stretches.Sort(static (a, b) => a.Low.AsSpan().SequenceCompareTo(b.Low));
+                for (var i = 0; i < stretches.Count;)
+                {
+                    var (low, high) = stretches[i++];
+                    while (i < stretches.Count && stretches[i].Low.AsSpan().SequenceCompareTo(high) <= 0)
+                    {
+                        high = stretches[i].High.AsSpan().SequenceCompareTo(high) > 0 ? stretches[i].High : high;
+                        i++;
+                    }
+
+                    byte[] past = [.. high, 0];
+                    var rows = BTree.RangeAsync(source, root, low, past, cancellationToken);
+                    await foreach (var entry in rows.ConfigureAwait(false))
+                    {
+                        var plan = await PlanAsync(entry.Value, source, catalogRoot, writer, cancellationToken).ConfigureAwait(false);
+                        var row = Decode(entry.Value.Span, plan);
+                        if (Matches(row, terms, scratch))
+                        {
+                            yield return row;
+                        }
+                    }
                 }
             }
             else if (choice.Access is TkAccess.IndexScan or TkAccess.UniqueLookup)
@@ -1402,7 +1675,7 @@ public sealed class Table<T> : TekiumDb.ITable
         for (var i = 0; i < _indexes.Length; i++)
         {
             var index = _indexes[i];
-            if (!states[i].Usable || !Implies(terms, index.Where))
+            if (!states[i].Usable || index.IsZoneMap || !Implies(terms, index.Where))
             {
                 continue;
             }
@@ -1427,14 +1700,21 @@ public sealed class Table<T> : TekiumDb.ITable
             }
         }
 
-        if (best >= 0 && (bestFixed > 0 || key is null))
+        if (best >= 0 && bestFixed > 0)
         {
             return IndexRange(best, bestFixed, terms);
         }
 
         if (key is null)
         {
-            return new Choice(TkAccess.TableScan, -1, default, default);
+            // A zone map reads whole stretches of the table, in order: for a range of several windows that
+            // beats going to the table once per index entry. For less than that, an index finds exactly its rows.
+            var zone = ZoneRange(terms, states, out var windows, out var several);
+            return zone >= 0 && (best < 0 || several)
+                ? new Choice(TkAccess.ZoneScan, zone, windows.From, windows.To)
+                : best >= 0
+                    ? IndexRange(best, bestFixed, terms)
+                    : new Choice(TkAccess.TableScan, -1, default, default);
         }
 
         // The stored key sorts like the encoded one, so the bounds carry over; one byte more steps past a key.
@@ -1456,6 +1736,53 @@ public sealed class Table<T> : TekiumDb.ITable
         }
 
         return new Choice(TkAccess.KeyRange, -1, from, to);
+    }
+
+    /// <summary>
+    /// The zone map that can serve a filter, if any: one on a field the filter bounds. Gives the windows
+    /// to look at, as a range of keys of its tree, and whether they are known to be more than one.
+    /// </summary>
+    private int ZoneRange(
+        ReadOnlySpan<FilterTerm> terms, IndexState[] states, out (ReadOnlyMemory<byte> From, ReadOnlyMemory<byte> To) windows, out bool several)
+    {
+        windows = default;
+        several = false;
+        for (var i = 0; i < _indexes.Length; i++)
+        {
+            var zone = _indexes[i];
+            if (!zone.IsZoneMap || !states[i].Usable || Find(terms, zone.Fields[0]) is not { } range)
+            {
+                continue;
+            }
+
+            var hasFirst = TryWindow(zone, range.Low, out var first);
+            var hasLast = TryWindow(zone, range.High, out var last);
+            if (!hasFirst && !hasLast)
+            {
+                // Only "has a date" or "has none": every window, or none of them, and neither is worth a zone map.
+                continue;
+            }
+
+            byte[] from = [];
+            byte[] to = [];
+            if (hasFirst)
+            {
+                from = new byte[sizeof(long)];
+                ZoneKey(first, from);
+            }
+
+            if (hasLast && last < long.MaxValue)
+            {
+                to = new byte[sizeof(long)];
+                ZoneKey(last + 1, to);
+            }
+
+            windows = (from, to);
+            several = !hasFirst || !hasLast || last > first;
+            return i;
+        }
+
+        return -1;
     }
 
     /// <summary>Whether the filter fixes a field of the index to having no value: such rows are exempt from uniqueness.</summary>
@@ -1745,9 +2072,11 @@ public sealed class Table<T> : TekiumDb.ITable
             Existing = state.Root;
             Builder = Existing.IsNone ? new BTreeBuilder(database.Tree, inner, database.BulkSpillPages) : null;
             Entries = new RunSorter[table._indexes.Length];
+            Zones = new ZoneWindows?[table._indexes.Length];
             for (var i = 0; i < Entries.Length; i++)
             {
                 Entries[i] = new RunSorter(inner, _budget);
+                Zones[i] = table._indexes[i].IsZoneMap ? new ZoneWindows() : null;
             }
         }
 
@@ -1764,6 +2093,9 @@ public sealed class Table<T> : TekiumDb.ITable
 
         public RunSorter[] Entries { get; }
 
+        /// <summary>Gets, for each zone map of the table, the windows of the rows loaded so far.</summary>
+        public ZoneWindows?[] Zones { get; }
+
         /// <summary>Takes a row in. Returns whether something is due to be written: see <see cref="WriteAsync"/>.</summary>
         public bool Add(T row)
         {
@@ -1775,6 +2107,16 @@ public sealed class Table<T> : TekiumDb.ITable
             var indexes = table._indexes;
             for (var i = 0; i < indexes.Length; i++)
             {
+                if (Zones[i] is { } zone)
+                {
+                    if (TryWindow(indexes[i], row, out var window))
+                    {
+                        zone.Add(window, key);
+                    }
+
+                    continue;
+                }
+
                 var length = table.IndexKey(
                     indexes[i], row, key, _entry.AsSpan(0, _maxKey), _entry.AsSpan(_maxKey), out var prefix, out var hasNull);
                 if (length >= 0)
@@ -1872,6 +2214,7 @@ public sealed class Table<T> : TekiumDb.ITable
         private readonly byte[] _buffer;
         private readonly int[] _lengths;
         private readonly bool[] _hasNull;
+
         private readonly int _maxKey;
         private readonly int _scratch;
         private readonly int _count;
@@ -1883,6 +2226,7 @@ public sealed class Table<T> : TekiumDb.ITable
             _scratch = scratch;
             _lengths = new int[count * 2];
             _hasNull = new bool[count];
+
             _buffer = ArrayPool<byte>.Shared.Rent((count * Slot) + scratch);
         }
 

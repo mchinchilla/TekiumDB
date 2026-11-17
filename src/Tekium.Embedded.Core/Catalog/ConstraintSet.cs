@@ -72,6 +72,7 @@ internal sealed class ConstraintSet
                 || key.Index >= indexes.Length
                 || indexes[key.Index].Fields[0] != key.Column
                 || indexes[key.Index].Where.Length > 0
+                || indexes[key.Index].IsZoneMap
                 || Encoding.UTF8.GetByteCount(key.Table) > CatalogStore.MaxNameBytes)
             {
                 throw new TkSchemaException(

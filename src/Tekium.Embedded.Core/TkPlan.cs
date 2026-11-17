@@ -22,6 +22,9 @@ public enum TkAccess
 
     /// <summary>Reads the one entry of a unique index the filter asks for: at most one row.</summary>
     UniqueLookup = 5,
+
+    /// <summary>Reads the stretches of the table that a zone map says hold the dates the filter asks for.</summary>
+    ZoneScan = 6,
 }
 
 /// <summary>The way the engine chose to run a query.</summary>

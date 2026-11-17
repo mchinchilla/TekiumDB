@@ -36,7 +36,8 @@ internal sealed record ForeignKeyModel(string Name, string Table, int Column, in
 /// <param name="Fields">The indexed fields: positions among the columns, or past them, among the computed properties.</param>
 /// <param name="Where">The C# expression that builds the filter of a partial index, or nothing.</param>
 /// <param name="Unique">Whether it is also a UNIQUE constraint.</param>
-internal sealed record IndexModel(string Name, EquatableArray<int> Fields, string? Where, bool Unique = false);
+/// <param name="ZoneMinutes">For a zone map, the length of its windows in minutes. Zero for an index.</param>
+internal sealed record IndexModel(string Name, EquatableArray<int> Fields, string? Where, bool Unique = false, int ZoneMinutes = 0);
 
 /// <summary>One column: the property it comes from and how it is stored.</summary>
 /// <param name="Property">Name of the property.</param>

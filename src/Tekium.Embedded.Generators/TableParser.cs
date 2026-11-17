@@ -16,6 +16,7 @@ internal static class TableParser
     private const string IgnoreAttribute = "Tekium.Embedded.TkIgnoreAttribute";
     private const string IndexAttribute = "Tekium.Embedded.TkIndexAttribute";
     internal const string CheckAttribute = "Tekium.Embedded.TkCheckAttribute";
+    internal const string ZoneMapAttribute = "Tekium.Embedded.TkZoneMapAttribute";
     internal const string ForeignKeyAttribute = "Tekium.Embedded.TkForeignKeyAttribute";
     internal const string KeyAttributeName = KeyAttribute;
 

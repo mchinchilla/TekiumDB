@@ -27,8 +27,14 @@ internal sealed class IndexDefinition
     // A unique index is another format: one that was not unique does not become so by being read as such.
     private const byte UniqueFormat = 2;
 
-    private IndexDefinition(string name, int[] fields, bool[] nullable, FilterTerm[] where, bool isUnique, byte[] catalogKey, byte[] encoded)
+    // A zone map is not an index of entries at all: its format byte is followed by the length of its windows.
+    private const byte ZoneFormat = 3;
+
+    private IndexDefinition(
+        string name, int[] fields, bool[] nullable, FilterTerm[] where, bool isUnique, long zoneWidth, bool zoneInDays, byte[] catalogKey, byte[] encoded)
     {
+        ZoneWidth = zoneWidth;
+        ZoneInDays = zoneInDays;
         Nullable = nullable;
         IsUnique = isUnique;
         Name = name;
@@ -48,6 +54,17 @@ internal sealed class IndexDefinition
 
     /// <summary>Gets, for each field of the key, whether it may have no value.</summary>
     public bool[] Nullable { get; }
+
+    /// <summary>
+    /// Gets the width of the windows of a zone map, in the unit of its field: ticks, or days for a date
+    /// with no time. Zero if this is an index.
+    /// </summary>
+    public long ZoneWidth { get; }
+
+    /// <summary>Gets a value indicating whether the field of the zone map is a date with no time, encoded in four bytes.</summary>
+    public bool ZoneInDays { get; }
+
+    public bool IsZoneMap => ZoneWidth > 0;
 
     /// <summary>Gets a value indicating whether two rows may not have the same values in the index.</summary>
     public bool IsUnique { get; }
@@ -98,8 +115,36 @@ internal sealed class IndexDefinition
             }
 
             var nullable = Array.ConvertAll(fields, static field => IsNullable<T>(field));
+            var zoneWidth = 0L;
+            var zoneInDays = false;
+            if (index.ZoneMinutes > 0)
+            {
+                var type = fields[0] < T.Columns.Length ? T.Columns[fields[0]].Type : TkColumnType.None;
+                if (fields.Length != 1
+                    || where.Length > 0
+                    || index.IsUnique
+                    || type is not (TkColumnType.DateTimeOffset or TkColumnType.DateTime or TkColumnType.DateOnly))
+                {
+                    throw new TkSchemaException(
+                        $"Table '{table}': zone map '{index.Name}' must be on one column of type DateTimeOffset, DateTime or DateOnly.");
+                }
+
+                zoneInDays = type == TkColumnType.DateOnly;
+                zoneWidth = zoneInDays
+                    ? Math.Max(1, (index.ZoneMinutes + 1439) / 1440)
+                    : index.ZoneMinutes * TimeSpan.TicksPerMinute;
+            }
+
             definitions[i] = new IndexDefinition(
-                index.Name, fields, nullable, where, index.IsUnique, catalogKey, Encode<T>(fields, where, index.IsUnique));
+                index.Name,
+                fields,
+                nullable,
+                where,
+                index.IsUnique,
+                zoneWidth,
+                zoneInDays,
+                catalogKey,
+                Encode<T>(fields, where, index.IsUnique, index.ZoneMinutes));
         }
 
         return definitions;
@@ -124,11 +169,17 @@ internal sealed class IndexDefinition
         where T : class, ITkRow<T> =>
         field < T.Columns.Length ? T.Columns[field].IsNullable : T.Expressions[field - T.Columns.Length].IsNullable;
 
-    private static byte[] Encode<T>(int[] fields, FilterTerm[] where, bool isUnique)
+    private static byte[] Encode<T>(int[] fields, FilterTerm[] where, bool isUnique, int zoneMinutes)
         where T : class, ITkRow<T>
     {
         var encoded = new ArrayBufferWriter<byte>();
-        Write(encoded, isUnique ? UniqueFormat : Format);
+        Write(encoded, zoneMinutes > 0 ? ZoneFormat : isUnique ? UniqueFormat : Format);
+        if (zoneMinutes > 0)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(encoded.GetSpan(sizeof(int)), zoneMinutes);
+            encoded.Advance(sizeof(int));
+        }
+
         Write(encoded, (byte)fields.Length);
         foreach (var field in fields)
         {

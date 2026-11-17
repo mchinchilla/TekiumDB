@@ -109,3 +109,23 @@ public sealed class TkForeignKeyAttribute : Attribute
     /// <summary>Gets or sets the name of the constraint. By default, <c>fk_</c> and the name of the property.</summary>
     public string? Name { get; set; }
 }
+
+/// <summary>
+/// Declares a zone map on a date column: for each window of time, the table remembers the range of keys
+/// of the rows whose date falls in it. A query for a range of dates then reads only that stretch of the
+/// table, with no index entry per row to keep.
+/// </summary>
+/// <remarks>
+/// It pays off when rows are written roughly in date order under keys that grow, as with a time series
+/// keyed by UUID v7 or by a sequence: the rows of a window are then next to each other. With keys that
+/// have nothing to do with the date it is correct but saves nothing. Deleting rows does not narrow it.
+/// </remarks>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class TkZoneMapAttribute : Attribute
+{
+    /// <summary>
+    /// Gets or sets the length of each window, in minutes: one hour by default. For a <see cref="DateOnly"/>
+    /// column it is rounded up to whole days.
+    /// </summary>
+    public int BucketMinutes { get; set; } = 60;
+}

@@ -7,6 +7,7 @@ using Tekium.Embedded.Benchmarks;
 //      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- space
 //      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- ratio
 //      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- feed
+//      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- range [filas]
 //      dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- bulk one|bulk|shuffled|indexed-one|indexed-bulk|sqlite [filas]
 if (args is ["space"])
 {
@@ -30,6 +31,18 @@ if (args is ["feed"])
 if (args is ["bulk", var mode, ..])
 {
     await BulkLoadReport.RunAsync(mode, args.Length > 2 ? int.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : 10_000_000);
+    return;
+}
+
+if (args is ["range-write", ..])
+{
+    await DateRangeReport.WritesAsync(args.Length > 1 ? int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : 1_000_000);
+    return;
+}
+
+if (args is ["range", ..])
+{
+    await DateRangeReport.RunAsync(args.Length > 1 ? int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : 10_000_000);
     return;
 }
 

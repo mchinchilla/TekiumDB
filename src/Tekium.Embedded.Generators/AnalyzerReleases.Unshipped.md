@@ -19,3 +19,4 @@ TK0014 | TekiumDB | Error | A table type cannot have a member named Fields
 TK0015 | TekiumDB | Error | A CHECK constraint must be a bool property with a body
 TK0016 | TekiumDB | Error | A FOREIGN KEY must be a column of the type of the key it refers to
 TK0017 | TekiumDB | Error | Two constraints have the same name
+TK0018 | TekiumDB | Error | A zone map must be on a date column

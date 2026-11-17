@@ -43,6 +43,15 @@ public sealed class TkWriteTransaction : TkTransaction
                 "An operation of this transaction failed halfway, so what it holds is not consistent: it can only be rolled back.");
         }
 
+        // What was learnt about the zone maps goes into them first: it moves their roots.
+        foreach (var state in _tables.Values)
+        {
+            if (state.FlushZones is { } flush)
+            {
+                await flush(this, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         // Where each changed table and index now is goes into the catalog, and the catalog root into the root slot.
         var entry = ArrayPool<byte>.Shared.Rent(TableInfo.EncodedSize);
         try
@@ -155,6 +164,10 @@ public sealed class TkWriteTransaction : TkTransaction
             .ConfigureAwait(false);
     }
 
+    /// <summary>Writes to the zone maps of a table what this transaction has learnt about them and still has in memory.</summary>
+    internal ValueTask FlushZonesAsync(string table, CancellationToken cancellationToken) =>
+        _tables.TryGetValue(table, out var state) && state.FlushZones is { } flush ? flush(this, cancellationToken) : default;
+
     /// <summary>The indexes of a table as this transaction sees them, by name: loaded from the catalog on first use.</summary>
     internal async ValueTask<Dictionary<string, IndexEntry>> IndexesAsync(TableState state, CancellationToken cancellationToken)
     {
@@ -191,6 +204,12 @@ public sealed class TkWriteTransaction : TkTransaction
         if (state.IndexedAs == typeof(T))
         {
             return;
+        }
+
+        // What another type learnt about its zone maps belongs to the indexes bound for it: it goes in before they change.
+        if (state.FlushZones is { } flush)
+        {
+            await flush(this, cancellationToken).ConfigureAwait(false);
         }
 
         var known = await IndexesAsync(state, cancellationToken).ConfigureAwait(false);
@@ -345,6 +364,12 @@ public sealed class TkWriteTransaction : TkTransaction
 
         /// <summary>Gets or sets the foreign keys of other tables that refer to this one. <see langword="null"/> until something asks for them.</summary>
         public List<Referrer>? Referrers { get; set; }
+
+        /// <summary>Gets or sets what the transaction has learnt about each zone map of the table and not yet written to it.</summary>
+        public Indexing.ZoneWindows?[]? PendingZones { get; set; }
+
+        /// <summary>Gets or sets what writes <see cref="PendingZones"/> to the zone maps. <see langword="null"/> when there is nothing pending.</summary>
+        public Func<TkWriteTransaction, CancellationToken, ValueTask>? FlushZones { get; set; }
 
         /// <summary>Gets or sets the type whose declared indexes <see cref="Bound"/> are.</summary>
         public Type? IndexedAs { get; set; }

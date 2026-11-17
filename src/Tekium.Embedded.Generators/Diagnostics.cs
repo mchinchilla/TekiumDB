@@ -93,6 +93,11 @@ internal static class Diagnostics
         "Two constraints have the same name",
         "'{0}' declares more than one constraint named '{1}'; give one of them another Name");
 
+    public static readonly DiagnosticDescriptor UnsupportedZoneMap = Error(
+        "TK0018",
+        "A zone map must be on a date column",
+        "'{0}' cannot have a zone map: [TkZoneMap] goes on a column of type DateTimeOffset, DateTime or DateOnly, with windows of at least one minute");
+
     public static DiagnosticDescriptor? Find(string id) => id switch
     {
         "TK0001" => NotPartial,
@@ -112,6 +117,7 @@ internal static class Diagnostics
         "TK0015" => UnsupportedCheck,
         "TK0016" => UnsupportedForeignKey,
         "TK0017" => DuplicateConstraint,
+        "TK0018" => UnsupportedZoneMap,
         _ => null,
     };
 

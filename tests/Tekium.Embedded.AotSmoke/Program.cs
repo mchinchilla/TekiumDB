@@ -183,8 +183,11 @@ static async Task<int> TypedRoundTripAsync()
                     counted += row.Title.StartsWith("loaded", StringComparison.Ordinal) ? 1 : 0;
                 }
 
+                // Un rango de fechas de varias ventanas va por el zone map; dentro de una, por el índice.
                 if (loaded != 3000
                     || counted != 3000
+                    || await events.ExplainAsync(EventV2.Fields.At.GreaterThan(at.AddHours(1))) is not { Access: TkAccess.ZoneScan, Index: "zone_At" }
+                    || await events.ExplainAsync(EventV2.Fields.At.EqualTo(at)) is not { Access: TkAccess.IndexScan, Index: "At" }
                     || await events.ExplainAsync(EventV2.Fields.Title.EqualTo("loaded 7")) is not { Access: TkAccess.UniqueLookup }
                     || (await events.GetAsync(first))?.Title != "written as version 1")
                 {

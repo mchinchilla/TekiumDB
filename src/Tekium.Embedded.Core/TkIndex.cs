@@ -16,14 +16,20 @@ public sealed class TkIndex<TRow>
     /// <param name="fields">The indexed fields, most significant first: columns, or past the columns, expressions.</param>
     /// <param name="where">The rows that are in the index, or <see langword="null"/> for all of them.</param>
     /// <param name="isUnique">Whether two rows may not have the same values in the index.</param>
-    public TkIndex(string name, ReadOnlySpan<int> fields, TkFilter<TRow>? where = null, bool isUnique = false)
+    /// <param name="zoneMinutes">For a zone map on a date field, the length of its windows in minutes. Zero for an index.</param>
+    public TkIndex(string name, ReadOnlySpan<int> fields, TkFilter<TRow>? where = null, bool isUnique = false, int zoneMinutes = 0)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(zoneMinutes);
+        ZoneMinutes = zoneMinutes;
         ArgumentException.ThrowIfNullOrEmpty(name);
         Name = name;
         _fields = fields.ToArray();
         Where = where;
         IsUnique = isUnique;
     }
+
+    /// <summary>Gets the length in minutes of the windows of a zone map. Zero if this is an index.</summary>
+    public int ZoneMinutes { get; }
 
     /// <summary>Gets a value indicating whether the index is also a UNIQUE constraint.</summary>
     public bool IsUnique { get; }

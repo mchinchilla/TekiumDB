@@ -132,6 +132,32 @@ internal sealed class IndexParser
                         checkModels.Add(new CheckModel(name, Escaped(property.Name), body.NormalizeWhitespace(eol: "\n").ToFullString()));
                     }
                 }
+                else if (kind == TableParser.ZoneMapAttribute)
+                {
+                    var column = parser.ColumnOf(property.Name);
+                    var minutes = 60;
+                    foreach (var argument in attribute.NamedArguments)
+                    {
+                        if (argument.Key == "BucketMinutes" && argument.Value.Value is int given)
+                        {
+                            minutes = given;
+                        }
+                    }
+
+                    if (column < 0 || minutes < 1 || columns[column].StoreType is not ("DateTimeOffset" or "DateTime" or "DateOnly"))
+                    {
+                        diagnostics.Add(DiagnosticModel.Create("TK0018", location, property.Name));
+                        continue;
+                    }
+
+                    var zoneName = "zone_" + property.Name;
+                    while (indexes.Any(existing => existing.Name == zoneName))
+                    {
+                        zoneName += "_";
+                    }
+
+                    indexes.Add(new IndexModel(zoneName, new EquatableArray<int>(ImmutableArray.Create(column)), null, false, minutes));
+                }
                 else if (kind == TableParser.ForeignKeyAttribute)
                 {
                     var name = Named(attribute, "Name") is { Length: > 0 } given ? given : "fk_" + property.Name;
@@ -162,7 +188,7 @@ internal sealed class IndexParser
                     var index = -1;
                     for (var i = 0; i < indexes.Count && index < 0; i++)
                     {
-                        index = indexes[i].Where is null && indexes[i].Fields[0] == column ? i : -1;
+                        index = indexes[i].Where is null && indexes[i].ZoneMinutes == 0 && indexes[i].Fields[0] == column ? i : -1;
                     }
 
                     if (index < 0)

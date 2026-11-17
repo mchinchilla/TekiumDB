@@ -348,6 +348,52 @@ public sealed class TableGeneratorTests
         Assert.Contains(generated, static source => source.Contains("TkForeignKey(\"fk_Customer\", \"customers\", 1, 0)", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void A_zone_map_generates_an_index_of_its_own_kind_that_compiles_without_warnings()
+    {
+        var (diagnostics, generated) = Run("""
+            #nullable enable
+            using System;
+            using Tekium.Embedded;
+
+            [TkTable("readings")]
+            public sealed partial class Reading
+            {
+                [TkKey] public Guid Id { get; set; }
+                [TkZoneMap] public DateTimeOffset At { get; set; }
+                [TkIndex] [TkZoneMap(BucketMinutes = 1440)] public DateOnly? Day { get; set; }
+                [TkZoneMap(BucketMinutes = 5)] public DateTime Seen { get; set; }
+                public double Value { get; set; }
+            }
+
+            public static class Usage
+            {
+                public static TkFilter<Reading> LastHour(DateTimeOffset now) => Reading.Fields.At.Between(now.AddHours(-1), now);
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+        var reading = generated.Single();
+        Assert.Contains("TkIndex<Reading>(\"Day\", new int[] { 2 }, null)", reading, StringComparison.Ordinal);
+        Assert.Contains("TkIndex<Reading>(\"zone_At\", new int[] { 1 }, null, false, 60)", reading, StringComparison.Ordinal);
+        Assert.Contains("TkIndex<Reading>(\"zone_Day\", new int[] { 2 }, null, false, 1440)", reading, StringComparison.Ordinal);
+        Assert.Contains("TkIndex<Reading>(\"zone_Seen\", new int[] { 3 }, null, false, 5)", reading, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkZoneMap] public long Ticks { get; set; } }", "'Ticks'")]
+    [InlineData("[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkZoneMap] public System.TimeSpan Elapsed { get; set; } }", "'Elapsed'")]
+    [InlineData("[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkZoneMap(BucketMinutes = 0)] public System.DateTime At { get; set; } }", "'At'")]
+    [InlineData("[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkZoneMap] public System.DateTime Later => System.DateTime.MaxValue; }", "'Later'")]
+    public void A_zone_map_that_is_not_on_a_date_column_is_reported_as_an_error(string source, string says)
+    {
+        var (diagnostics, _) = Run("#nullable enable\nusing Tekium.Embedded;\n" + source, mustCompile: false);
+
+        var diagnostic = Assert.Single(diagnostics, static found => found.Id == "TK0018");
+        Assert.Equal(DiagnosticSeverity.Error, diagnostic.Severity);
+        Assert.Contains(says, diagnostic.GetMessage(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("TK0015", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkCheck] public int Count => Id; }", "'Count'")]
     [InlineData("TK0015", "[TkTable] public partial class T { [TkKey] public int Id { get; set; } [TkCheck] public bool Stored { get; set; } }", "'Stored'")]

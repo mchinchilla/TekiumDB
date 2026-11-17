@@ -9,7 +9,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
 
 > [!WARNING]
-> **Proyecto en fase temprana (Fase 6.8 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices especializados ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> **Proyecto en fase temprana (Fase 7 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Todavía no hay índices especializados ni paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
 
 ## Contenido
 
@@ -60,7 +60,7 @@ Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy
 
 **Índices**
 
-- Temporal: zone maps por hoja y split 100/0 para series de tiempo.
+- Temporal: zone maps por ventana de tiempo y split 100/0 para series de tiempo (ya existe: ver [Fechas y series de tiempo](#fechas-y-series-de-tiempo)).
 - UUID v7: localidad temporal aprovechada, hojas llenas en inserción secuencial.
 - Vectorial: HNSW persistido, con métricas coseno, L2 y producto interno, y cuantización `int8` opcional.
 - Secundarios genéricos, sobre expresiones y parciales (ya existen: ver [Índices y consultas](#índices-y-consultas)).
@@ -170,6 +170,36 @@ var plan = await orders.ExplainAsync(recent);                  // IndexScan, "Cu
 | Índice parcial | `Where` nombra una propiedad `bool` cuyo cuerpo compara columnas con constantes unidas por `&&`. Sólo se usa cuando la consulta implica esa condición; si el motor no puede probarlo, lo ignora |
 | Cambios de índices | Declarar uno nuevo, cambiarlo o quitarlo no requiere migración: la primera escritura con el tipo nuevo lo construye, reconstruye o elimina. Hasta entonces las consultas recorren la tabla |
 | Límite | Los valores indexados de una fila más su clave no pueden pasar de 1/16 de página (512 bytes con páginas de 8 KiB): una fila que lo exceda se rechaza con `TkIndexKeyTooLargeException` |
+
+### Fechas y series de tiempo
+
+Un índice sobre una fecha ordena por instante (el mismo momento en dos zonas horarias es una sola clave) y, si las fechas sólo crecen, sus hojas quedan llenas. Para tablas grandes escritas en orden de tiempo hay además un **zone map**: por cada ventana de tiempo, la tabla recuerda entre qué claves están sus filas, y una consulta por rango de fechas lee sólo ese tramo.
+
+```csharp
+[TkTable("readings")]
+public sealed partial class Reading
+{
+    [TkKey] public Guid Id { get; set; }                       // UUID v7: crece con el tiempo
+
+    [TkZoneMap] public DateTimeOffset At { get; set; }         // ventanas de una hora
+
+    public double Value { get; set; }
+}
+
+var lastDay = Reading.Fields.At.Between(now.AddDays(-1), now);
+await foreach (var reading in readings.QueryAsync(lastDay))    // ZoneScan, "zone_At"
+    Process(reading);
+```
+
+| | Zone map | Índice secundario |
+| --- | --- | --- |
+| Lo que guarda | Una entrada por ventana de tiempo | Una entrada por fila |
+| Costo al escribir | Casi nada: se anota en memoria y se escribe al confirmar | Un árbol más que mantener en cada escritura |
+| Rango de fechas | Lee de corrido el tramo de la tabla | Va a la tabla una vez por fila encontrada |
+| Cuándo sirve | Filas escritas más o menos en orden de fecha bajo claves que crecen | Siempre |
+| Precisión | Ventanas enteras: lee algunas filas de más y las descarta | Exacta |
+
+Se pueden declarar los dos sobre la misma columna: el planificador usa el zone map para rangos de varias ventanas y el índice para una fecha exacta o un rango corto. `BucketMinutes` cambia el tamaño de la ventana. Borrar filas no achica las ventanas.
 
 ### Restricciones
 
@@ -318,7 +348,8 @@ Las fases son estrictamente secuenciales: cada una termina con su criterio de sa
 | 6.5 | Restricciones declarativas: `CHECK`, `UNIQUE`, `FOREIGN KEY` | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.5.md); Windows sin verificar |
 | 6.7 | Change feed post-commit | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.7.md); Windows sin verificar |
 | 6.8 | Carga masiva: el B+Tree construido de abajo hacia arriba | Hecho en macOS y Linux, [medido](docs/benchmarks/fase-6.8.md): 3× más rápida que insertar fila por fila en una sola transacción, con la novena parte de la memoria; no es el orden de magnitud del criterio, que sólo se alcanza contra insertar con un commit cada mil filas (58×) |
-| 7 – 9 | Índices temporal, UUID v7 y vectorial HNSW | Pendiente |
+| 7 | Índice temporal con zone maps y split 100/0 | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-7.md); Windows sin verificar |
+| 8 – 9 | Índices UUID v7 y vectorial HNSW | Pendiente |
 | 10 – 10.6 | Herramientas, backup en caliente, verificación y viaje en el tiempo | Pendiente |
 | 11 – 12 | Capas LINQ y SQL con proveedor ADO.NET | Pendiente |
 | 13 – 14 | Funciones y procedimientos: C# por generador y PL/Tk | Pendiente |

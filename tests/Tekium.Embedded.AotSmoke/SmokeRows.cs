@@ -37,6 +37,7 @@ internal sealed partial class EventV2
     public string Title { get; set; } = string.Empty;
 
     [TkIndex]
+    [TkZoneMap]
     public DateTimeOffset At { get; set; }
 
     [TkCheck]

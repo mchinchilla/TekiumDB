@@ -200,7 +200,7 @@ internal static class TableEmitter
             {
                 var ordinals = string.Join(", ", index.Fields.Select(static field => field.ToString(CultureInfo.InvariantCulture)));
                 source.AppendLine(
-                    $"        new {Root}TkIndex<{table.Name}>({Literal(index.Name)}, new int[] {{ {ordinals} }}, {index.Where ?? "null"}{(index.Unique ? ", true" : string.Empty)}),");
+                    $"        new {Root}TkIndex<{table.Name}>({Literal(index.Name)}, new int[] {{ {ordinals} }}, {index.Where ?? "null"}{(index.ZoneMinutes > 0 ? ", false, " + index.ZoneMinutes.ToString(CultureInfo.InvariantCulture) : index.Unique ? ", true" : string.Empty)}),");
             }
 
             source.AppendLine("    };");
