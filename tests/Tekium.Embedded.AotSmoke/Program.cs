@@ -255,6 +255,40 @@ static async Task<int> SqlAsync()
             return 1;
         }
 
+        // Lo que la Fase 18 agregó: quitar, renombrar y cambiar columnas, y renombrar una tabla.
+        await RunAsync("ALTER TABLE cities RENAME COLUMN mayor TO head");
+        await RunAsync("ALTER TABLE cities DROP COLUMN head");
+        await RunAsync("ALTER TABLE people ALTER COLUMN born TEXT");
+        var guarded = string.Empty;
+        try
+        {
+            await RunAsync("ALTER TABLE cities RENAME TO towns");
+        }
+        catch (TkSqlException refused)
+        {
+            // La vista by_place nombra la tabla: renombrarla la dejaría rota.
+            guarded = refused.Message.Contains("view 'by_place'", StringComparison.Ordinal) ? "view" : refused.Message;
+        }
+
+        await RunAsync("DROP VIEW by_place");
+        await RunAsync("ALTER TABLE cities RENAME TO towns");
+        var renamed = await QueryAsync("SELECT t.name, t.country FROM towns t WHERE t.id = 3");
+        var still = string.Empty;
+        try
+        {
+            await RunAsync("DELETE FROM towns WHERE id = 1");
+        }
+        catch (TkConstraintException referred)
+        {
+            still = referred.Constraint;
+        }
+
+        if (renamed is not ["Cusco|PE"] || still != "lives_in" || guarded != "view")
+        {
+            await Console.Error.WriteLineAsync($"SQL of phase 18 failed: {string.Join(" ; ", renamed)} / {still} / {guarded}");
+            return 1;
+        }
+
         if (summary is ["Lima|100|297.0", "Quito|100|298.5"] && changed == 10 && plan.Exists(static line => line.Contains("Index by_city of people", StringComparison.Ordinal)))
         {
             return 0;

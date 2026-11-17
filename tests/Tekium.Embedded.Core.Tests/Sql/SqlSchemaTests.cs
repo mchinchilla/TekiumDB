@@ -436,8 +436,7 @@ public abstract class SqlSchemaTests : DatabaseTests
         await RefusedAsync<TkSqlException>(connection, "ALTER TABLE teams ADD COLUMN other INT DEFAULT 'abc'", "other");
         await RefusedAsync<TkSqlException>(connection, "ALTER TABLE teams ADD COLUMN other INT DEFAULT Id + 1", "Expected a value");
         await RefusedAsync<TkSqlException>(connection, "ALTER TABLE nowhere ADD COLUMN other INT", "no table 'nowhere'");
-        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE teams DROP COLUMN Name", "Expected CONSTRAINT");
-        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE teams RENAME TO clubs", "Expected ADD or DROP");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE teams SPLIT Name", "Expected ADD, DROP, RENAME or ALTER");
         await RefusedAsync<TkSqlException>(connection, "ALTER TABLE teams ADD COLUMN Dup BOOLEAN NOT NULL UNIQUE", "cannot be unique");
         await RefusedAsync<TkSqlException>(connection, "SELECT Dup FROM teams", "Dup");
 
@@ -480,6 +479,258 @@ public abstract class SqlSchemaTests : DatabaseTests
         await RefusedAsync<TkSqlException>(connection, "ALTER TABLE wide ADD COLUMN last INT", "all 255 schema versions");
         Assert.True((await database.VerifyAsync(Ct)).IsHealthy);
         await AssertNoLeaksAsync(database);
+    }
+
+    [Fact]
+    public async Task Dropping_renaming_and_changing_columns_agrees_with_a_model_of_the_rows_after_every_change()
+    {
+        await using var database = await OpenAsync(NewDevice());
+        await using var connection = new TkConnection(database);
+        await RunAsync(connection, "CREATE TABLE stock (id INT PRIMARY KEY, code TEXT NOT NULL, qty INT, price DECIMAL, note TEXT)");
+        await RunAsync(connection, "CREATE UNIQUE INDEX by_code ON stock (code)");
+        await RunAsync(connection, "CREATE INDEX by_qty ON stock (qty, id)");
+        var random = new Random(23);
+
+        // El modelo: los nombres y tipos de las columnas, y cada fila como texto por columna.
+        var columns = new List<(string Name, string Type)> { ("id", "INT"), ("code", "TEXT"), ("qty", "INT"), ("price", "DECIMAL"), ("note", "TEXT") };
+        var rows = new List<Dictionary<string, string>>();
+        for (var i = 1; i <= 300; i++)
+        {
+            var qty = random.Next(4) == 0 ? null : (int?)random.Next(-50, 500);
+            var price = random.Next(5) == 0 ? null : (decimal?)(random.Next(100_000) / 100m);
+            var note = random.Next(3) == 0 ? null : $"n{random.Next(20)}";
+            await RunAsync(connection, "INSERT INTO stock (id, code, qty, price, note) VALUES (@id, @code, @qty, @price, @note)", ("id", i), ("code", $"c{i:D4}"), ("qty", qty), ("price", price), ("note", note));
+            rows.Add(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["id"] = $"{i}", ["code"] = $"c{i:D4}", ["qty"] = Show(qty), ["price"] = Show(price), ["note"] = note ?? string.Empty,
+            });
+        }
+
+        await SameAsync();
+
+        // Renombrar: nada cambia en las filas ni en los índices, sólo los nombres; los índices siguen sirviendo.
+        await RunAsync(connection, "ALTER TABLE stock RENAME COLUMN qty TO amount");
+        Rename("qty", "amount");
+        await SameAsync();
+        Assert.Contains(await PlanAsync("SELECT id FROM stock WHERE amount = 7"), static line => line.Contains("by_qty", StringComparison.Ordinal));
+
+        // Cambiar el tipo: INT a BIGINT, DECIMAL a DOUBLE y vuelta, INT a TEXT. Cada valor se conserva.
+        await RunAsync(connection, "ALTER TABLE stock ALTER COLUMN amount TYPE BIGINT");
+        Retype("amount", "BIGINT");
+        await SameAsync();
+        Assert.Contains(await PlanAsync("SELECT id FROM stock WHERE amount > 400"), static line => line.Contains("by_qty", StringComparison.Ordinal));
+        await RunAsync(connection, "ALTER TABLE stock ALTER COLUMN price TYPE DECIMAL");
+        await RunAsync(connection, "ALTER TABLE stock ALTER COLUMN id TYPE INT");
+        await SameAsync();
+
+        // A NOT NULL: los NULL toman el valor dado, o se rechaza si no se da ninguno.
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE stock ALTER COLUMN amount BIGINT NOT NULL", "has NULL in");
+        await RunAsync(connection, "ALTER TABLE stock ALTER COLUMN amount BIGINT NOT NULL DEFAULT -1");
+        foreach (var row in rows.Where(static row => row["amount"].Length == 0))
+        {
+            row["amount"] = "-1";
+        }
+
+        await SameAsync();
+        await RefusedAsync<TkSqlException>(connection, "INSERT INTO stock (id, code) VALUES (999, 'x')", "cannot be NULL");
+        await RunAsync(connection, "ALTER TABLE stock ALTER COLUMN amount BIGINT NULL");
+        Assert.Equal(1, await RunAsync(connection, "INSERT INTO stock (id, code) VALUES (999, 'x')"));
+        rows.Add(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["id"] = "999", ["code"] = "x", ["amount"] = string.Empty, ["price"] = string.Empty, ["note"] = string.Empty });
+        await SameAsync();
+
+        // Quitar: el valor sale de cada fila; una columna nueva con el mismo nombre no lo recupera.
+        await RunAsync(connection, "ALTER TABLE stock DROP COLUMN note");
+        columns.RemoveAll(static column => column.Name == "note");
+        await SameAsync();
+        await RunAsync(connection, "ALTER TABLE stock ADD COLUMN note INT");
+        columns.Add(("note", "INT"));
+        foreach (var row in rows)
+        {
+            row["note"] = string.Empty;
+        }
+
+        await SameAsync();
+
+        // Un valor que el tipo nuevo no guarda tal cual se rechaza, y la tabla queda como estaba.
+        await RunAsync(connection, "UPDATE stock SET amount = 5000000000 WHERE id = 3");
+        rows.Single(static row => row["id"] == "3")["amount"] = "5000000000";
+        var tooBig = await RefusedAsync<TkSqlException>(connection, "ALTER TABLE stock ALTER COLUMN amount INT", "the row with key 3");
+        Assert.Contains("5000000000", tooBig, StringComparison.Ordinal);
+        var fraction = rows.First(static row => row["price"].Contains('.', StringComparison.Ordinal));
+        var lost = await RefusedAsync<TkSqlException>(connection, "ALTER TABLE stock ALTER COLUMN price INT", "cannot become an INT");
+        Assert.Contains($"the row with key {fraction["id"]} has {fraction["price"]}", lost, StringComparison.Ordinal);
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE stock ALTER COLUMN code INT", "c0001");
+        await SameAsync();
+
+        // Un texto que cambia al volverse número no se convierte: '1.0' sería 1, y de vuelta '1'.
+        await RunAsync(connection, "CREATE TABLE codes (id INT PRIMARY KEY, label TEXT UNIQUE)");
+        await RunAsync(connection, "INSERT INTO codes (id, label) VALUES (1, '1.0'), (2, NULL), (3, NULL)");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE codes ALTER COLUMN label DOUBLE", "the row with key 1 has '1.0' in it");
+
+        // Un índice único que dejaría de serlo se rechaza antes de tocar nada: los NULL no se repiten, el valor que los reemplaza sí.
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE codes ALTER COLUMN label TEXT NOT NULL DEFAULT 'none'", "unique index 'label_unique'");
+        Assert.Equal(["1|1.0", "2|", "3|"], await QueryAsync(connection, "SELECT id, label FROM codes ORDER BY id"));
+        await RunAsync(connection, "UPDATE codes SET label = '2.5' WHERE id = 2");
+        await RunAsync(connection, "DELETE FROM codes WHERE id IN (1, 3)");
+        await RunAsync(connection, "ALTER TABLE codes ALTER COLUMN label DECIMAL NOT NULL");
+        Assert.Equal(["2.5"], await QueryAsync(connection, "SELECT label FROM codes WHERE label > 2"));
+        Assert.Equal("label_unique", (await Assert.ThrowsAsync<TkConstraintException>(async () => await RunAsync(connection, "INSERT INTO codes (id, label) VALUES (9, 2.5)"))).Constraint);
+
+        // Lo que no se puede: la clave, una columna que un índice usa, una que no existe, dos con el mismo nombre.
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE stock DROP COLUMN id", "primary key");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE stock DROP COLUMN code", "index 'by_code'");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE stock DROP COLUMN nothing", "no column 'nothing'");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE stock RENAME COLUMN code TO PRICE", "already has a column 'PRICE'");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE stock ALTER COLUMN id TEXT", "primary key");
+        await RunAsync(connection, "DROP INDEX by_code ON stock");
+        await RunAsync(connection, "ALTER TABLE stock DROP COLUMN code");
+        columns.RemoveAll(static column => column.Name == "code");
+        await SameAsync();
+        Assert.True((await database.VerifyAsync(Ct)).IsHealthy);
+        await AssertNoLeaksAsync(database);
+
+        void Rename(string from, string to)
+        {
+            columns[columns.FindIndex(column => column.Name == from)] = (to, columns.Single(column => column.Name == from).Type);
+            foreach (var row in rows)
+            {
+                row[to] = row[from];
+                row.Remove(from);
+            }
+        }
+
+        void Retype(string name, string type) => columns[columns.FindIndex(column => column.Name == name)] = (name, type);
+
+        async Task SameAsync()
+        {
+            var names = string.Join(", ", columns.Select(static column => column.Name));
+            Assert.Equal(
+                rows.OrderBy(static row => int.Parse(row["id"], CultureInfo.InvariantCulture)).Select(row => string.Join('|', columns.Select(column => row.GetValueOrDefault(column.Name, string.Empty)))),
+                await QueryAsync(connection, $"SELECT {names} FROM stock ORDER BY id"));
+            await using var reader = database.BeginRead();
+            var stock = (await SqlTable.OpenAsync(reader, "stock", Ct))!;
+            Assert.Equal(columns.Select(static column => column.Name), stock.Columns.Select(static column => column.Name));
+            Assert.Null(stock.ReadOnlyReason);
+        }
+
+        async Task<List<string>> PlanAsync(string sql) => await QueryAsync(connection, "EXPLAIN " + sql);
+
+        static string Show(object? value) => value switch
+        {
+            null => string.Empty,
+            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+            _ => value.ToString()!,
+        };
+    }
+
+    [Fact]
+    public async Task A_renamed_table_keeps_its_rows_indexes_and_foreign_keys_and_a_row_type_reads_it_under_the_new_name()
+    {
+        await using var database = await OpenAsync(NewDevice());
+        await using var connection = new TkConnection(database);
+        await using (var writer = await database.BeginWriteAsync(Ct))
+        {
+            await database.Table<Team>().InsertAsync(writer, new Team { Id = 1, Name = "one" }, Ct);
+            await database.Table<Team>().InsertAsync(writer, new Team { Id = 2, Name = "two" }, Ct);
+            await writer.CommitAsync(Ct);
+        }
+
+        await RunAsync(connection, "CREATE TABLE fans (id INT PRIMARY KEY, team INT REFERENCES teams, rival INT, name TEXT NOT NULL)");
+        await RunAsync(connection, "ALTER TABLE fans ADD CONSTRAINT rival FOREIGN KEY (rival) REFERENCES fans");
+        await RunAsync(connection, "CREATE INDEX by_name ON teams (Name)");
+        await RunAsync(connection, "INSERT INTO fans (id, team, rival, name) VALUES (1, 1, NULL, 'ana'), (2, 2, 1, 'bea')");
+
+        // Una vista o un procedimiento que nombra la tabla impide renombrarla: dejaría de funcionar.
+        await RunAsync(connection, "CREATE VIEW loyal AS SELECT name FROM fans WHERE team = 1");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE fans RENAME TO supporters", "view 'loyal'");
+        await RunAsync(connection, "DROP VIEW loyal");
+
+        await using (var transaction = await connection.BeginTransactionAsync(Ct))
+        {
+            await RunAsync(connection, "ALTER TABLE teams RENAME TO clubs");
+            await RunAsync(connection, "ALTER TABLE clubs RENAME COLUMN Name TO Title");
+            await RunAsync(connection, "ALTER TABLE fans RENAME TO supporters");
+            await RunAsync(connection, "ALTER INDEX by_name ON clubs RENAME TO by_title");
+
+            // Dentro de la misma transacción ya se ve con los nombres nuevos, y el viejo no existe.
+            Assert.Equal(["1|one", "2|two"], await QueryAsync(connection, "SELECT Id, Title FROM clubs ORDER BY Id"));
+            await RefusedAsync<TkSqlException>(connection, "SELECT 1 FROM teams", "no table or view 'teams'");
+            await transaction.CommitAsync(Ct);
+        }
+
+        Assert.Equal(["ana|one", "bea|two"], await QueryAsync(connection, "SELECT s.name, c.Title FROM supporters s JOIN clubs c ON c.Id = s.team ORDER BY s.id"));
+        Assert.Contains(await QueryAsync(connection, "EXPLAIN SELECT Id FROM clubs WHERE Title = 'one'"), static line => line.Contains("by_title", StringComparison.Ordinal));
+
+        // Las claves foráneas siguen, con el nombre nuevo de cada lado, también la de la tabla a sí misma.
+        var missing = await Assert.ThrowsAsync<TkConstraintException>(async () => await RunAsync(connection, "INSERT INTO supporters (id, team, name) VALUES (3, 9, 'cora')"));
+        Assert.Contains("no row of 'clubs'", missing.Message, StringComparison.Ordinal);
+        var referred = await Assert.ThrowsAsync<TkConstraintException>(async () => await RunAsync(connection, "DELETE FROM clubs WHERE Id = 1"));
+        Assert.Equal("supporters", referred.Table);
+        Assert.Equal("rival", (await Assert.ThrowsAsync<TkConstraintException>(async () => await RunAsync(connection, "DELETE FROM supporters WHERE id = 1"))).Constraint);
+        await RefusedAsync<TkSqlException>(connection, "DROP TABLE clubs", "rows of 'supporters' refer to it");
+
+        await RefusedAsync<TkSqlException>(connection, "ALTER INDEX by_title ON clubs RENAME TO by_title", "already has an index 'by_title'");
+
+        // Un tipo de fila con el nombre y las columnas nuevas lee y escribe lo que había. Como no declara
+        // el índice, su primera escritura lo quita: el tipo manda sobre los índices de su tabla.
+        await using (var writer = await database.BeginWriteAsync(Ct))
+        {
+            Assert.Equal(new Club { Id = 2, Title = "two" }, await database.Table<Club>().GetAsync(writer, 2, Ct));
+            await database.Table<Club>().InsertAsync(writer, new Club { Id = 3, Title = "three" }, Ct);
+            await writer.CommitAsync(Ct);
+        }
+
+        await RefusedAsync<TkSqlException>(connection, "ALTER INDEX by_title ON clubs RENAME TO x", "no index 'by_title'");
+        Assert.Equal(1, await RunAsync(connection, "INSERT INTO supporters (id, team, name) VALUES (3, 3, 'cora')"));
+
+        // Lo que no se puede: un nombre que ya existe, una tabla que no existe, un índice que no existe.
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE clubs RENAME TO supporters", "already a table 'supporters'");
+        await RunAsync(connection, "CREATE VIEW all_clubs AS SELECT Id FROM clubs");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE supporters RENAME TO all_clubs", "already a view 'all_clubs'");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE nowhere RENAME TO x", "no table 'nowhere'");
+        await RefusedAsync<TkSqlException>(connection, "ALTER INDEX nothing ON clubs RENAME TO x", "no index 'nothing'");
+
+        // Un índice renombrado que usa una clave foránea sigue siendo el de la clave.
+        await using (var reader = database.BeginRead())
+        {
+            var supporters = (await SqlTable.OpenAsync(reader, "supporters", Ct))!;
+            var name = supporters.ForeignKeys.Single(static key => key.Info.Name == "fk_team").Info.Index;
+            await using var again = new TkConnection(database);
+            await RunAsync(again, $"ALTER INDEX \"{name}\" ON supporters RENAME TO by_team");
+        }
+
+        await using (var reader = database.BeginRead())
+        {
+            var supporters = (await SqlTable.OpenAsync(reader, "supporters", Ct))!;
+            Assert.Equal("by_team", supporters.ForeignKeys.Single(static key => key.Info.Name == "fk_team").Info.Index);
+        }
+
+        Assert.Equal("fk_team", (await Assert.ThrowsAsync<TkConstraintException>(async () => await RunAsync(connection, "DELETE FROM clubs WHERE Id = 3"))).Constraint);
+        await RefusedAsync<TkSqlException>(connection, "DROP INDEX by_team ON supporters", "FOREIGN KEY 'fk_team'");
+
+        Assert.True((await database.VerifyAsync(Ct)).IsHealthy);
+        await AssertNoLeaksAsync(database);
+    }
+
+    [Fact]
+    public async Task A_table_or_column_a_stored_procedure_names_is_not_renamed_or_dropped()
+    {
+        var device = NewDevice();
+        await using var database = await TekiumDb.OpenAsync(_ => device, new DbOptions { InMemory = true, PageSize = Options.PageSize, CacheSizeMb = Options.CacheSizeMb, KeyDerivation = Options.KeyDerivation, AllowStoredProcedures = true }, Ct);
+        await using var connection = new TkConnection(database);
+        await RunAsync(connection, "CREATE TABLE orders (id BIGINT PRIMARY KEY, total DECIMAL NOT NULL, placed INT NOT NULL, note TEXT)");
+        await RunAsync(connection, "CREATE PROCEDURE close_orders(p_before INT) AS $$ BEGIN DELETE FROM orders WHERE placed < p_before; END $$");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE orders RENAME TO sales", "procedure 'close_orders'");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE orders RENAME COLUMN placed TO day", "procedure 'close_orders'");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE orders DROP COLUMN placed", "procedure 'close_orders'");
+
+        // Lo que el procedimiento no nombra se cambia.
+        await RunAsync(connection, "ALTER TABLE orders RENAME COLUMN note TO memo");
+        await RunAsync(connection, "ALTER TABLE orders DROP COLUMN memo");
+        await RunAsync(connection, "ALTER TABLE orders ALTER COLUMN total DOUBLE NOT NULL");
+        await RunAsync(connection, "DROP PROCEDURE close_orders");
+        await RunAsync(connection, "ALTER TABLE orders RENAME TO sales");
+        Assert.Empty(await QueryAsync(connection, "SELECT id FROM sales"));
     }
 }
 

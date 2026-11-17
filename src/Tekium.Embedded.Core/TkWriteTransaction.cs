@@ -175,6 +175,22 @@ public sealed class TkWriteTransaction : TkTransaction
     }
 
     /// <summary>
+    /// Forgets what this transaction knows about a table, after its catalog entries were moved or written
+    /// by hand: the next use loads it from the catalog again. The index entries it was to remove at commit
+    /// are removed now, since nothing would remove them later.
+    /// </summary>
+    internal async ValueTask ForgetAsync(string name, CancellationToken cancellationToken)
+    {
+        if (_tables.Remove(name, out var state))
+        {
+            foreach (var dropped in state.DroppedIndexes)
+            {
+                await Database.Tree.DeleteAsync(_inner, dropped, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
     /// Records that an operation failed after it had begun to change the trees. A row and its index
     /// entries live in several trees, so what the transaction holds may no longer agree with itself.
     /// </summary>

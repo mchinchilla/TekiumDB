@@ -83,6 +83,78 @@ internal sealed class StoredIndex
         }
     }
 
+    /// <summary>
+    /// The same definition with some of its columns changed: each field, and each condition of a partial
+    /// index, naming a column in <paramref name="changes"/> gets that name, type and nullability. Everything
+    /// else is copied as it is.
+    /// </summary>
+    public static byte[] Redefine(byte[] definition, IReadOnlyDictionary<string, TkColumn> changes)
+    {
+        var copy = new ArrayBufferWriter<byte>(definition.Length + 16);
+        var position = 0;
+        var format = definition[position++];
+        Put(copy, format);
+        if (format == ZoneFormat)
+        {
+            copy.Write(definition.AsSpan(position, sizeof(int)));
+            position += sizeof(int);
+        }
+
+        var count = definition[position++];
+        Put(copy, count);
+        for (var i = 0; i < count; i++)
+        {
+            CopyField(definition, ref position, copy, changes);
+        }
+
+        var conditions = definition[position++];
+        Put(copy, conditions);
+        for (var i = 0; i < conditions; i++)
+        {
+            CopyField(definition, ref position, copy, changes);
+            var start = position;
+            position++;
+            position += sizeof(ushort) + BinaryPrimitives.ReadUInt16LittleEndian(definition.AsSpan(position));
+            position += sizeof(ushort) + BinaryPrimitives.ReadUInt16LittleEndian(definition.AsSpan(position));
+            copy.Write(definition.AsSpan(start, position - start));
+        }
+
+        copy.Write(definition.AsSpan(position));
+        return copy.WrittenSpan.ToArray();
+
+        static void CopyField(byte[] definition, ref int position, ArrayBufferWriter<byte> copy, IReadOnlyDictionary<string, TkColumn> changes)
+        {
+            var type = definition[position];
+            var nullable = definition[position + 1];
+            var isExpression = definition[position + 2];
+            var nameLength = definition[position + 3];
+            var name = Encoding.UTF8.GetString(definition, position + 4, nameLength);
+            var afterName = position + 4 + nameLength;
+            var end = afterName + sizeof(int) + BinaryPrimitives.ReadInt32LittleEndian(definition.AsSpan(afterName));
+            if (isExpression == 0 && changes.TryGetValue(name, out var column))
+            {
+                Put(copy, (byte)column.Type);
+                Put(copy, column.IsNullable ? (byte)1 : (byte)0);
+                Put(copy, 0);
+                Put(copy, (byte)Encoding.UTF8.GetByteCount(column.Name));
+                Encoding.UTF8.GetBytes(column.Name, copy);
+                copy.Write(definition.AsSpan(afterName, end - afterName));
+            }
+            else
+            {
+                copy.Write(definition.AsSpan(position, end - position));
+            }
+
+            position = end;
+        }
+
+        static void Put(ArrayBufferWriter<byte> writer, byte value)
+        {
+            writer.GetSpan(1)[0] = value;
+            writer.Advance(1);
+        }
+    }
+
     public static StoredIndex Decode(string name, byte[] definition, ReadOnlySpan<TkColumn> columns)
     {
         var index = new StoredIndex(name, definition);

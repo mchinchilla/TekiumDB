@@ -39,6 +39,51 @@ internal static class SqlValues
     };
 
     /// <summary>Turns a value into the one a column of this kind stores. Throws if it cannot be that.</summary>
+    /// <summary>
+    /// A value as a column of another type holds it, only if nothing of it is lost: changed back, it is the
+    /// value it was. A number or a moment becomes text as it is written in SQL; text becomes what it says.
+    /// </summary>
+    public static object ChangeType(object value, TkColumnType from, TkColumnType to, string column)
+    {
+        if (from == to)
+        {
+            return value;
+        }
+
+        object changed;
+        object back;
+        try
+        {
+            changed = to == TkColumnType.Text ? AsText(value) : Convert(Parsed(value, to), to, column);
+            back = from == TkColumnType.Text ? AsText(changed) : Convert(Parsed(changed, from), from, column);
+        }
+        catch (Exception exception) when (exception is FormatException or OverflowException)
+        {
+            throw new TkSqlException($"The value {Show(value)} cannot be stored in column '{column}', which would hold {to}.", exception);
+        }
+
+        return Compare(back, value) == 0 && (to != TkColumnType.Text || from != TkColumnType.Text)
+            ? changed
+            : throw new TkSqlException($"The value {Show(value)} cannot be kept as it is in column '{column}', which would hold {to}: it would become {Show(changed)}.");
+
+        // A number written as text is read as a number, the way SQL writes it.
+        static object Parsed(object value, TkColumnType type) => value is string text && IsNumber(Zero(type))
+            ? type is TkColumnType.F32 or TkColumnType.F64
+                ? double.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture)
+                : decimal.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture)
+            : value;
+
+        static object AsText(object value) => value switch
+        {
+            string text => text,
+            DateTimeOffset moment => moment.ToString("O", CultureInfo.InvariantCulture),
+            DateTime moment => moment.ToString("O", CultureInfo.InvariantCulture),
+            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+            byte[] => throw new TkSqlException("A BLOB has no text to become."),
+            _ => value.ToString() ?? string.Empty,
+        };
+    }
+
     public static object Convert(object value, TkColumnType type, string column)
     {
         try

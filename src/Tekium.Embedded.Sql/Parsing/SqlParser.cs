@@ -715,44 +715,172 @@ internal sealed partial class SqlParser
 
     private AlterTableStatement Alter()
     {
+        if (Accept("INDEX"))
+        {
+            var index = Name("an index name");
+            Expect("ON");
+            var on = Name("the table of the index");
+            ExpectWord("RENAME");
+            ExpectWord("TO");
+            return new AlterTableStatement(on, new RenameIndexAction(index, Name("a new name for the index")));
+        }
+
         Expect("TABLE");
         var table = Name("a table name");
         if (Accept("ADD"))
         {
             if (Is("CONSTRAINT") || Is("FOREIGN"))
             {
-                return new AlterTableStatement(table, null, null, ForeignKey(), null, false);
+                return new AlterTableStatement(table, new AddForeignKeyAction(ForeignKey()));
             }
 
-            // COLUMN is optional, and may also be the name of the column.
-            if (Is("COLUMN") && _position + 2 < _tokens.Count && _tokens[_position + 1].Kind is Kind.Word or Kind.Quoted && _tokens[_position + 2].Kind is Kind.Word or Kind.Quoted)
+            if (Accept("PRIMARY"))
             {
-                _position++;
+                Expect("KEY");
+                Expect("(");
+                var key = Name("a column name");
+                if (Is(","))
+                {
+                    throw Error(") (a primary key is one column)");
+                }
+
+                Expect(")");
+                return new AlterTableStatement(table, new AddPrimaryKeyAction(key));
             }
 
+            SkipColumnWord();
             var (column, reference, byDefault) = Column(true);
             if (reference is not null)
             {
                 throw new TkSqlException($"Column '{column.Name}' cannot be added with REFERENCES: add the column, then the constraint with ALTER TABLE {table} ADD FOREIGN KEY.");
             }
 
-            return new AlterTableStatement(table, column, byDefault.Value, null, null, false) { HasDefault = byDefault.Given };
+            return new AlterTableStatement(table, new AddColumnAction(column, byDefault.Given, byDefault.Value));
         }
 
         if (Accept("DROP"))
         {
-            Expect("CONSTRAINT");
-            var ifExists = false;
-            if (Accept("IF"))
+            if (Accept("CONSTRAINT"))
             {
-                Expect("EXISTS");
-                ifExists = true;
+                var ifExists = false;
+                if (Accept("IF"))
+                {
+                    Expect("EXISTS");
+                    ifExists = true;
+                }
+
+                return new AlterTableStatement(table, new DropConstraintAction(Name("a constraint name"), ifExists));
             }
 
-            return new AlterTableStatement(table, null, null, null, Name("a constraint name"), ifExists);
+            SkipColumnWord();
+            return new AlterTableStatement(table, new DropColumnAction(Name("a column name")));
         }
 
-        throw Error("ADD or DROP");
+        if (AcceptWord("RENAME"))
+        {
+            if (AcceptWord("TO"))
+            {
+                return new AlterTableStatement(table, new RenameTableAction(Name("a new name for the table")));
+            }
+
+            SkipColumnWord();
+            var column = Name("a column name");
+            ExpectWord("TO");
+            return new AlterTableStatement(table, new RenameColumnAction(column, Name("a new name for the column")));
+        }
+
+        if (AcceptWord("ALTER"))
+        {
+            SkipColumnWord();
+            var name = Name("a column name");
+
+            // TYPE is optional, and may also be the name of a type no column has.
+            if (Is("TYPE") && _position + 1 < _tokens.Count && _tokens[_position + 1].Kind is Kind.Word or Kind.Quoted)
+            {
+                _position++;
+            }
+
+            var type = ColumnType();
+            bool? notNull = null;
+            (bool Given, object? Value) byDefault = default;
+            while (true)
+            {
+                if (Accept("NOT"))
+                {
+                    Expect("NULL");
+                    notNull = true;
+                }
+                else if (Accept("NULL"))
+                {
+                    notNull = false;
+                }
+                else if (Is("DEFAULT"))
+                {
+                    _position++;
+                    byDefault = (true, WrittenValue());
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            return new AlterTableStatement(table, new AlterColumnAction(name, type, notNull, byDefault.Given, byDefault.Value));
+        }
+
+        throw Error("ADD, DROP, RENAME or ALTER");
+    }
+
+    /// <summary>COLUMN is optional before a column name, and may also be the name of the column.</summary>
+    private void SkipColumnWord()
+    {
+        if (Is("COLUMN") && _position + 1 < _tokens.Count && _tokens[_position + 1].Kind is Kind.Word or Kind.Quoted
+            && !(_tokens[_position + 1].Kind == Kind.Word && Reserved.Contains(_tokens[_position + 1].Text)))
+        {
+            _position++;
+        }
+    }
+
+    /// <summary>A word that is not reserved, so that it can also be a name elsewhere.</summary>
+    private bool AcceptWord(string word)
+    {
+        if (Current.Kind == Kind.Word && string.Equals(Current.Text, word, StringComparison.OrdinalIgnoreCase))
+        {
+            _position++;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void ExpectWord(string word)
+    {
+        if (!AcceptWord(word))
+        {
+            throw Error(word);
+        }
+    }
+
+    /// <summary>The names a text of SQL uses: every word and quoted name, in order. Used to find what a view or procedure refers to.</summary>
+    public static IEnumerable<string> Names(string text)
+    {
+        List<Token> tokens;
+        try
+        {
+            tokens = Tokenize(text);
+        }
+        catch (TkSqlException)
+        {
+            yield break;
+        }
+
+        foreach (var token in tokens)
+        {
+            if (token.Kind is Kind.Word or Kind.Quoted)
+            {
+                yield return token.Text;
+            }
+        }
     }
 
     private DropStatement Drop()

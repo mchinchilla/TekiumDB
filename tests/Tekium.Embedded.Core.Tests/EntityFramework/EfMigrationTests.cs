@@ -209,16 +209,13 @@ public abstract class EfMigrationTests : DatabaseTests
         await using var db = new Library(options);
         var generator = db.GetService<IMigrationsSqlGenerator>();
 
-        // Lo que reescribiría filas, o lo que el motor no tiene, se rechaza por su nombre.
+        // Lo que el motor no tiene se rechaza por su nombre.
         (MigrationOperation Operation, string Mention)[] refused =
         [
-            (new DropColumnOperation { Table = "Books", Name = "Title" }, "drop column 'Title' of table 'Books'"),
-            (new RenameColumnOperation { Table = "Books", Name = "Title", NewName = "Name" }, "rename column 'Title' of table 'Books'"),
-            (new AlterColumnOperation { Table = "Books", Name = "Title", ClrType = typeof(string), ColumnType = "TEXT" }, "change column 'Title' of table 'Books'"),
-            (new RenameTableOperation { Name = "Books", NewName = "Tomes" }, "rename table 'Books'"),
-            (new RenameIndexOperation { Table = "Books", Name = "IX_Books_Isbn", NewName = "IX" }, "rename index 'IX_Books_Isbn'"),
-            (new AddPrimaryKeyOperation { Table = "Books", Name = "PK", Columns = ["Id"] }, "change the primary key of table 'Books'"),
-            (new DropPrimaryKeyOperation { Table = "Books", Name = "PK" }, "change the primary key of table 'Books'"),
+            (new DropPrimaryKeyOperation { Table = "Books", Name = "PK" }, "drop the primary key of table 'Books'"),
+            (new AddPrimaryKeyOperation { Table = "Books", Name = "PK", Columns = ["Id", "Title"] }, "primary key of 2 columns"),
+            (new AlterColumnOperation { Table = "Books", Name = "Title", ClrType = typeof(string), ColumnType = "TEXT", DefaultValueSql = "'x'", OldColumn = new AddColumnOperation { Table = "Books", Name = "old", ClrType = typeof(string), ColumnType = "TEXT" } }, "default or computed value"),
+            (new RenameTableOperation { Name = "Books", NewName = "Tomes", NewSchema = "audit" }, "schemas"),
             (new AddCheckConstraintOperation { Table = "Books", Name = "CK", Sql = "Pages > 0" }, "CHECK constraint 'CK'"),
             (new DropCheckConstraintOperation { Table = "Books", Name = "CK" }, "CHECK constraint 'CK'"),
             (new CreateSequenceOperation { Name = "numbers", ClrType = typeof(long) }, "sequences"),
@@ -246,6 +243,15 @@ public abstract class EfMigrationTests : DatabaseTests
                 new DropUniqueConstraintOperation { Table = "Books", Name = "AK_Books_Title" },
                 new DropIndexOperation { Table = "Books", Name = "IX_Books_Isbn" },
                 new DropForeignKeyOperation { Table = "Books", Name = "FK_Books_Shelves_ShelfId" },
+                new DropColumnOperation { Table = "Books", Name = "Note" },
+                new RenameColumnOperation { Table = "Books", Name = "Title", NewName = "Name" },
+                new AlterColumnOperation { Table = "Books", Name = "Pages", ClrType = typeof(long), ColumnType = "BIGINT", OldColumn = new AddColumnOperation { Table = "Books", Name = "old", ClrType = typeof(int), ColumnType = "INT" } },
+                new AlterColumnOperation { Table = "Books", Name = "Isbn", ClrType = typeof(string), ColumnType = "TEXT", OldColumn = new AddColumnOperation { Table = "Books", Name = "old", ClrType = typeof(string), ColumnType = "TEXT", IsNullable = true } },
+                new AlterColumnOperation { Table = "Books", Name = "Name", ClrType = typeof(string), ColumnType = "TEXT", OldColumn = new AddColumnOperation { Table = "Books", Name = "old", ClrType = typeof(string), ColumnType = "TEXT" } },
+                new DropPrimaryKeyOperation { Table = "Books", Name = "PK_Books" },
+                new RenameTableOperation { Name = "Books", NewName = "Tomes" },
+                new RenameIndexOperation { Table = "Tomes", Name = "IX_Books_ShelfId", NewName = "IX_Tomes_ShelfId" },
+                new AddPrimaryKeyOperation { Table = "Tomes", Name = "PK_Tomes", Columns = ["Id"] },
             ],
             db.Model);
         Assert.Equal(
@@ -256,6 +262,13 @@ public abstract class EfMigrationTests : DatabaseTests
                 """DROP INDEX "AK_Books_Title" ON "Books";""",
                 """DROP INDEX "IX_Books_Isbn" ON "Books";""",
                 """ALTER TABLE "Books" DROP CONSTRAINT "FK_Books_Shelves_ShelfId";""",
+                """ALTER TABLE "Books" DROP COLUMN "Note";""",
+                """ALTER TABLE "Books" RENAME COLUMN "Title" TO "Name";""",
+                """ALTER TABLE "Books" ALTER COLUMN "Pages" BIGINT NOT NULL;""",
+                """ALTER TABLE "Books" ALTER COLUMN "Isbn" TEXT NOT NULL DEFAULT '';""",
+                """ALTER TABLE "Books" RENAME TO "Tomes";""",
+                """ALTER INDEX "IX_Books_ShelfId" ON "Tomes" RENAME TO "IX_Tomes_ShelfId";""",
+                """ALTER TABLE "Tomes" ADD PRIMARY KEY ("Id");""",
             ],
             commands.Select(static command => command.CommandText.Trim()));
 
@@ -269,7 +282,7 @@ public abstract class EfMigrationTests : DatabaseTests
         var broken = new DbContextOptionsBuilder<Annex>().UseTekium(database).ConfigureWarnings(static w => w.Ignore(RelationalEventId.PendingModelChangesWarning)).Options;
         await using var annex = new Annex(broken);
         var failed = await Assert.ThrowsAsync<NotSupportedException>(() => annex.Database.MigrateAsync(Ct));
-        Assert.Contains("drop column 'Label' of table 'Rooms'", failed.Message, StringComparison.Ordinal);
+        Assert.Contains("CHECK constraint 'CK_Rooms_Label'", failed.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("20260102000000_Broken", await annex.Database.GetAppliedMigrationsAsync(Ct));
         await using (var reader = database.BeginRead())
         {
@@ -631,7 +644,7 @@ public sealed class BrokenMigration : Migration
                 Id = table.Column<int>(nullable: false),
             },
             constraints: static table => table.PrimaryKey("PK_Halls", static x => x.Id));
-        migrationBuilder.DropColumn("Label", "Rooms");
+        migrationBuilder.AddCheckConstraint("CK_Rooms_Label", "Rooms", "Label <> ''");
     }
 }
 

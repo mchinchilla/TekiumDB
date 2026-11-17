@@ -465,20 +465,491 @@ internal sealed class SqlEngine
             throw new TkSqlException($"Table '{table.Name}' cannot be changed through SQL: {reason}.");
         }
 
-        if (alter.AddForeignKey is { } foreignKey)
+        switch (alter.Action)
         {
-            await AddForeignKeyAsync(writer, table, foreignKey, cancellationToken).ConfigureAwait(false);
-        }
-        else if (alter.DropConstraint is { } constraint)
-        {
-            await DropConstraintAsync(writer, table, constraint, alter.IfExists, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            await AddColumnAsync(writer, table, alter.AddColumn!, alter.HasDefault, alter.Default, cancellationToken).ConfigureAwait(false);
+            case AddForeignKeyAction add:
+                await AddForeignKeyAsync(writer, table, add.ForeignKey, cancellationToken).ConfigureAwait(false);
+                break;
+            case DropConstraintAction drop:
+                await DropConstraintAsync(writer, table, drop.Name, drop.IfExists, cancellationToken).ConfigureAwait(false);
+                break;
+            case AddColumnAction add:
+                await AddColumnAsync(writer, table, add.Column, add.HasDefault, add.Default, cancellationToken).ConfigureAwait(false);
+                break;
+            case AddPrimaryKeyAction key:
+                if (table.Column(key.Column) != table.KeyColumn)
+                {
+                    throw new TkSqlException(
+                        $"The primary key of table '{table.Name}' is '{table.Columns[table.KeyColumn].Name}', and the primary key of a table does not change.");
+                }
+
+                break;
+            case DropColumnAction drop:
+                await DropColumnAsync(writer, table, drop.Name, cancellationToken).ConfigureAwait(false);
+                break;
+            case RenameColumnAction rename:
+                await RenameColumnAsync(writer, table, rename.Name, rename.NewName, cancellationToken).ConfigureAwait(false);
+                break;
+            case AlterColumnAction change:
+                await AlterColumnAsync(writer, table, change, cancellationToken).ConfigureAwait(false);
+                break;
+            case RenameTableAction rename:
+                await RenameTableAsync(writer, table, rename.NewName, cancellationToken).ConfigureAwait(false);
+                break;
+            case RenameIndexAction rename:
+                await RenameIndexAsync(writer, table, rename.Name, rename.NewName, cancellationToken).ConfigureAwait(false);
+                break;
+            default:
+                throw new TkSqlException("Unsupported change of a table.");
         }
 
         return new SqlResult();
+    }
+
+    private static int Existing(SqlTable table, string name) =>
+        table.Column(name) is >= 0 and var at ? at : throw new TkSqlException($"Table '{table.Name}' has no column '{name}'.");
+
+    private static async ValueTask DropColumnAsync(TkWriteTransaction writer, SqlTable table, string name, CancellationToken cancellationToken)
+    {
+        var column = Existing(table, name);
+        if (column == table.KeyColumn)
+        {
+            throw new TkSqlException($"Column '{table.Columns[column].Name}' is the primary key of table '{table.Name}' and cannot be dropped.");
+        }
+
+        if (table.Indexes.Find(index => index.Columns.Contains(column) || index.Where.Any(condition => condition.Column == column)) is { } used)
+        {
+            throw new TkSqlException($"Column '{table.Columns[column].Name}' of table '{table.Name}' cannot be dropped: index '{used.Name}' uses it. Drop the index first.");
+        }
+
+        await EnsureUnnamedAsync(writer, table.Name, table.Columns[column].Name, "dropped", cancellationToken).ConfigureAwait(false);
+        var from = Enumerable.Range(0, table.Columns.Length).Where(i => i != column).ToArray();
+        await RewriteAsync(writer, table, [.. from.Select(i => table.Columns[i])], from, null, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask RenameColumnAsync(TkWriteTransaction writer, SqlTable table, string name, string newName, CancellationToken cancellationToken)
+    {
+        var column = Existing(table, name);
+        if (table.Column(newName) is >= 0 and var other && other != column)
+        {
+            throw new TkSqlException($"Table '{table.Name}' already has a column '{newName}'.");
+        }
+
+        await EnsureUnnamedAsync(writer, table.Name, table.Columns[column].Name, "renamed", cancellationToken).ConfigureAwait(false);
+        TkColumn[] columns = [.. table.Columns];
+        try
+        {
+            columns[column] = new TkColumn(newName, columns[column].Type, columns[column].IsNullable);
+        }
+        catch (ArgumentException invalid)
+        {
+            throw new TkSqlException($"Column '{name}' of table '{table.Name}' cannot be called '{newName}': {invalid.Message}", invalid);
+        }
+
+        await RewriteAsync(writer, table, columns, [.. Enumerable.Range(0, columns.Length)], null, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask AlterColumnAsync(TkWriteTransaction writer, SqlTable table, AlterColumnAction change, CancellationToken cancellationToken)
+    {
+        var column = Existing(table, change.Name);
+        var old = table.Columns[column];
+        var replacement = new TkColumn(old.Name, change.Type, change.NotNull is { } notNull ? !notNull : old.IsNullable);
+        if (column == table.KeyColumn && (replacement.Type != old.Type || replacement.IsNullable))
+        {
+            throw new TkSqlException($"Column '{old.Name}' is the primary key of table '{table.Name}': its type does not change, and it cannot be NULL.");
+        }
+
+        if (replacement.Type != old.Type && table.ForeignKeys.Find(key => key.Column == column) is { Info.Name: { } user })
+        {
+            throw new TkSqlException(
+                $"Column '{old.Name}' of table '{table.Name}' cannot change its type while FOREIGN KEY '{user}' is on it: it is of the type of the key it refers to. Drop the constraint first.");
+        }
+
+        if (table.Indexes.Find(index => index.Where.Any(condition => condition.Column == column)) is { } partial && replacement != old)
+        {
+            throw new TkSqlException($"Column '{old.Name}' of table '{table.Name}' cannot change: the condition of partial index '{partial.Name}' is written for it as it is.");
+        }
+
+        if (replacement == old)
+        {
+            return;
+        }
+
+        object? fill = null;
+        if (change.HasDefault && change.Default is not null)
+        {
+            fill = SqlValues.Convert(change.Default, replacement.Type, replacement.Name);
+        }
+
+        TkColumn[] columns = [.. table.Columns];
+        columns[column] = replacement;
+        await RewriteAsync(writer, table, columns, [.. Enumerable.Range(0, columns.Length)], fill is null ? null : new Dictionary<int, object> { [column] = fill }, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Writes every row of a table again with other columns: a new version of the schema, each column
+    /// taken from a column of the old one (<paramref name="from"/>), its value changed to the new type
+    /// only if nothing of it is lost, and NULL replaced with <paramref name="fill"/> where the column can
+    /// no longer hold it. The indexes whose entries change are built again; the others keep their entries
+    /// and get the new names. Everything is checked before anything is written.
+    /// </summary>
+    private static async ValueTask RewriteAsync(
+        TkWriteTransaction writer, SqlTable table, TkColumn[] columns, int[] from, Dictionary<int, object>? fill, CancellationToken cancellationToken)
+    {
+        if (table.Version == byte.MaxValue)
+        {
+            throw new TkSqlException($"Table '{table.Name}' has used all {byte.MaxValue} schema versions a table may have.");
+        }
+
+        if (columns.Select(static column => column.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != columns.Length)
+        {
+            throw new TkSqlException($"Table '{table.Name}' would have two columns with the same name.");
+        }
+
+        var keyColumn = Array.IndexOf(from, table.KeyColumn);
+        var schema = new TableSchema((byte)(table.Version + 1), columns, keyColumn);
+
+        // The rows as they will be. Nothing is written until every one of them is known to fit.
+        var rows = new List<(byte[] Key, object?[] Row)>();
+        await foreach (var old in table.ScanAsync(default, default, cancellationToken).ConfigureAwait(false))
+        {
+            var row = new object?[columns.Length];
+            for (var i = 0; i < columns.Length; i++)
+            {
+                var value = old[from[i]];
+                var before = table.Columns[from[i]];
+                if (value is not null && before.Type != columns[i].Type)
+                {
+                    try
+                    {
+                        value = SqlValues.ChangeType(value, before.Type, columns[i].Type, columns[i].Name);
+                    }
+                    catch (TkSqlException refused)
+                    {
+                        throw new TkSqlException(
+                            $"Column '{before.Name}' of table '{table.Name}' cannot become {TypeName(columns[i].Type)}: the row with key {SqlValues.Show(old[table.KeyColumn])} has {SqlValues.Show(value)} in it. {refused.Message}",
+                            refused);
+                    }
+                }
+
+                if (value is null && !columns[i].IsNullable)
+                {
+                    value = fill?.GetValueOrDefault(i) ?? throw new TkSqlException(
+                        $"Column '{before.Name}' of table '{table.Name}' cannot become NOT NULL: the row with key {SqlValues.Show(old[table.KeyColumn])} has NULL in it. Give a DEFAULT for those rows.");
+                }
+
+                row[i] = value;
+            }
+
+            rows.Add((table.Key(old[table.KeyColumn]!), row));
+        }
+
+        // How each index is after the change: the same entries under new names, or entries to build again.
+        var changed = new Dictionary<string, TkColumn>(StringComparer.Ordinal);
+        for (var i = 0; i < columns.Length; i++)
+        {
+            if (table.Columns[from[i]] != columns[i])
+            {
+                changed[table.Columns[from[i]].Name] = columns[i];
+            }
+        }
+
+        var plans = new List<(StoredIndex Old, byte[] Definition, bool Rebuild)>();
+        foreach (var index in table.Indexes)
+        {
+            var uses = index.Columns.Where(static column => column >= 0).Select(column => table.Columns[column].Name).ToArray();
+            if (!uses.Any(changed.ContainsKey))
+            {
+                plans.Add((index, index.Definition, false));
+                continue;
+            }
+
+            var rebuild = uses.Any(name => changed.TryGetValue(name, out var to) && (to.Type != table.Columns[table.Column(name)].Type || to.IsNullable != table.Columns[table.Column(name)].IsNullable));
+            var definition = StoredIndex.Redefine(index.Definition, changed);
+            if (rebuild && index.IsUnique)
+            {
+                var decoded = StoredIndex.Decode(index.Name, definition, columns);
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var (_, row) in rows)
+                {
+                    if (SqlTable.IndexedValues(decoded, row) is { } values && !seen.Add(Convert.ToHexString(values)))
+                    {
+                        throw new TkSqlException(
+                            $"Table '{table.Name}' cannot be changed: two rows would have the same values in unique index '{index.Name}' (one of them has key {SqlValues.Show(row[keyColumn])}).");
+                    }
+                }
+            }
+
+            plans.Add((index, definition, rebuild));
+        }
+
+        var state = await writer.TableAsync(table.Name, table.TableKey, cancellationToken).ConfigureAwait(false);
+        var tree = writer.Database.Tree;
+        try
+        {
+            var encoded = new byte[schema.EncodedSize()];
+            schema.Encode(encoded);
+            await tree.PutAsync(writer.Inner, CatalogStore.SchemaKey(table.TableKey, schema.Version), encoded, cancellationToken).ConfigureAwait(false);
+            state.Schema = schema;
+            state.UncommittedVersion = schema.Version;
+            state.Changed = true;
+
+            // Whatever row type wrote the table in this transaction must look at its columns and indexes again.
+            state.WritesAs = null;
+            state.IndexedAs = null;
+            state.Bound = [];
+
+            foreach (var (key, row) in rows)
+            {
+                state.Root = await tree.PutAsync(writer.Inner, state.Root, key, SqlValues.EncodeRow(schema.Version, columns, row), cancellationToken).ConfigureAwait(false);
+            }
+
+            var indexes = await writer.IndexesAsync(state, cancellationToken).ConfigureAwait(false);
+            foreach (var (old, definition, rebuild) in plans)
+            {
+                if (ReferenceEquals(definition, old.Definition))
+                {
+                    continue;
+                }
+
+                var entry = indexes[old.Name];
+                if (rebuild)
+                {
+                    await BTree.DropAsync(writer.Inner, entry.Root, cancellationToken).ConfigureAwait(false);
+                }
+
+                indexes[old.Name] = new TkWriteTransaction.IndexEntry(entry.CatalogKey, definition) { Root = rebuild ? default : entry.Root, Dirty = true };
+            }
+
+            var current = await TableAsync(writer, table.Name, cancellationToken).ConfigureAwait(false);
+            foreach (var index in current.Indexes.Where(index => plans.Exists(plan => plan.Rebuild && plan.Old.Name == index.Name)))
+            {
+                foreach (var (_, row) in rows)
+                {
+                    await current.IndexRowAsync(index, row, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            // A foreign key on a column that now may, or may not, be NULL is looked up as the index holds it.
+            await RenullForeignKeysAsync(writer, table, state, columns, from, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not TkSqlException)
+        {
+            writer.Fail();
+            throw;
+        }
+    }
+
+    private static async ValueTask RenullForeignKeysAsync(
+        TkWriteTransaction writer, SqlTable table, TkWriteTransaction.TableState state, TkColumn[] columns, int[] from, CancellationToken cancellationToken)
+    {
+        if (table.ForeignKeys.Count == 0)
+        {
+            return;
+        }
+
+        var constraints = ConstraintSet.Decode(await writer.ConstraintsAsync(state, cancellationToken).ConfigureAwait(false));
+        var foreignKeys = constraints.ForeignKeys.Select(key =>
+        {
+            var column = table.ForeignKeys.Find(known => known.Info.Name == key.Name).Column;
+            var now = columns[Array.IndexOf(from, column)];
+            return key with { IsNullable = now.IsNullable };
+        }).ToArray();
+        if (foreignKeys.SequenceEqual(constraints.ForeignKeys))
+        {
+            return;
+        }
+
+        await writer.SetConstraintsAsync(state, ConstraintSet.Create(constraints.Checks, foreignKeys).Encoded, cancellationToken).ConfigureAwait(false);
+        foreach (var parent in foreignKeys.Select(static key => key.Table).Distinct(StringComparer.Ordinal))
+        {
+            await SetReferrersAsync(writer, table.Name, parent, foreignKeys, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Refuses to change what a view or a stored procedure names: they are text, and would stop working.
+    /// With a column, only those that name both the table and the column.
+    /// </summary>
+    private static async ValueTask EnsureUnnamedAsync(TkWriteTransaction writer, string table, string? column, string what, CancellationToken cancellationToken)
+    {
+        await foreach (var name in SqlTable.NamesAsync(writer, 8, cancellationToken).ConfigureAwait(false))
+        {
+            if (await SelectRunner.ViewAsync(writer, name, cancellationToken).ConfigureAwait(false) is var (_, text) && Names(text, table, column))
+            {
+                throw new TkSqlException(
+                    $"{(column is null ? $"Table '{table}'" : $"Column '{column}' of table '{table}'")} cannot be {what}: view '{name}' uses it. Drop or replace the view first.");
+            }
+        }
+
+        await foreach (var name in SqlTable.NamesAsync(writer, 9, cancellationToken).ConfigureAwait(false))
+        {
+            if (await StoredAsync(writer, name, cancellationToken).ConfigureAwait(false) is not var (_, bytes))
+            {
+                continue;
+            }
+
+            var program = PlProgram.Decode(bytes, name);
+            if (program.Constants.Any(constant => constant.Kind != PlConstant.Name && Names(constant.Text, table, column)))
+            {
+                throw new TkSqlException(
+                    $"{(column is null ? $"Table '{table}'" : $"Column '{column}' of table '{table}'")} cannot be {what}: procedure '{name}' uses it. Drop or replace the procedure first.");
+            }
+        }
+
+        static bool Names(string text, string table, string? column)
+        {
+            var names = SqlParser.Names(text).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return names.Contains(table) && (column is null || names.Contains(column));
+        }
+    }
+
+    /// <summary>
+    /// Gives a table another name. No row moves: its catalog entries go under the new name, and so do the
+    /// foreign keys of the tables it refers to and of those that refer to it.
+    /// </summary>
+    private static async ValueTask RenameTableAsync(TkWriteTransaction writer, SqlTable table, string newName, CancellationToken cancellationToken)
+    {
+        if (await SqlTable.ResolveAsync(writer, newName, cancellationToken).ConfigureAwait(false) is { } taken && !string.Equals(taken, table.Name, StringComparison.Ordinal))
+        {
+            throw new TkSqlException($"There is already a table '{taken}'.");
+        }
+
+        if (await SelectRunner.ViewAsync(writer, newName, cancellationToken).ConfigureAwait(false) is var (view, _))
+        {
+            throw new TkSqlException($"There is already a view '{view}'.");
+        }
+
+        byte[] newKey;
+        try
+        {
+            newKey = CatalogStore.TableKey(newName);
+        }
+        catch (ArgumentException invalid)
+        {
+            throw new TkSqlException($"Table '{table.Name}' cannot be called '{newName}': {invalid.Message}", invalid);
+        }
+
+        await EnsureUnnamedAsync(writer, table.Name, null, "renamed", cancellationToken).ConfigureAwait(false);
+        var oldName = table.Name;
+        var tree = writer.Database.Tree;
+        var source = writer.Inner;
+        var state = await writer.TableAsync(oldName, table.TableKey, cancellationToken).ConfigureAwait(false);
+        var indexes = await writer.IndexesAsync(state, cancellationToken).ConfigureAwait(false);
+        var constraints = ConstraintSet.Decode(await writer.ConstraintsAsync(state, cancellationToken).ConfigureAwait(false));
+        var referrers = await writer.ReferrersAsync(state, cancellationToken).ConfigureAwait(false);
+        string Renamed(string name) => string.Equals(name, oldName, StringComparison.Ordinal) ? newName : name;
+        try
+        {
+            // What the transaction knows of a table by the new name (one dropped earlier in it) goes first.
+            await writer.ForgetAsync(newName, cancellationToken).ConfigureAwait(false);
+            for (var version = 1; version <= state.Schema!.Version; version++)
+            {
+                var key = CatalogStore.SchemaKey(table.TableKey, (byte)version);
+                var schema = await CatalogStore.ReadAsync(source, source.Root, key, cancellationToken).ConfigureAwait(false);
+                if (schema.Length > 0)
+                {
+                    await tree.PutAsync(source, CatalogStore.SchemaKey(newKey, (byte)version), schema, cancellationToken).ConfigureAwait(false);
+                    await tree.DeleteAsync(source, key, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            var info = new byte[TableInfo.EncodedSize];
+            new TableInfo(state.Root, state.Schema.Version).Encode(info);
+            await tree.PutAsync(source, newKey, info, cancellationToken).ConfigureAwait(false);
+            await tree.DeleteAsync(source, table.TableKey, cancellationToken).ConfigureAwait(false);
+            foreach (var (name, entry) in indexes)
+            {
+                await tree.PutAsync(source, CatalogStore.IndexKey(newKey, name), CatalogStore.EncodeIndex(entry.Root, entry.Definition), cancellationToken).ConfigureAwait(false);
+                await tree.DeleteAsync(source, entry.CatalogKey, cancellationToken).ConfigureAwait(false);
+            }
+
+            ForeignKeyInfo[] foreignKeys = [.. constraints.ForeignKeys.Select(key => key with { Table = Renamed(key.Table) })];
+            await Move(CatalogStore.ConstraintsKey(table.TableKey), CatalogStore.ConstraintsKey(newKey), ConstraintSet.Create(constraints.Checks, foreignKeys).Encoded).ConfigureAwait(false);
+            List<Referrer> renamed = [.. referrers.Select(referrer => referrer with { Table = Renamed(referrer.Table) })];
+            await Move(CatalogStore.ReferrersKey(table.TableKey), CatalogStore.ReferrersKey(newKey), ConstraintSet.EncodeReferrers(renamed)).ConfigureAwait(false);
+            await writer.ForgetAsync(oldName, cancellationToken).ConfigureAwait(false);
+
+            // The tables it refers to know it by its new name...
+            foreach (var parent in foreignKeys.Select(static key => key.Table).Distinct(StringComparer.Ordinal).Where(parent => parent != newName))
+            {
+                await writer.SetReferrersAsync(parent, oldName, [], cancellationToken).ConfigureAwait(false);
+                await SetReferrersAsync(writer, newName, parent, foreignKeys, cancellationToken).ConfigureAwait(false);
+            }
+
+            // ...and so do the foreign keys of the tables that refer to it.
+            foreach (var child in renamed.Select(static referrer => referrer.Table).Distinct(StringComparer.Ordinal).Where(child => child != newName))
+            {
+                var childState = await writer.TableAsync(child, CatalogStore.TableKey(child), cancellationToken).ConfigureAwait(false);
+                var theirs = ConstraintSet.Decode(await writer.ConstraintsAsync(childState, cancellationToken).ConfigureAwait(false));
+                ForeignKeyInfo[] updated = [.. theirs.ForeignKeys.Select(key => key with { Table = Renamed(key.Table) })];
+                await writer.SetConstraintsAsync(childState, ConstraintSet.Create(theirs.Checks, updated).Encoded, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception) when (exception is not TkSqlException)
+        {
+            writer.Fail();
+            throw;
+        }
+
+        async ValueTask Move(byte[] from, byte[] to, byte[] value)
+        {
+            await tree.DeleteAsync(source, from, cancellationToken).ConfigureAwait(false);
+            if (value.Length > 0)
+            {
+                await tree.PutAsync(source, to, value, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static async ValueTask RenameIndexAsync(TkWriteTransaction writer, SqlTable table, string name, string newName, CancellationToken cancellationToken)
+    {
+        var index = table.Indexes.Find(index => string.Equals(index.Name, name, StringComparison.OrdinalIgnoreCase))
+            ?? throw new TkSqlException($"Table '{table.Name}' has no index '{name}'.");
+        if (table.Indexes.Exists(other => string.Equals(other.Name, newName, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new TkSqlException($"Table '{table.Name}' already has an index '{newName}'.");
+        }
+
+        byte[] catalogKey;
+        try
+        {
+            catalogKey = CatalogStore.IndexKey(table.TableKey, newName);
+        }
+        catch (ArgumentException invalid)
+        {
+            throw new TkSqlException($"Index '{name}' cannot be called '{newName}': {invalid.Message}", invalid);
+        }
+
+        var state = await writer.TableAsync(table.Name, table.TableKey, cancellationToken).ConfigureAwait(false);
+        var indexes = await writer.IndexesAsync(state, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var entry = indexes[index.Name];
+            indexes.Remove(index.Name);
+            state.DroppedIndexes.Add(entry.CatalogKey);
+            indexes.Add(newName, new TkWriteTransaction.IndexEntry(catalogKey, entry.Definition) { Root = entry.Root, Dirty = true });
+            state.IndexedAs = null;
+            state.Bound = [];
+
+            // A foreign key names the index it is checked with, and so does what the table it refers to knows of it.
+            var constraints = ConstraintSet.Decode(await writer.ConstraintsAsync(state, cancellationToken).ConfigureAwait(false));
+            if (constraints.ForeignKeys.Any(key => key.Index == index.Name))
+            {
+                ForeignKeyInfo[] foreignKeys = [.. constraints.ForeignKeys.Select(key => key.Index == index.Name ? key with { Index = newName } : key)];
+                await writer.SetConstraintsAsync(state, ConstraintSet.Create(constraints.Checks, foreignKeys).Encoded, cancellationToken).ConfigureAwait(false);
+                foreach (var parent in foreignKeys.Select(static key => key.Table).Distinct(StringComparer.Ordinal))
+                {
+                    await SetReferrersAsync(writer, table.Name, parent, foreignKeys, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is not TkSqlException)
+        {
+            writer.Fail();
+            throw;
+        }
     }
 
     /// <summary>

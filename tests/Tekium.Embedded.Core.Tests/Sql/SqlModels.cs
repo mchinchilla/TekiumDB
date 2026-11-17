@@ -87,3 +87,13 @@ public sealed partial record PlayerWithNumber
 
     public string? Nick { get; set; }
 }
+
+/// <summary>La tabla "teams" después de renombrarla a "clubs" y su columna Name a Title, como la lee un tipo nuevo.</summary>
+[TkTable("clubs")]
+public sealed partial record Club
+{
+    [TkKey]
+    public int Id { get; set; }
+
+    public string Title { get; set; } = string.Empty;
+}

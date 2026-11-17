@@ -633,6 +633,38 @@ internal sealed class SqlTable
         return changes;
     }
 
+    /// <summary>
+    /// The indexed values of a row as an index holds them, without its key: what a unique index compares.
+    /// Null if a partial index leaves the row out or one of the values is NULL, which never repeats.
+    /// </summary>
+    public static byte[]? IndexedValues(StoredIndex index, object?[] row)
+    {
+        Span<byte> scratch = stackalloc byte[512];
+        foreach (var (column, type, nullable, range) in index.Where)
+        {
+            var field = new TkKeyWriter(scratch);
+            SqlValues.WriteField(ref field, row[column], type, nullable);
+            if (!range.Contains(scratch[..field.Length]))
+            {
+                return null;
+            }
+        }
+
+        var buffer = new byte[4096];
+        var writer = new TkKeyWriter(buffer);
+        for (var i = 0; i < index.Columns.Length; i++)
+        {
+            if (row[index.Columns[i]] is null)
+            {
+                return null;
+            }
+
+            SqlValues.WriteField(ref writer, row[index.Columns[i]], index.Types[i], index.Nullable[i]);
+        }
+
+        return buffer.AsSpan(0, writer.Length).ToArray();
+    }
+
     /// <summary>The entry of a row in an index: its indexed values and its primary key. Null if a partial index leaves the row out.</summary>
     private byte[]? Entry(StoredIndex index, object?[] row, byte[] key, out int prefix, out bool hasNull)
     {

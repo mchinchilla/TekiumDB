@@ -248,17 +248,18 @@ var big = await connection.QueryAsync<Order>(
 
 | | |
 | --- | --- |
-| Sentencias | `SELECT` con `INNER JOIN` y `LEFT JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`; `INSERT`, `UPDATE`, `DELETE`, cada uno con `RETURNING`; `CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `CREATE PROCEDURE` y sus `DROP`; `ALTER TABLE` para agregar una columna o agregar y quitar una clave foránea; `CALL`; `EXPLAIN` |
+| Sentencias | `SELECT` con `INNER JOIN` y `LEFT JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`; `INSERT`, `UPDATE`, `DELETE`, cada uno con `RETURNING`; `CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `CREATE PROCEDURE` y sus `DROP`; `ALTER TABLE` para agregar, quitar, renombrar o cambiar una columna, agregar y quitar una clave foránea, o renombrar la tabla; `ALTER INDEX … RENAME TO`; `CALL`; `EXPLAIN` |
 | Subconsultas | `EXISTS (…)`, `x IN (…)`, una consulta como valor y una consulta en el `FROM`. Pueden leer la fila de la consulta de afuera, y se corren una vez por fila |
 | Expresiones | `CASE`, `CAST`, `LIKE`, `BETWEEN`, `IN`, aritmética, `||`, `COALESCE`, `LOWER`, `UPPER`, `LENGTH`, `ABS`, `STARTSWITH`, `ENDSWITH`, `CONTAINS` |
 | Claves | Una clave primaria entera que no se da en un `INSERT` es la siguiente a la más alta de la tabla |
 | Claves foráneas | `REFERENCES otra` en una columna, o `FOREIGN KEY (columna) REFERENCES otra`, en `CREATE TABLE` o en `ALTER TABLE … ADD CONSTRAINT`. Una columna que se refiere a la clave primaria de una tabla. La fila referida tiene que existir, y no se puede borrar mientras algo se refiera a ella; no hay `ON DELETE CASCADE`. Una violación aborta la transacción. Es la misma restricción que declara `[TkForeignKey]`, con los mismos bytes |
+| Cambiar columnas | `DROP COLUMN c`, `RENAME COLUMN a TO b` y `ALTER COLUMN c TIPO [NOT NULL \| NULL] [DEFAULT valor]` escriben otra vez cada fila de la tabla dentro de la transacción, como una versión nueva del esquema; los índices sobre una columna que cambia de tipo o de nulabilidad se construyen otra vez, los demás sólo cambian de nombres. Un valor se convierte sólo si no pierde nada (5000000000 no se vuelve `INT`, 2.5 no se vuelve 2, `'1.0'` no se vuelve 1.0); las filas con `NULL` en una columna que pasa a `NOT NULL` toman el `DEFAULT`, o el cambio se rechaza. Todo se comprueba antes de escribir nada. No se puede: la clave primaria, una columna que un índice usa (al quitar), el tipo de una columna con clave foránea, y lo que nombre una vista o un procedimiento almacenado. `RENAME TO` no mueve filas. En una tabla de un millón de filas con dos índices, reescribir tarda de 1 a 1,7 s y tiene la tabla en memoria ([mediciones](docs/benchmarks/fase-18.md)) |
 | Columnas nuevas | `ALTER TABLE t ADD COLUMN c TIPO [NOT NULL] [DEFAULT valor]` no reescribe ninguna fila: las que había leen la columna como `NULL`, o como el cero de su tipo si no puede ser `NULL`. Sólo un `DEFAULT` distinto de eso las escribe otra vez. El valor por omisión es para las filas que había; no se guarda para las que vengan |
 | Las mismas tablas | SQL lee las tablas que declaran los tipos con `[TkTable]`, y lo que escribe es lo que escribiría la API tipada, filas e índices. Una tabla con índices sobre expresiones, zone maps o `CHECK` se lee con SQL pero no se escribe |
 | Vistas | Consultas guardadas, de lectura; pueden usar otras vistas, y una que acabaría usándose a sí misma se rechaza al crearla |
 | `EXPLAIN` | El camino elegido, con las filas estimadas (desde la forma del árbol de cada índice) y las que salieron |
 | Sólo asíncrono | `OpenAsync`, `ExecuteReaderAsync`, `BeginTransactionAsync`…; los métodos síncronos de ADO.NET lanzan. Con Dapper: `QueryAsync`, `ExecuteAsync` |
-| Lo que no hay | `UNION`, joins derechos y completos, quitar, renombrar o cambiar una columna, renombrar una tabla, subconsultas en consultas con `GROUP BY` o en `UPDATE`/`DELETE`, búsqueda vectorial desde SQL |
+| Lo que no hay | `UNION`, joins derechos y completos, cambiar la clave primaria, subconsultas en consultas con `GROUP BY` o en `UPDATE`/`DELETE`, búsqueda vectorial desde SQL |
 
 [Mediciones y detalle](docs/benchmarks/fase-12.md).
 
@@ -298,10 +299,10 @@ var busy = await shop.Blogs
 | Sólo asíncrono | `ToList()`, `SaveChanges()`, `EnsureCreated()` y los demás métodos síncronos lanzan `NotSupportedException`: TekiumDB no hace E/S síncrona |
 | Claves | De una columna. Una clave `int` o `long` la asigna la base; una `Guid`, EF Core |
 | Claves foráneas | Se crean en la base y la base las comprueba: una referencia a una fila que no existe no se guarda. Sólo impiden: diga lo que diga `OnDelete`, la base no borra nada en cascada. EF Core sigue borrando los dependientes que tiene cargados; con dependientes sin cargar, el borrado falla donde SQLite borraría en cascada. De una columna, referida a una clave primaria |
-| Migraciones | `MigrateAsync`, con su tabla de historial y cada corrida en una transacción: crear y borrar tablas, agregar columnas, crear y borrar índices, agregar y quitar claves foráneas, datos sembrados. Quitar, renombrar o cambiar una columna, y renombrar una tabla, se rechazan por su nombre: habría que escribir la tabla otra vez. `dotnet ef database update` no funciona, porque es síncrono; los demás comandos de `dotnet ef` no se han probado contra este proveedor |
+| Migraciones | `MigrateAsync`, con su tabla de historial y cada corrida en una transacción: crear, renombrar y borrar tablas; agregar, renombrar, cambiar y quitar columnas; crear, renombrar y borrar índices; agregar y quitar claves foráneas; datos sembrados. Las operaciones que el comparador de modelos de EF Core escribe para una columna o tabla renombrada, un cambio de tipo o de nulabilidad y una propiedad quitada están comprobadas contra SQLite. Un cambio que no cabe en las filas falla antes de escribir nada, y la migración no queda anotada. `dotnet ef database update` no funciona, porque es síncrono; los demás comandos de `dotnet ef` no se han probado contra este proveedor |
 | Tipos | `bool`, `byte`, `short`, `int`, `long`, `float`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `TimeSpan`, `byte[]`, enumeraciones, y sus formas anulables. Las fechas con zona se comparan y ordenan como instantes, cosa que SQLite no sabe hacer |
 | Texto | `StartsWith`, `EndsWith` y `Contains` comparan caracteres, como en .NET: las mayúsculas cuentan |
-| Lo que no hay | Claves de varias columnas; borrado en cascada en la base; valores por omisión guardados por la base (`HasDefaultValue`); migraciones que quiten, renombren o cambien una columna; scripts idempotentes; puntos de guardado; `Union`; y lo que EF Core no sabe traducir falla diciéndolo |
+| Lo que no hay | Claves de varias columnas; borrado en cascada en la base; valores por omisión guardados por la base (`HasDefaultValue`); cambiar la clave primaria; scripts idempotentes; puntos de guardado; `Union`; y lo que EF Core no sabe traducir falla diciéndolo |
 | Native AOT | Este paquete no: EF Core arma sus consultas con reflexión y código generado en ejecución |
 
 ### Funciones y procedimientos en C#
@@ -780,11 +781,11 @@ Lo que conviene saber antes de adoptarla:
 - **Un proceso por archivo.** No hay acceso concurrente desde varios procesos.
 - **Un escritor a la vez.** Las escrituras se serializan; muchos commits pequeños y durables son más lentos que en SQLite con WAL.
 - **Lectores largos hacen crecer el archivo**, y el archivo no se achica solo: se compacta con `tkdb compact`.
-- **SQL es un subconjunto:** sin `UNION` ni joins derechos o completos; `ALTER TABLE` agrega columnas y claves foráneas pero no quita, renombra ni cambia una columna; una subconsulta se corre una vez por fila de la consulta de afuera.
+- **SQL es un subconjunto:** sin `UNION` ni joins derechos o completos; cambiar una columna escribe la tabla entera otra vez y la tiene en memoria; una subconsulta se corre una vez por fila de la consulta de afuera.
 - **LINQ traduce o rechaza:** sin `||`, `!=`, ordenar ni agrupar.
 - **Sin triggers, vistas materializadas, replicación ni borrado en cascada.** En su lugar: restricciones declarativas, índices sobre expresiones y change feed.
 - **El índice vectorial** no recupera el espacio de los vectores borrados hasta eliminarlo, y no se consulta desde SQL.
-- **El proveedor de Entity Framework Core es sólo asíncrono.** Sus claves foráneas impiden pero nunca borran en cascada, y sus migraciones no pueden quitar, renombrar ni cambiar una columna.
+- **El proveedor de Entity Framework Core es sólo asíncrono.** Sus claves foráneas impiden pero nunca borran en cascada.
 - **Formato de archivo sin estabilizar** hasta la primera versión publicada.
 
 ## Compilar y probar

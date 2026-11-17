@@ -55,6 +55,12 @@ if (args is ["backup", ..])
     return;
 }
 
+if (args is ["rewrite", ..])
+{
+    await RewriteReport.RunAsync(args.Length > 1 ? int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : 1_000_000);
+    return;
+}
+
 if (args is ["procedures", ..])
 {
     await ProcedureReport.RunAsync(args.Length > 1 ? int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : 10_000);

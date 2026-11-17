@@ -79,13 +79,34 @@ internal sealed record ForeignKeyDefinition(string? Name, string Column, string 
 internal sealed record CreateTableStatement(
     string Name, IReadOnlyList<ColumnDefinition> Columns, bool IfNotExists, IReadOnlyList<ForeignKeyDefinition> ForeignKeys) : SqlStatement;
 
-/// <summary>ALTER TABLE: exactly one of a column to add (with the value the rows there are take), a FOREIGN KEY to add, or a constraint to drop.</summary>
-internal sealed record AlterTableStatement(
-    string Table, ColumnDefinition? AddColumn, object? Default, ForeignKeyDefinition? AddForeignKey, string? DropConstraint, bool IfExists) : SqlStatement
-{
-    /// <summary>Gets a value indicating whether the column to add was given a DEFAULT, which may be NULL.</summary>
-    public bool HasDefault { get; init; }
-}
+/// <summary>ALTER TABLE (or ALTER INDEX, which names its table too): one change to one table.</summary>
+internal sealed record AlterTableStatement(string Table, AlterAction Action) : SqlStatement;
+
+internal abstract record AlterAction;
+
+/// <summary>A column to add, with the value the rows there are take (which may be NULL) if one is given.</summary>
+internal sealed record AddColumnAction(ColumnDefinition Column, bool HasDefault, object? Default) : AlterAction;
+
+internal sealed record AddForeignKeyAction(ForeignKeyDefinition ForeignKey) : AlterAction;
+
+internal sealed record DropConstraintAction(string Name, bool IfExists) : AlterAction;
+
+/// <summary>ADD PRIMARY KEY (column): accepted only when the column already is the key, which never changes.</summary>
+internal sealed record AddPrimaryKeyAction(string Column) : AlterAction;
+
+internal sealed record DropColumnAction(string Name) : AlterAction;
+
+internal sealed record RenameColumnAction(string Name, string NewName) : AlterAction;
+
+internal sealed record RenameTableAction(string NewName) : AlterAction;
+
+internal sealed record RenameIndexAction(string Name, string NewName) : AlterAction;
+
+/// <summary>
+/// A new type for a column, and whether it can be NULL (null keeps what it was); the rows that have NULL
+/// in it take <c>Default</c> if one is given.
+/// </summary>
+internal sealed record AlterColumnAction(string Name, TkColumnType Type, bool? NotNull, bool HasDefault, object? Default) : AlterAction;
 
 internal sealed record CreateIndexStatement(string Name, string Table, IReadOnlyList<string> Columns, bool Unique, bool IfNotExists) : SqlStatement;
 

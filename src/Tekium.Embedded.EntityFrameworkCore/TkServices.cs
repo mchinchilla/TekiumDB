@@ -200,13 +200,13 @@ public sealed class TkDatabaseCreator(RelationalDatabaseCreatorDependencies depe
 }
 
 /// <summary>
-/// Writes the operations of a migration as TekiumDB reads them: tables, columns added, indexes and foreign
-/// keys. What would have to write a table again (dropping, renaming or changing a column, renaming a
-/// table) is refused by name, and so is what the engine does not have.
+/// Writes the operations of a migration as TekiumDB reads them: tables, columns, indexes and foreign keys,
+/// and their names. Dropping, renaming or changing a column writes every row of its table again inside the
+/// migration's transaction. What the engine does not have is refused by name.
 /// </summary>
 public sealed class TkMigrationsSqlGenerator(MigrationsSqlGeneratorDependencies dependencies) : MigrationsSqlGenerator(dependencies)
 {
-    private const string Can = "A migration over TekiumDB can create and drop tables, add columns, create and drop indexes, and add and drop foreign keys.";
+    private const string Can = "A migration over TekiumDB can create, rename and drop tables; add, rename, change and drop columns; create, rename and drop indexes; and add and drop foreign keys.";
 
     /// <inheritdoc/>
     public override IReadOnlyList<MigrationCommand> Generate(
@@ -217,6 +217,27 @@ public sealed class TkMigrationsSqlGenerator(MigrationsSqlGeneratorDependencies 
         // The ones declared with a table wait until the tables and the indexes of the migration are there:
         // they use the index EF creates for them, and may refer to a table created later.
         var ordered = new List<MigrationOperation>(operations);
+
+        // EF drops the primary key of a table before renaming it and adds it again after. The key of a
+        // table does not change: the pair is left out, and what is added is checked to be the key it has.
+        var renamed = ordered.OfType<RenameTableOperation>().Where(static rename => rename.NewName is not null)
+            .ToDictionary(static rename => rename.Name, static rename => rename.NewName!, StringComparer.Ordinal);
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            if (ordered[i] is not DropPrimaryKeyOperation drop)
+            {
+                continue;
+            }
+
+            var table = renamed.GetValueOrDefault(drop.Table, drop.Table);
+            if (!ordered.Skip(i + 1).Any(operation => operation is AddPrimaryKeyOperation add && (add.Table == drop.Table || add.Table == table)))
+            {
+                throw Unsupported($"drop the primary key of table '{drop.Table}': the key of a table does not change");
+            }
+
+            ordered.RemoveAt(i--);
+        }
+
         var last = ordered.FindLastIndex(static operation => operation is CreateTableOperation or CreateIndexOperation);
         if (last >= 0)
         {
@@ -391,32 +412,117 @@ public sealed class TkMigrationsSqlGenerator(MigrationsSqlGeneratorDependencies 
     }
 
     /// <inheritdoc/>
-    protected override void Generate(DropColumnOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true) =>
-        throw Unsupported($"drop column '{operation?.Name}' of table '{operation?.Table}': that would write the table again");
+    protected override void Generate(DropColumnOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table)).Append(" DROP COLUMN ").Append(helper.DelimitIdentifier(operation.Name));
+        End(builder, terminate);
+    }
 
     /// <inheritdoc/>
-    protected override void Generate(RenameColumnOperation operation, IModel? model, MigrationCommandListBuilder builder) =>
-        throw Unsupported($"rename column '{operation?.Name}' of table '{operation?.Table}'");
+    protected override void Generate(RenameColumnOperation operation, IModel? model, MigrationCommandListBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table)).Append(" RENAME COLUMN ").Append(helper.DelimitIdentifier(operation.Name))
+            .Append(" TO ").Append(helper.DelimitIdentifier(operation.NewName));
+        End(builder, true);
+    }
+
+    /// <summary>
+    /// A new type or nullability for a column. Nothing is written when neither changes. A column that can no
+    /// longer be NULL gives the rows that have NULL in it the default of the operation, or the zero of its
+    /// type, which is what the SQLite provider does when it writes the table again.
+    /// </summary>
+    /// <inheritdoc/>
+    protected override void Generate(AlterColumnOperation operation, IModel? model, MigrationCommandListBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        if (operation.DefaultValueSql is not null || operation.ComputedColumnSql is not null)
+        {
+            throw Unsupported($"give column '{operation.Name}' of table '{operation.Table}' a default or computed value: a column keeps none, so set the value in the application");
+        }
+
+        var type = operation.ColumnType ?? GetColumnType(operation.Schema, operation.Table, operation.Name, operation, model)!;
+        var old = operation.OldColumn.ColumnType ?? GetColumnType(operation.Schema, operation.Table, operation.Name, operation.OldColumn, model);
+        if (string.Equals(type, old, StringComparison.OrdinalIgnoreCase) && operation.IsNullable == operation.OldColumn.IsNullable)
+        {
+            return;
+        }
+
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table)).Append(" ALTER COLUMN ").Append(helper.DelimitIdentifier(operation.Name))
+            .Append(" ").Append(type).Append(operation.IsNullable ? " NULL" : " NOT NULL");
+        if (!operation.IsNullable && operation.OldColumn.IsNullable)
+        {
+            var value = operation.DefaultValue ?? Zero(Nullable.GetUnderlyingType(operation.ClrType) ?? operation.ClrType);
+            var mapping = Dependencies.TypeMappingSource.FindMapping(value.GetType(), type) ?? Dependencies.TypeMappingSource.GetMappingForValue(value);
+            builder.Append(" DEFAULT ").Append(mapping.GenerateSqlLiteral(value));
+        }
+
+        End(builder, true);
+
+        static object Zero(Type type) =>
+            type == typeof(string) ? string.Empty
+            : type == typeof(byte[]) ? Array.Empty<byte>()
+            : Activator.CreateInstance(type) ?? throw new NotSupportedException($"Column of type {type} has no value for the rows that had NULL.");
+    }
 
     /// <inheritdoc/>
-    protected override void Generate(AlterColumnOperation operation, IModel? model, MigrationCommandListBuilder builder) =>
-        throw Unsupported($"change column '{operation?.Name}' of table '{operation?.Table}': that would write the table again");
+    protected override void Generate(RenameTableOperation operation, IModel? model, MigrationCommandListBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        if (operation.NewSchema is not null && operation.NewSchema != operation.Schema)
+        {
+            throw Unsupported("use schemas");
+        }
+
+        if (operation.NewName is null || operation.NewName == operation.Name)
+        {
+            return;
+        }
+
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Name)).Append(" RENAME TO ").Append(helper.DelimitIdentifier(operation.NewName));
+        End(builder, true);
+    }
 
     /// <inheritdoc/>
-    protected override void Generate(RenameTableOperation operation, IModel? model, MigrationCommandListBuilder builder) =>
-        throw Unsupported($"rename table '{operation?.Name}'");
+    protected override void Generate(RenameIndexOperation operation, IModel? model, MigrationCommandListBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER INDEX ").Append(helper.DelimitIdentifier(operation.Name)).Append(" ON ")
+            .Append(helper.DelimitIdentifier(operation.Table ?? throw Unsupported($"rename index '{operation.Name}' without the name of its table")))
+            .Append(" RENAME TO ").Append(helper.DelimitIdentifier(operation.NewName));
+        End(builder, true);
+    }
 
+    /// <summary>The key of a table does not change: this is accepted only when the column already is the key.</summary>
     /// <inheritdoc/>
-    protected override void Generate(RenameIndexOperation operation, IModel? model, MigrationCommandListBuilder builder) =>
-        throw Unsupported($"rename index '{operation?.Name}': drop it and create it with the new name");
+    protected override void Generate(AddPrimaryKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(builder);
+        if (operation.Columns.Length != 1)
+        {
+            throw Unsupported($"give table '{operation.Table}' a primary key of {operation.Columns.Length} columns");
+        }
 
-    /// <inheritdoc/>
-    protected override void Generate(AddPrimaryKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true) =>
-        throw Unsupported($"change the primary key of table '{operation?.Table}'");
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table)).Append(" ADD PRIMARY KEY (").Append(helper.DelimitIdentifier(operation.Columns[0])).Append(")");
+        End(builder, terminate);
+    }
 
     /// <inheritdoc/>
     protected override void Generate(DropPrimaryKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true) =>
-        throw Unsupported($"change the primary key of table '{operation?.Table}'");
+        throw Unsupported($"drop the primary key of table '{operation?.Table}': the key of a table does not change");
 
     /// <inheritdoc/>
     protected override void Generate(AddCheckConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder) =>
