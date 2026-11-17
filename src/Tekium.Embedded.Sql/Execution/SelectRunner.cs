@@ -15,9 +15,10 @@ namespace Tekium.Embedded.Sql.Execution;
 /// allows it, and otherwise read once and matched in memory. Every condition is checked on every row,
 /// whatever path reached it: the plan only narrows what is read.
 /// </summary>
-internal sealed class SelectRunner(TkTransaction transaction, IReadOnlyDictionary<string, object?> parameters, CancellationToken cancellationToken)
+internal sealed class SelectRunner(TkTransaction transaction, StatementContext parameters, CancellationToken cancellationToken)
 {
     private const int MaxViewDepth = 32;
+    private const int BlockSize = 1024;
 
     private readonly List<Source> _sources = [];
 
@@ -69,7 +70,13 @@ internal sealed class SelectRunner(TkTransaction transaction, IReadOnlyDictionar
         }
 
         var names = items.Select((item, i) => item.Alias ?? (item.Expression as ColumnRef)?.Name ?? $"column{i + 1}").ToArray();
+
+        // The select list is computed a block of rows at a time, so that a vectorized function is called once per block.
+        parameters.Batching = true;
         var select = items.Select(item => bind(item.Expression!)).ToArray();
+        parameters.Batching = false;
+        var vectors = parameters.VectorCalls.ToArray();
+        parameters.VectorCalls.Clear();
         var order = query.OrderBy.Select(item => OrderKey(item.Expression, names, bind)).ToArray();
         var limit = query.Limit is null ? long.MaxValue : Whole(query.Limit, "LIMIT");
         var offset = query.Offset is null ? 0 : Whole(query.Offset, "OFFSET");
@@ -79,20 +86,56 @@ internal sealed class SelectRunner(TkTransaction transaction, IReadOnlyDictionar
         var seen = query.Distinct ? new HashSet<SqlKey>() : null;
         if (limit > 0)
         {
+            var block = new List<object?[]>(BlockSize);
+            var done = false;
             await foreach (var row in rows.ConfigureAwait(false))
             {
-                var values = Array.ConvertAll(select, evaluator => evaluator(row));
-                if (seen is not null && !seen.Add(new SqlKey(values)))
-                {
-                    continue;
-                }
+                block.Add(row);
 
-                output.Add((values, Array.ConvertAll(order, key => key(row, values))));
-                if (streaming && output.Count - offset >= limit)
+                // Without vectorized calls there is nothing to gain from waiting for more rows.
+                if (block.Count == (vectors.Length == 0 ? 1 : BlockSize) && Project())
                 {
-                    // Nothing sorts or dedupes after this: no need to read further.
+                    done = true;
                     break;
                 }
+            }
+
+            if (!done)
+            {
+                Project();
+            }
+
+            // Computes the block. True when nothing sorts or dedupes afterwards and the limit is reached: no need to read further.
+            bool Project()
+            {
+                foreach (var vector in vectors)
+                {
+                    vector.Prepare(block);
+                }
+
+                foreach (var row in block)
+                {
+                    var values = Array.ConvertAll(select, evaluator => evaluator(row));
+                    if (seen is not null && !seen.Add(new SqlKey(values)))
+                    {
+                        continue;
+                    }
+
+                    output.Add((values, Array.ConvertAll(order, key => key(row, values))));
+                    if (streaming && output.Count - offset >= limit)
+                    {
+                        block.Clear();
+                        return true;
+                    }
+                }
+
+                block.Clear();
+                foreach (var vector in vectors)
+                {
+                    vector.Clear();
+                }
+
+                return false;
             }
         }
 
@@ -698,6 +741,8 @@ internal sealed class SelectRunner(TkTransaction transaction, IReadOnlyDictionar
     private async ValueTask<(List<object?[]> Rows, Func<SqlExpr, Evaluator> Bind)> GroupAsync(
         IAsyncEnumerable<object?[]> rows, SelectStatement query, List<SelectItem> items)
     {
+        // Keys and the arguments of the aggregates are computed a block of rows at a time, like the select list.
+        parameters.Batching = true;
         var keys = query.GroupBy.Select(expression => Binder.Bind(expression, Resolve, parameters, null)).ToArray();
         var keyTexts = query.GroupBy.Select(Binder.Key).ToList();
         var calls = new List<Call>();
@@ -710,22 +755,52 @@ internal sealed class SelectRunner(TkTransaction transaction, IReadOnlyDictionar
             ? Binder.Bind(call.Arguments[0], Resolve, parameters, null)
             : throw new TkSqlException($"{call.Name} takes one argument.")).ToArray();
 
+        parameters.Batching = false;
+        var vectors = parameters.VectorCalls.ToArray();
+        parameters.VectorCalls.Clear();
+
         var groups = new Dictionary<SqlKey, (object?[] Key, Accumulator[] Aggregates)>();
         var ordered = new List<(object?[] Key, Accumulator[] Aggregates)>();
+        var block = new List<object?[]>(vectors.Length == 0 ? 1 : BlockSize);
         await foreach (var row in rows.ConfigureAwait(false))
         {
-            var values = Array.ConvertAll(keys, key => key(row));
-            var identity = new SqlKey(values);
-            if (!groups.TryGetValue(identity, out var group))
+            block.Add(row);
+            if (block.Count == block.Capacity)
             {
-                group = (values, [.. calls.Select(static call => new Accumulator(call))]);
-                groups.Add(identity, group);
-                ordered.Add(group);
+                Accumulate();
+            }
+        }
+
+        Accumulate();
+
+        void Accumulate()
+        {
+            foreach (var vector in vectors)
+            {
+                vector.Prepare(block);
             }
 
-            for (var i = 0; i < calls.Count; i++)
+            foreach (var row in block)
             {
-                group.Aggregates[i].Add(arguments[i] is { } argument ? argument(row) : true);
+                var values = Array.ConvertAll(keys, key => key(row));
+                var identity = new SqlKey(values);
+                if (!groups.TryGetValue(identity, out var group))
+                {
+                    group = (values, [.. calls.Select(static call => new Accumulator(call))]);
+                    groups.Add(identity, group);
+                    ordered.Add(group);
+                }
+
+                for (var i = 0; i < calls.Count; i++)
+                {
+                    group.Aggregates[i].Add(arguments[i] is { } argument ? argument(row) : true);
+                }
+            }
+
+            block.Clear();
+            foreach (var vector in vectors)
+            {
+                vector.Clear();
             }
         }
 

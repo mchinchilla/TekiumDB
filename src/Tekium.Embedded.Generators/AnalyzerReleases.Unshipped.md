@@ -20,3 +20,8 @@ TK0015 | TekiumDB | Error | A CHECK constraint must be a bool property with a bo
 TK0016 | TekiumDB | Error | A FOREIGN KEY must be a column of the type of the key it refers to
 TK0017 | TekiumDB | Error | Two constraints have the same name
 TK0018 | TekiumDB | Error | A zone map must be on a date column
+TK0019 | TekiumDB | Error | A SQL routine must be a static method generated code can call
+TK0020 | TekiumDB | Error | A SQL function uses a type SQL has no value for
+TK0021 | TekiumDB | Error | A vectorized function takes spans in and a span out
+TK0022 | TekiumDB | Error | A procedure takes a TkContext first and returns a task
+TK0023 | TekiumDB | Error | Two SQL routines have the same name

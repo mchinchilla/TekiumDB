@@ -48,12 +48,70 @@ failures += await TypedRoundTripAsync();
 failures += await VectorRoundTripAsync();
 failures += await MaintenanceAsync();
 failures += await SqlAsync();
+failures += await RoutinesAsync();
 
 await Console.Out.WriteLineAsync(
     $"TekiumDB AOT smoke: {(failures == 0 ? "OK" : "FAILED")} " +
     $"(dynamic code supported: {RuntimeFeature.IsDynamicCodeSupported})");
 
 return failures;
+
+// Criterio de salida de la Fase 13: una función escalar y una vectorizada escritas en C# corren desde SQL
+// bajo Native AOT, y un procedimiento. El generador escribió el código que las llama: no hay reflexión.
+static async Task<int> RoutinesAsync()
+{
+    await using var database = await TekiumDb.OpenAsync(new DbOptions { InMemory = true });
+    database.UseRoutines(Tekium.Embedded.AotSmoke.TkRoutines.All);
+    await using var connection = new TkConnection(database);
+    await RunAsync("CREATE TABLE readings (id BIGINT PRIMARY KEY, label TEXT NOT NULL, a DOUBLE NOT NULL, b DOUBLE NOT NULL)");
+    await using (var transaction = await connection.BeginTransactionAsync())
+    {
+        for (var i = 0; i < 3000; i++)
+        {
+            await RunAsync($"INSERT INTO readings (id, label, a, b) VALUES ({i}, 'Sensor No. {i % 5}', {i}, {i * 3})");
+        }
+
+        await transaction.CommitAsync();
+    }
+
+    SmokeRoutines.VectorCalls = 0;
+    var total = await ScalarAsync("SELECT SUM(smoke_delta(a, b)) FROM readings");
+    var slugs = await ScalarAsync("SELECT COUNT(*) FROM readings WHERE smoke_slug(label) = 'sensor-no--3'");
+    var trimmed = await ScalarAsync("CALL smoke_trim(2990)");
+    var left = await ScalarAsync("SELECT COUNT(*) FROM readings");
+    var unknown = false;
+    try
+    {
+        await ScalarAsync("SELECT nowhere(a) FROM readings");
+    }
+    catch (TkSqlException)
+    {
+        unknown = true;
+    }
+
+    // 3 000 filas: tres bloques, no tres mil llamadas.
+    if (total is 8_997_000.0 && slugs is 600L && trimmed is 10 && left is 2990L && unknown && SmokeRoutines.VectorCalls == 3)
+    {
+        return 0;
+    }
+
+    await Console.Error.WriteLineAsync($"Routines failed: {total}, {slugs}, {trimmed}, {left}, {unknown}, {SmokeRoutines.VectorCalls} calls.");
+    return 1;
+
+    async Task RunAsync(string sql)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await command.ExecuteNonQueryAsync();
+    }
+
+    async Task<object?> ScalarAsync(string sql)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return await command.ExecuteScalarAsync();
+    }
+}
 
 // SQL por ADO.NET: crear, escribir con parámetros, consultar con join, agregados y una vista, y leer el plan.
 static async Task<int> SqlAsync()
@@ -604,5 +662,40 @@ static async Task<int> RoundTripAsync(string name, Func<IStorageDevice> open, bo
     finally
     {
         await pager.DisposeAsync();
+    }
+}
+
+/// <summary>Las rutinas del smoke: una escalar, una vectorizada y un procedimiento.</summary>
+internal static class SmokeRoutines
+{
+    public static int VectorCalls { get; set; }
+
+    [TkFunction("smoke_slug", Deterministic = true)]
+    public static string Slug(ReadOnlySpan<char> text)
+    {
+        Span<char> slug = stackalloc char[text.Length];
+        for (var i = 0; i < text.Length; i++)
+        {
+            slug[i] = char.IsLetterOrDigit(text[i]) ? char.ToLowerInvariant(text[i]) : '-';
+        }
+
+        return new string(slug);
+    }
+
+    [TkFunction("smoke_delta", Vectorized = true)]
+    public static void Delta(ReadOnlySpan<double> a, ReadOnlySpan<double> b, Span<double> result)
+    {
+        VectorCalls++;
+        for (var i = 0; i < result.Length; i++)
+        {
+            result[i] = Math.Abs(a[i] - b[i]);
+        }
+    }
+
+    [TkProcedure("smoke_trim")]
+    public static async ValueTask<int> TrimAsync(TkContext context, long from, CancellationToken cancellationToken)
+    {
+        return await context.ExecuteAsync(
+            "DELETE FROM readings WHERE id >= @from", new Dictionary<string, object?> { ["from"] = from }, cancellationToken);
     }
 }

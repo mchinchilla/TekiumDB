@@ -17,6 +17,9 @@ internal delegate object? Evaluator(object?[] row);
 /// </summary>
 internal static class Binder
 {
+    /// <summary>How many distinct argument lists of a deterministic function are remembered before deciding whether it pays.</summary>
+    private const int MemoLimit = 1024;
+
     private static readonly HashSet<string> Aggregates = new(StringComparer.Ordinal) { "COUNT", "SUM", "MIN", "MAX", "AVG" };
 
     public static bool IsAggregate(Call call) => Aggregates.Contains(call.Name);
@@ -66,7 +69,7 @@ internal static class Binder
     };
 
     /// <summary>The value of an expression that reads no column: a literal, a parameter, or something computed from them.</summary>
-    public static object? Constant(SqlExpr expression, IReadOnlyDictionary<string, object?> parameters) =>
+    public static object? Constant(SqlExpr expression, StatementContext parameters) =>
         Bind(expression, static column => throw new TkSqlException($"Column '{column.Name}' cannot be used here: a value is expected."), parameters, null)([]);
 
     /// <summary>
@@ -74,7 +77,7 @@ internal static class Binder
     /// column is; <paramref name="special"/> may take over a sub-expression (an aggregate, a grouping key).
     /// </summary>
     public static Evaluator Bind(
-        SqlExpr expression, Func<ColumnRef, int> resolve, IReadOnlyDictionary<string, object?> parameters, Func<SqlExpr, Evaluator?>? special)
+        SqlExpr expression, Func<ColumnRef, int> resolve, StatementContext parameters, Func<SqlExpr, Evaluator?>? special)
     {
         if (special?.Invoke(expression) is { } taken)
         {
@@ -194,7 +197,7 @@ internal static class Binder
                 throw new TkSqlException($"{call.Name} is an aggregate and cannot be used here.");
 
             case Call call:
-                return Function(call, [.. call.Arguments.Select(argument => Bind(argument, resolve, parameters, special))]);
+                return Function(call, [.. call.Arguments.Select(argument => Bind(argument, resolve, parameters, special))], parameters);
 
             default:
                 throw new TkSqlException($"Unsupported expression: {expression}.");
@@ -270,9 +273,9 @@ internal static class Binder
         }
     }
 
-    private static object? Find(IReadOnlyDictionary<string, object?> parameters, string name)
+    private static object? Find(StatementContext parameters, string name)
     {
-        foreach (var (key, value) in parameters)
+        foreach (var (key, value) in parameters.Values)
         {
             if (string.Equals(key.TrimStart('@', ':', '$'), name, StringComparison.OrdinalIgnoreCase))
             {
@@ -283,7 +286,7 @@ internal static class Binder
         throw new TkSqlException($"The statement uses parameter @{name}, which was not given.");
     }
 
-    private static Evaluator Function(Call call, Evaluator[] arguments)
+    private static Evaluator Function(Call call, Evaluator[] arguments, StatementContext context)
     {
         switch (call.Name)
         {
@@ -314,8 +317,117 @@ internal static class Binder
                     return null;
                 };
             default:
-                throw new TkSqlException($"Unknown function {call.Name} with {arguments.Length} arguments. There are LOWER, UPPER, LENGTH, ABS and COALESCE, and the aggregates COUNT, SUM, MIN, MAX and AVG.");
+                return Routine(call, arguments, context);
         }
+    }
+
+    /// <summary>A function the application registered. One it did not is an error now, while the query is being prepared, not while it runs.</summary>
+    private static Evaluator Routine(Call call, Evaluator[] arguments, StatementContext context)
+    {
+        if (!context.Routines.TryGetValue(call.Name, out var routine))
+        {
+            throw new TkSqlException(
+                $"Unknown function {call.Name} with {arguments.Length} arguments. There are LOWER, UPPER, LENGTH, ABS and COALESCE, the aggregates COUNT, SUM, MIN, MAX and AVG, and the functions the application registers.");
+        }
+
+        if (routine.Procedure is not null)
+        {
+            throw new TkSqlException($"{routine.Name} is a procedure: run it with CALL {routine.Name}(…).");
+        }
+
+        if (routine.ParameterCount != arguments.Length)
+        {
+            throw new TkSqlException($"Function {routine.Name} takes {routine.ParameterCount} arguments; {arguments.Length} were given.");
+        }
+
+        if (routine.Vector is not null)
+        {
+            var site = new VectorCall(routine, arguments);
+            if (context.Batching)
+            {
+                context.VectorCalls.Add(site);
+            }
+
+            return site.Evaluate;
+        }
+
+        var invoke = routine.Scalar!;
+        object? Call(object?[] row)
+        {
+            var values = new object?[arguments.Length];
+            for (var i = 0; i < values.Length; i++)
+            {
+                values[i] = arguments[i](row);
+            }
+
+            return Invoke(values);
+        }
+
+        object? Invoke(object?[] values)
+        {
+            try
+            {
+                return invoke(values);
+            }
+            catch (Exception exception) when (exception is not TkSqlException and not OperationCanceledException)
+            {
+                throw new TkSqlException($"Function {routine.Name} failed: {exception.Message}", exception);
+            }
+        }
+
+        if (!routine.IsDeterministic)
+        {
+            return Call;
+        }
+
+        // The same arguments always give the same result: with no column among them, it is computed once, now.
+        if (!call.Arguments.Any(ReadsColumns))
+        {
+            var text = Key(call);
+            if (!context.Folded.TryGetValue(text, out var constant))
+            {
+                constant = Call([]);
+                context.Folded.Add(text, constant);
+            }
+
+            return _ => constant;
+        }
+
+        // And within the query, a result already computed for the same arguments is reused: until the
+        // arguments turn out to be mostly different, when remembering costs more than calling (measured).
+        var known = new Dictionary<SqlKey, object?>();
+        var hits = 0;
+        var remember = true;
+        return row =>
+        {
+            var values = new object?[arguments.Length];
+            for (var i = 0; i < values.Length; i++)
+            {
+                values[i] = arguments[i](row);
+            }
+
+            if (!remember)
+            {
+                return Invoke(values);
+            }
+
+            var key = new SqlKey(values);
+            if (known.TryGetValue(key, out var result))
+            {
+                hits++;
+                return result;
+            }
+
+            result = Invoke(values);
+            known.Add(key, result);
+            if (known.Count >= MemoLimit && hits < known.Count)
+            {
+                remember = false;
+                known.Clear();
+            }
+
+            return result;
+        };
     }
 
     private static string Text(object value) => value switch

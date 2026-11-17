@@ -55,6 +55,12 @@ if (args is ["backup", ..])
     return;
 }
 
+if (args is ["routines", ..])
+{
+    await RoutineReport.RunAsync(args.Length > 1 ? int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : 1_000_000);
+    return;
+}
+
 if (args is ["uuid", ..])
 {
     await UuidInsertReport.RunAsync(args.Length > 1 ? int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : 1_000_000);

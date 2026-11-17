@@ -4,7 +4,6 @@ using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
-using System.Runtime.CompilerServices;
 using Tekium.Embedded.Sql.Execution;
 
 namespace Tekium.Embedded.Sql;
@@ -22,8 +21,6 @@ namespace Tekium.Embedded.Sql;
 /// </remarks>
 public sealed class TkConnection : DbConnection
 {
-    private static readonly ConditionalWeakTable<TekiumDb, SqlEngine> Engines = [];
-
     private readonly bool _owns;
     private TekiumDb? _database;
     private string _connectionString;
@@ -71,7 +68,7 @@ public sealed class TkConnection : DbConnection
     /// <exception cref="InvalidOperationException">The connection is not open.</exception>
     public TekiumDb Db => _database ?? throw new InvalidOperationException("The connection is not open: call OpenAsync first.");
 
-    internal SqlEngine Engine => Engines.GetValue(Db, static _ => new SqlEngine());
+    internal SqlEngine Engine => SqlEngine.For(Db);
 
     /// <summary>Gets the transaction begun on this connection that has not ended, if any: commands run in it.</summary>
     internal TkDbTransaction? Current { get; set; }

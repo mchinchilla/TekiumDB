@@ -18,7 +18,27 @@ internal sealed class SqlEngine
 {
     private const int MaxCachedStatements = 1024;
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<TekiumDb, SqlEngine> Engines = [];
+
     private readonly ConcurrentDictionary<string, SqlStatement> _statements = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, TkRoutine> _routines = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Gets the functions and procedures the application registered, by name.</summary>
+    public IReadOnlyDictionary<string, TkRoutine> Routines => _routines;
+
+    /// <summary>The engine of a database: one for as long as the database lives, whatever connections use it.</summary>
+    public static SqlEngine For(TekiumDb database) => Engines.GetValue(database, static _ => new SqlEngine());
+
+    public void Register(IEnumerable<TkRoutine> routines)
+    {
+        foreach (var routine in routines)
+        {
+            if (!_routines.TryAdd(routine.Name, routine) && !ReferenceEquals(_routines[routine.Name], routine))
+            {
+                throw new ArgumentException($"A function or procedure named '{routine.Name}' is already registered.", nameof(routines));
+            }
+        }
+    }
 
     /// <summary>Gets how many statement texts were parsed, as opposed to found already parsed.</summary>
     public int Parsed { get; private set; }
@@ -44,7 +64,7 @@ internal sealed class SqlEngine
     public static bool ReadsOnly(SqlStatement statement) => statement is SelectStatement or ExplainStatement;
 
     public static async ValueTask<SqlResult> ExecuteAsync(
-        TkTransaction transaction, SqlStatement statement, IReadOnlyDictionary<string, object?> parameters, CancellationToken cancellationToken)
+        TkTransaction transaction, SqlStatement statement, StatementContext parameters, CancellationToken cancellationToken)
     {
         switch (statement)
         {
@@ -73,9 +93,32 @@ internal sealed class SqlEngine
                     CreateIndexStatement create => await CreateIndexAsync(writer, create, cancellationToken).ConfigureAwait(false),
                     CreateViewStatement create => await CreateViewAsync(writer, create, parameters, cancellationToken).ConfigureAwait(false),
                     DropStatement drop => await DropAsync(writer, drop, cancellationToken).ConfigureAwait(false),
+                    CallStatement call => await CallAsync(writer, call, parameters, cancellationToken).ConfigureAwait(false),
                     _ => throw new TkSqlException("Unsupported statement."),
                 };
         }
+    }
+
+    private static async ValueTask<SqlResult> CallAsync(TkWriteTransaction writer, CallStatement call, StatementContext context, CancellationToken cancellationToken)
+    {
+        if (!context.Routines.TryGetValue(call.Name, out var routine) || routine.Procedure is not { } procedure)
+        {
+            throw new TkSqlException(
+                context.Routines.ContainsKey(call.Name)
+                    ? $"{call.Name} is a function, not a procedure: use it in an expression."
+                    : $"There is no procedure '{call.Name}': the application has not registered one.");
+        }
+
+        if (routine.ParameterCount != call.Arguments.Count)
+        {
+            throw new TkSqlException($"Procedure {routine.Name} takes {routine.ParameterCount} arguments; {call.Arguments.Count} were given.");
+        }
+
+        var arguments = call.Arguments.Select(argument => Binder.Constant(argument, context)).ToArray();
+        var result = await procedure(new TkContext(writer.Database, writer), arguments, cancellationToken).ConfigureAwait(false);
+        return result is null
+            ? new SqlResult()
+            : new SqlResult { Names = ["result"], Types = [result.GetType()], Rows = [[result]] };
     }
 
     private static void Describe(PlanNode node, int depth, List<object?[]> lines)
@@ -95,7 +138,7 @@ internal sealed class SqlEngine
                 : $"'{name}' is a view: views cannot be written to.");
 
     private static async ValueTask<SqlResult> InsertAsync(
-        TkWriteTransaction writer, InsertStatement insert, IReadOnlyDictionary<string, object?> parameters, CancellationToken cancellationToken)
+        TkWriteTransaction writer, InsertStatement insert, StatementContext parameters, CancellationToken cancellationToken)
     {
         var table = await TableAsync(writer, insert.Table, cancellationToken).ConfigureAwait(false);
         var targets = insert.Columns is null
@@ -133,7 +176,7 @@ internal sealed class SqlEngine
     }
 
     private static async ValueTask<SqlResult> UpdateAsync(
-        TkWriteTransaction writer, UpdateStatement update, IReadOnlyDictionary<string, object?> parameters, CancellationToken cancellationToken)
+        TkWriteTransaction writer, UpdateStatement update, StatementContext parameters, CancellationToken cancellationToken)
     {
         var table = await TableAsync(writer, update.Table, cancellationToken).ConfigureAwait(false);
         var runner = new SelectRunner(writer, parameters, cancellationToken);
@@ -167,7 +210,7 @@ internal sealed class SqlEngine
     }
 
     private static async ValueTask<SqlResult> DeleteAsync(
-        TkWriteTransaction writer, DeleteStatement delete, IReadOnlyDictionary<string, object?> parameters, CancellationToken cancellationToken)
+        TkWriteTransaction writer, DeleteStatement delete, StatementContext parameters, CancellationToken cancellationToken)
     {
         var table = await TableAsync(writer, delete.Table, cancellationToken).ConfigureAwait(false);
         var matching = await new SelectRunner(writer, parameters, cancellationToken).MatchingAsync(table, delete.Where).ConfigureAwait(false);
@@ -304,7 +347,7 @@ internal sealed class SqlEngine
     }
 
     private static async ValueTask<SqlResult> CreateViewAsync(
-        TkWriteTransaction writer, CreateViewStatement create, IReadOnlyDictionary<string, object?> parameters, CancellationToken cancellationToken)
+        TkWriteTransaction writer, CreateViewStatement create, StatementContext parameters, CancellationToken cancellationToken)
     {
         if (await SqlTable.ResolveAsync(writer, create.Name, cancellationToken).ConfigureAwait(false) is not null)
         {

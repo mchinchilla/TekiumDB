@@ -1,80 +1,98 @@
 # TekiumDB
 
-**Base de datos embebida para .NET: un solo archivo, cifrada, asíncrona de verdad y sin binarios nativos.**
+**Base de datos embebida para .NET: un solo archivo, cifrada, asíncrona de punta a punta y sin binarios nativos.**
 
 ![.NET 11](https://img.shields.io/badge/.NET-11-512BD4)
+![Native AOT](https://img.shields.io/badge/Native%20AOT-compatible-blue)
 ![Licencia MIT](https://img.shields.io/badge/licencia-MIT-green)
 ![Estado: pre-alpha](https://img.shields.io/badge/estado-pre--alpha-orange)
 
-TekiumDB guarda todo en un único archivo `.tkdb` y se distribuye como un paquete NuGet 100% administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal.
+TekiumDB guarda todo en un único archivo `.tkdb` y es código 100 % administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal. Encima hay tablas tipadas sin reflexión, índices secundarios, restricciones, SQL con proveedor ADO.NET, LINQ, búsqueda vectorial, change feed, backup en caliente y herramientas de inspección y reparación.
 
-> [!WARNING]
-> **Proyecto en fase temprana (Fase 12 de la hoja de ruta).** Ya hay una API pública que se puede usar: tablas tipadas con serializadores generados en compilación, índices secundarios (de columna, de varias, sobre expresiones y parciales) con consultas por igualdad y por rango, restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY`, change feed, carga masiva, transacciones con aislamiento por snapshot, cifrado y modo en memoria, sobre el motor de las fases anteriores (pager, B+Tree copy-on-write, commit atómico probado matando el proceso). Hay además búsqueda vectorial (HNSW) en un paquete aparte. Hay también una capa LINQ y una capa SQL con proveedor ADO.NET (un subconjunto de SQL: ver su sección). Todavía no hay paquete publicado, y el formato de archivo puede cambiar. Ver [Estado y hoja de ruta](#estado-y-hoja-de-ruta).
+> [!NOTE]
+> **Pre-alpha.** Todavía no hay paquete NuGet publicado y el formato de archivo puede cambiar entre versiones. Verificado en macOS y Linux (arm64); Windows no se ha verificado.
 
 ## Contenido
 
 - [Por qué TekiumDB](#por-qué-tekiumdb)
 - [Características](#características)
-- [Vistazo a la API](#vistazo-a-la-api)
+- [Inicio rápido](#inicio-rápido)
+- [Guía de la API](#guía-de-la-api)
+- [Herramientas](#herramientas)
+- [Rendimiento](#rendimiento)
 - [Arquitectura](#arquitectura)
-- [Estado y hoja de ruta](#estado-y-hoja-de-ruta)
+- [Confiabilidad](#confiabilidad)
+- [Límites](#límites)
 - [Compilar y probar](#compilar-y-probar)
-- [Estructura del repositorio](#estructura-del-repositorio)
-- [Principios de ingeniería](#principios-de-ingeniería)
-- [Fuera de alcance](#fuera-de-alcance)
-- [Contribuir](#contribuir)
 - [Licencia](#licencia)
 
 ## Por qué TekiumDB
-
-El competidor real de una base embebida es SQLite, y "SQLite pero más rápido" no es una propuesta. TekiumDB apunta a cinco cosas que con SQLite cuestan trabajo en .NET:
 
 | | SQLite en .NET | TekiumDB |
 | --- | --- | --- |
 | Binarios nativos | Un `.so` / `.dll` / `.dylib` por plataforma | Ninguno: código administrado, compatible con Native AOT, single-file y móvil |
 | Async | La API asíncrona es síncrona por debajo | E/S asíncrona de punta a punta |
-| Búsqueda vectorial | Extensión nativa aparte | HNSW incluido |
 | Cifrado | SEE comercial o SQLCipher | AES-256-GCM autenticado, incluido |
-| UUID v7 y fechas | `BLOB` con un índice encima | Tipos de primera clase con índices especializados |
+| Búsqueda vectorial | Extensión nativa aparte | HNSW en el mismo archivo y en la misma transacción |
+| UUID v7 y fechas | `BLOB` con un índice encima | Tipos de primera clase, con rangos por fecha de creación y zone maps |
+| Modelo de datos | SQL sobre filas sin tipo | Clases de C# con serializadores generados en compilación; SQL y LINQ opcionales sobre las mismas tablas |
 
-Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (joins, estimación de cardinalidad, reordenamiento).
-
-Antes de invertir en el resto, la Fase 0.5 midió un motor mínimo contra `Microsoft.Data.Sqlite`: lectura puntual 6× más rápida, rango de fechas 38× más rápido e inserción secuencial entre empate y 5× más rápida. Los números, las condiciones y sus advertencias están en [`docs/benchmarks/fase-0.5.md`](docs/benchmarks/fase-0.5.md). Con el pager real las lecturas siguen entre 5× y 38× por delante; la inserción con commits pequeños quedó 1,28× por detrás ([Fase 1](docs/benchmarks/fase-1.md), [Fase 2](docs/benchmarks/fase-2.md)).
+Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (subconsultas, joins externos, optimización por costos). Su SQL es un subconjunto.
 
 ## Características
 
-Todas forman parte del diseño. Hoy existen el pager, el cifrado, el B+Tree copy-on-write con commit atómico, el catálogo, las tablas tipadas con filas de cualquier tamaño (páginas de overflow) y los índices secundarios genéricos; falta en el árbol la compresión de prefijos.
-
 **Almacenamiento**
 
-- Archivo único `.tkdb` con páginas de tamaño fijo (8 KiB por defecto; 4, 16 o 32 KiB configurables).
-- B+Tree copy-on-write con MVCC: un escritor, lectores ilimitados sin bloqueo, cada uno sobre su snapshot inmutable.
-- Commit atómico por slots de raíz alternados. Si el proceso muere a mitad de un commit, la base abre en el estado anterior, sin recuperación.
-- Compresión Zstandard por página, opcional (`Compression = true`). Reduce los bytes que se escriben, no el tamaño del archivo: ver [las mediciones](docs/benchmarks/fase-5.5.md).
-- Modo en memoria para pruebas: `new DbOptions { InMemory = true }`.
+- Archivo único `.tkdb` con páginas de tamaño fijo (8 KiB por defecto; 4, 16 o 32 KiB).
+- B+Tree copy-on-write con MVCC: un escritor, lectores ilimitados sin bloqueo, cada uno sobre un snapshot inmutable.
+- Commit atómico por registros de raíz alternados. Si el proceso muere a mitad de un commit, la base abre en el estado anterior, sin fase de recuperación.
+- Filas de hasta 256 MiB (páginas de overflow, transparentes).
+- Evolución de esquema sin migraciones: cada fila recuerda con qué versión se escribió.
+- Modo en memoria para pruebas (`InMemory = true`) y compresión Zstandard por página, opcional.
 
 **Seguridad**
 
-- AES-256-GCM por página con la criptografía del BCL. El tag de autenticación es también el checksum: corrupción y manipulación se detectan al descifrar.
+- AES-256-GCM por página con la criptografía de .NET. La etiqueta de autenticación es también la suma de verificación: corrupción y manipulación se detectan al leer.
 - Derivación de clave con Argon2id. Cambiar la contraseña reescribe sólo la cabecera.
+- Sin cifrado, cada página lleva igualmente su suma de verificación.
 
-**Índices**
+**Índices y consultas**
 
-- Temporal: zone maps por ventana de tiempo y split 100/0 para series de tiempo (ya existe: ver [Fechas y series de tiempo](#fechas-y-series-de-tiempo)).
-- UUID v7: las hojas quedan llenas aunque los de un mismo milisegundo lleguen en desorden, y "todo lo creado entre X e Y" es un rango de la clave (ya existe: ver [Claves UUID v7](#claves-uuid-v7)).
-- Vectorial: HNSW persistido en el mismo archivo, con métricas coseno, L2 y producto interno, y cuantización `int8` opcional (ya existe: ver [Búsqueda vectorial](#búsqueda-vectorial)).
-- Secundarios genéricos, sobre expresiones y parciales (ya existen: ver [Índices y consultas](#índices-y-consultas)).
+- Secundarios de una o varias columnas, sobre expresiones, parciales y únicos, mantenidos en la misma transacción que la fila.
+- Zone maps para rangos de fechas sobre series de tiempo.
+- UUID v7 como clave: hojas llenas y consultas por fecha de creación sin columna ni índice extra.
+- Vectorial: HNSW con métricas coseno, euclidiana y producto interno, y cuantización `int8` opcional.
+- `EXPLAIN` del plan elegido, en la API tipada y en SQL.
 
-**API y ecosistema**
+**Integridad**
 
-- Núcleo tipado, sin reflexión en runtime: un generador de código fuente emite los serializadores.
-- Capas opcionales en paquetes separados: SQL con proveedor ADO.NET, LINQ y vectores.
-- Restricciones declarativas (`CHECK`, `UNIQUE`, `FOREIGN KEY`; ya existen: ver [Restricciones](#restricciones)) y change feed post-commit (ver [Change feed](#change-feed)).
-- Backup en caliente, verificación de integridad y viaje en el tiempo sobre snapshots.
+- Restricciones `CHECK`, `UNIQUE` y `FOREIGN KEY` declaradas con atributos.
+- Aislamiento por snapshot; transacciones que se deshacen al salir del scope sin commit.
 
-## Vistazo a la API
+**Operación**
 
-Esto compila y funciona hoy:
+- Backup en caliente, verificación de integridad con la base en uso y lectura de estados pasados (viaje en el tiempo).
+- Change feed: lo que cada commit cambió, para auditoría, cachés y replicación propia.
+- Carga masiva con memoria acotada.
+- Contadores por `System.Diagnostics.Metrics`, opcionales.
+- `tkdb`: inspeccionar, compactar, reparar y cambiar la contraseña desde la línea de comandos.
+
+**Ecosistema**
+
+- SQL con proveedor ADO.NET (funciona con Dapper), LINQ y vectores, cada uno en su paquete.
+- Funciones y procedimientos escritos en C#, llamados desde SQL.
+- Sin reflexión en tiempo de ejecución: todo lo que depende de los tipos del usuario lo escribe un generador de código al compilar. Compatible con Native AOT y trimming.
+
+## Inicio rápido
+
+| Paquete | Para qué |
+| --- | --- |
+| `Tekium.Embedded.Core` | El motor y la API tipada. Sin dependencias en tiempo de ejecución. Incluye el generador de código |
+| `Tekium.Embedded.Sql` | SQL y proveedor ADO.NET |
+| `Tekium.Embedded.Linq` | Consultas con predicados de C# |
+| `Tekium.Embedded.Vectors` | Búsqueda vectorial |
+
+Mientras no haya paquetes publicados, se referencian los proyectos de `src/` (ver [Compilar y probar](#compilar-y-probar)).
 
 ```csharp
 using Tekium.Embedded;
@@ -126,6 +144,14 @@ El generador de código escribe el serializador de `Document` al compilar: no ha
 | Operaciones | `InsertAsync`, `UpdateAsync`, `UpsertAsync`, `DeleteAsync`, `GetAsync`, `ScanAsync`, `QueryAsync`, `ExplainAsync`, `BulkInsertAsync` |
 | Otros atributos | `[TkColumn("nombre")]` guarda la propiedad con otro nombre; `[TkIgnore]` la deja fuera |
 | Tamaño de fila | Hasta 256 MiB. Una fila que no cabe en un cuarto de página se guarda en páginas de overflow, sin que quien la usa lo note |
+
+Reglas de toda la API:
+
+- Toda operación de E/S devuelve `ValueTask` o `IAsyncEnumerable<T>` y acepta `CancellationToken`. No hay métodos síncronos salvo `Dispose`.
+- Las transacciones son `IAsyncDisposable`: salir del scope sin commit hace rollback.
+- Hay un escritor a la vez (`BeginWriteAsync` espera su turno) y cualquier número de lectores, que nunca esperan.
+
+## Guía de la API
 
 ### Índices y consultas
 
@@ -193,7 +219,7 @@ await foreach (var order in orders.Where(o => o.Total > 1000m))
 | No se puede | `||`, `!=`, métodos sobre una propiedad, comparar dos propiedades: `NotSupportedException` al construir la consulta, diciendo qué parte y por qué |
 | No compila | Ordenar, agrupar, unir: la consulta no es un `IQueryable` ni un `IAsyncEnumerable`, así que el compilador rechaza lo que el motor no hace, en vez de resolverlo en memoria sin avisar. Para hacerlo en memoria hay que pedirlo: `AsAsyncEnumerable()` |
 
-Detalle en [docs/benchmarks/fase-11.md](docs/benchmarks/fase-11.md).
+[Mediciones y detalle](docs/benchmarks/fase-11.md).
 
 ### SQL y ADO.NET
 
@@ -221,7 +247,41 @@ var big = await connection.QueryAsync<Order>(
 | Sólo asíncrono | `OpenAsync`, `ExecuteReaderAsync`, `BeginTransactionAsync`…; los métodos síncronos de ADO.NET lanzan. Con Dapper: `QueryAsync`, `ExecuteAsync` |
 | Lo que no hay | Subconsultas, `UNION`, joins externos, `ALTER TABLE`, búsqueda vectorial desde SQL |
 
-Detalle, y lo que falta respecto del plan, en [docs/benchmarks/fase-12.md](docs/benchmarks/fase-12.md).
+[Mediciones y detalle](docs/benchmarks/fase-12.md).
+
+### Funciones y procedimientos en C#
+
+SQL puede llamar a métodos estáticos de la aplicación. Un generador de código escribe en compilación lo que les pasa los argumentos: no hay reflexión, y funciona bajo Native AOT.
+
+```csharp
+public static class Routines
+{
+    [TkFunction("slugify", Deterministic = true)]
+    public static string Slugify(ReadOnlySpan<char> text) { … }
+
+    [TkFunction("abs_delta", Vectorized = true)]          // un bloque de filas por llamada
+    public static void AbsDelta(ReadOnlySpan<double> a, ReadOnlySpan<double> b, Span<double> result) { … }
+
+    [TkProcedure("archive_orders")]
+    public static async ValueTask<int> ArchiveOrders(TkContext context, DateTimeOffset before, CancellationToken ct) =>
+        await context.ExecuteAsync("DELETE FROM orders WHERE placed < @before",
+            new Dictionary<string, object?> { ["before"] = before }, ct);
+}
+
+database.UseRoutines(TkRoutines.All);                     // TkRoutines lo escribe el generador
+
+await connection.QueryAsync("SELECT slugify(name), abs_delta(price, cost) FROM products");
+await connection.ExecuteAsync("CALL archive_orders(@before)", new { before });
+```
+
+| | |
+| --- | --- |
+| Función escalar | Toma y devuelve `bool`, `int`, `long`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `DateTimeOffset` o `byte[]`. Con NULL en un parámetro que no lo admite no se la llama y el resultado es NULL |
+| `Deterministic` | Con argumentos constantes se calcula una vez por sentencia; con argumentos de la fila se reutiliza el resultado mientras los argumentos se repitan |
+| `Vectorized` | Recibe bloques de hasta 1 024 filas en `ReadOnlySpan<T>` (`double`, `float`, `long`, `int`). Hoy **no es más rápida** que la escalar: el ejecutor de SQL trabaja fila por fila ([medido](docs/benchmarks/fase-13.md)) |
+| Procedimiento | Corre con `CALL`, dentro de la transacción de la sentencia: lo que escribe (con la API tipada o con SQL) se confirma o se deshace con ella |
+| Dónde viven | En la aplicación, no en el archivo. Una consulta o una vista que nombra una función que la aplicación no registró falla al prepararse, antes de leer una fila |
+| Errores de compilación | Lo que no puede ser una rutina (un tipo que SQL no tiene, un método privado, dos con el mismo nombre) es un error `TK0019`–`TK0023` |
 
 ### Fechas y series de tiempo
 
@@ -274,7 +334,7 @@ Los momentos se cortan al milisegundo, igual que el UUID. Las mismas condiciones
 | UUID v7 creados en un bucle cerrado, cientos por milisegundo | 68 %, como al azar: dentro de un milisegundo no tienen orden |
 | UUID v4 | 69 %, y seis veces más lento de insertar |
 
-Para cargar muchas filas de una vez, la [carga masiva](#carga-masiva) ordena las claves y deja las hojas llenas vengan como vengan. Detalle en [docs/benchmarks/fase-8.md](docs/benchmarks/fase-8.md).
+Para cargar muchas filas de una vez, la [carga masiva](#carga-masiva) ordena las claves y deja las hojas llenas vengan como vengan. [Mediciones y detalle](docs/benchmarks/fase-8.md).
 
 ### Restricciones
 
@@ -397,7 +457,7 @@ foreach (var hit in hits)                                   // del más cercano 
 | Borrar | `RemoveAsync` deja de devolver el vector, pero su sitio en el grafo no se recupera hasta `DropAsync`, que elimina el índice entero y libera sus páginas |
 | Cifrado | El grafo son páginas como las demás: cifradas si la base lo está |
 
-Medido sobre un millón de vectores de 128 dimensiones agrupados como los embeddings, con los parámetros por defecto ([detalle](docs/benchmarks/fase-9.md)):
+Medido sobre un millón de vectores de 128 dimensiones agrupados como los embeddings, con los parámetros por defecto ([mediciones](docs/benchmarks/fase-9.md)):
 
 | `efSearch` | Recall@10 contra fuerza bruta | Latencia media |
 | ---: | ---: | ---: |
@@ -407,7 +467,7 @@ Medido sobre un millón de vectores de 128 dimensiones agrupados como los embedd
 
 El recall depende de los datos: con vectores sin ninguna estructura es mucho más bajo y hay que subir `efSearch` y `M`. Construir el índice va a unos mil vectores por segundo.
 
-El índice no está atado a una tabla: quien escribe la fila escribe también su vector, en la misma transacción. Declararlo como columna (`[TkVector]`) y que la tabla lo mantenga sola todavía no existe.
+El índice no está atado a una tabla: quien escribe la fila escribe también su vector, en la misma transacción.
 
 ### Viaje en el tiempo
 
@@ -422,7 +482,7 @@ await foreach (var order in orders.QueryAsync(past, filter)) // consultas e índ
     Compare(order);
 ```
 
-El número de transacción lo dan `TkWriteTransaction.TransactionId`, `LastTransactionId` y los cambios del change feed. Más atrás del horizonte se lanza `TkStateUnavailableException`. Mientras `past` viva su estado no se suelta; al cerrarlo, su espacio vuelve a usarse. El archivo crece con el horizonte y ahí se queda. Detalle en [docs/benchmarks/fase-10.6.md](docs/benchmarks/fase-10.6.md).
+El número de transacción lo dan `TkWriteTransaction.TransactionId`, `LastTransactionId` y los cambios del change feed. Más atrás del horizonte se lanza `TkStateUnavailableException`. Mientras `past` viva su estado no se suelta; al cerrarlo, su espacio vuelve a usarse. El archivo crece con el horizonte y ahí se queda. [Mediciones y detalle](docs/benchmarks/fase-10.6.md).
 
 ### Backup en caliente
 
@@ -436,7 +496,7 @@ Console.WriteLine($"Respaldado hasta la transacción {report.TransactionId}");
 await db.BackupAsync("respaldo.tkdb", new TkBackupOptions { Password = backupPassword });
 ```
 
-No bloquea al escritor ni desaloja la caché (lee el archivo directamente). Medido sobre un millón de filas, con backups corriendo uno tras otro: la mediana del commit durable no cambia (13,0 ms contra 13,1 ms sin backup), el p95 sube de 16 a 19 ms porque comparten el disco, y cada backup tarda 0,35 s. Mientras corre, las páginas del estado que copia no se reutilizan, así que una base con mucha escritura puede crecer durante un backup largo. Detalle en [docs/benchmarks/fase-10.2.md](docs/benchmarks/fase-10.2.md).
+No bloquea al escritor ni desaloja la caché (lee el archivo directamente). Medido sobre un millón de filas, con backups corriendo uno tras otro: la mediana del commit durable no cambia (13,0 ms contra 13,1 ms sin backup), el p95 sube de 16 a 19 ms porque comparten el disco, y cada backup tarda 0,35 s. Mientras corre, las páginas del estado que copia no se reutilizan, así que una base con mucha escritura puede crecer durante un backup largo. [Mediciones y detalle](docs/benchmarks/fase-10.2.md).
 
 ### Verificación y diagnóstico
 
@@ -458,9 +518,9 @@ Con `Diagnostics = true`, la base publica contadores por un `Meter` llamado `Tek
 | `tekium.snapshots.live`, `tekium.snapshots.oldest_age` | Lectores con un estado retenido, y la edad del más viejo: lo que impide reutilizar espacio |
 | `tekium.tree.depth` | Niveles de cada tabla e índice |
 
-Sin esa opción no se crea ningún `Meter` y no se cuenta nada: medido, la lectura puntual tarda lo mismo. Detalle en [docs/benchmarks/fase-10.4.md](docs/benchmarks/fase-10.4.md).
+Sin esa opción no se crea ningún `Meter` y no se cuenta nada: medido, la lectura puntual tarda lo mismo. [Mediciones y detalle](docs/benchmarks/fase-10.4.md).
 
-### Herramientas
+## Herramientas
 
 `tkdb` es una herramienta de línea de comandos para archivos `.tkdb` cerrados. Ninguno de sus comandos cambia el archivo que recibe, salvo `passwd`.
 
@@ -511,153 +571,145 @@ ERROR: Page 57 of index tickets.Owner cannot be read: Page 57 failed its checksu
 | Contraseñas | Nunca en la línea de comandos: de una variable de entorno, de un archivo o de la entrada estándar. `compact` y `repair` pueden dar a la copia otra contraseña o ninguna, y siempre le dan una clave de archivo nueva |
 | Código de salida | 0 nada mal, 1 el archivo tiene problemas, 2 el comando no pudo correr |
 
-Lo mismo está en el núcleo, para usarlo desde código: `TkInspector.InspectAsync`, `TkMaintenance.CompactAsync` y `TkMaintenance.RepairAsync`. Compactar y reparar no copian el historial del change feed. Detalle en [docs/benchmarks/fase-10.md](docs/benchmarks/fase-10.md).
+Lo mismo está en el núcleo, para usarlo desde código: `TkInspector.InspectAsync`, `TkMaintenance.CompactAsync` y `TkMaintenance.RepairAsync`. Compactar y reparar no copian el historial del change feed. [Mediciones y detalle](docs/benchmarks/fase-10.md).
 
-Reglas de la API:
+## Rendimiento
 
-- Toda operación de E/S devuelve `ValueTask` o `IAsyncEnumerable<T>` y acepta `CancellationToken`. No hay métodos síncronos salvo `Dispose`.
-- Las transacciones son `IAsyncDisposable`: salir del scope sin commit hace rollback.
-- Nada de `object`, `dynamic` ni `Expression.Compile()`.
+Medido con BenchmarkDotNet en una sola máquina (Apple M2 Max, macOS, arm64, SSD interno), contra `Microsoft.Data.Sqlite` con comandos preparados. Son órdenes de magnitud de una máquina, no promesas; cada enlace lleva a las condiciones exactas y a sus advertencias.
+
+**Lecturas**
+
+| Carga | SQLite | TekiumDB | |
+| --- | ---: | ---: | --- |
+| Leer una fila por su clave y construir el objeto (100 000 filas) | 2 016 ns, 670 B | 336 ns, 326 B | 6× más rápido ([detalle](docs/benchmarks/fase-5.md)) |
+| Lectura puntual cruda (un millón de filas) | 2 177 ns | 397 ns | 5,5× más rápido ([detalle](docs/benchmarks/fase-2.md)) |
+| Por índice secundario: las ~100 facturas de un cliente | 124 µs | 69 µs | 1,8× más rápido ([detalle](docs/benchmarks/fase-6.md)) |
+| Por índice secundario: las ~270 facturas de un día | 309 µs | 149 µs | 2,1× más rápido |
+| Rango de fechas sobre 10 millones de filas: una hora (3 601 filas) | 2,91 ms | 0,75 ms | 3,9× más rápido, con zone map ([detalle](docs/benchmarks/fase-7.md)) |
+| Rango de fechas: un día (86 401 filas) | 69,4 ms | 10,7 ms | 6,5× más rápido |
+| Rango de fechas: treinta días (2,6 millones de filas) | 2 102 ms | 310 ms | 6,8× más rápido |
+
+**Escrituras**
+
+| Carga | SQLite | TekiumDB | |
+| --- | ---: | ---: | --- |
+| 100 000 filas en una transacción | 122 ms | 29,5 ms | 4,1× más rápido ([detalle](docs/benchmarks/fase-2.md)) |
+| 100 000 filas en 100 transacciones durables | 749 ms | 957 ms | **1,28× más lento**: cada commit copia el camino hasta la raíz |
+| 10 000 filas con tres índices, un commit | 31,6 ms | 22,9 ms | 1,4× más rápido ([detalle](docs/benchmarks/fase-6.md)) |
+| Cargar 10 millones de filas en orden | 14,0 s | 1,85 s (carga masiva) | 7,6× más rápido, con 100 MiB de memoria ([detalle](docs/benchmarks/fase-6.8.md)) |
+
+**Espacio**
+
+| | TekiumDB | SQLite |
+| --- | ---: | ---: |
+| 100 000 filas tras 100 000 actualizaciones al azar, sobre el tamaño de los datos | 1,16× | 1,22× |
+
+Copy-on-write tiene un costo conocido: una transacción de lectura que se deja abierta impide reutilizar páginas y el archivo crece mientras viva (84× en esa misma carga con un lector retenido todo el tiempo). El contador `tekium.snapshots.oldest_age` existe para vigilarlo. [Detalle](docs/benchmarks/fase-4.md).
+
+**Otras mediciones**
+
+| Qué | Resultado |
+| --- | --- |
+| Búsqueda vectorial, un millón de vectores de 128 dimensiones | Recall@10 de 0,98 en 0,75 ms por consulta ([detalle](docs/benchmarks/fase-9.md)) |
+| Ocupación de las hojas con claves UUID v7 | 96–99 % ([detalle](docs/benchmarks/fase-8.md)) |
+| Backup en caliente de un millón de filas | 0,35 s; la mediana del commit del escritor no cambia ([detalle](docs/benchmarks/fase-10.2.md)) |
+| Contadores de diagnóstico apagados | Sin costo medible en la lectura puntual ([detalle](docs/benchmarks/fase-10.4.md)) |
+| Función de C# llamada desde SQL | Unos 30 ns por fila, lo mismo que la expresión escrita en SQL ([detalle](docs/benchmarks/fase-13.md)) |
+| Compresión por página | Reduce 3,3× los bytes escritos, pero no el tamaño del archivo: apagada por defecto ([detalle](docs/benchmarks/fase-5.5.md)) |
+| Tomar un snapshot y fijar una página en caché | 15,9 ns, sin asignaciones |
+
+Los benchmarks se reproducen con `dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'`.
 
 ## Arquitectura
 
-Tres paquetes opcionales sobre un núcleo de siete capas. Las flechas son dependencias: el núcleo no referencia a ninguno de los paquetes de arriba.
+Paquetes opcionales sobre un núcleo en capas. Las flechas son dependencias: el núcleo no referencia a ninguno de los paquetes de arriba.
 
 ```
 Tekium.Embedded.Sql          Tekium.Embedded.Linq        Tekium.Embedded.Vectors
-(SQL + proveedor ADO.NET)    (IQueryable tipado)         (HNSW + cuantización)
+(SQL, ADO.NET, rutinas C#)   (predicados de C#)          (HNSW + cuantización)
          |                            |                            |
          v                            v                            v
 +-------------------------------------------------------------------------+
 | Tekium.Embedded.Core — sin dependencias nativas, compatible con AOT     |
-|  API pública         IDatabase, ITable, ITransaction, IAsyncEnumerable  |
-|  Ejecutor y catálogo planes, cursores, serialización de filas sin boxing|
-|  Gestor de índices   B+Tree, temporal, UUID v7, IVectorIndex            |
-|  MVCC                snapshots, raíz de versiones, commit atómico       |
+|  API pública         TekiumDb, Table<T>, transacciones, IAsyncEnumerable|
+|  Catálogo y tablas   esquemas, filas tipadas, planificador, restricciones|
+|  Índices             B+Tree, secundarios, zone maps, carga masiva       |
+|  MVCC                snapshots, commit atómico, historial de estados    |
 |  Pager               caché de páginas, free-list, copy-on-write         |
 |  Cifrado             AES-256-GCM por página, Argon2id                   |
-|  E/S                 RandomAccess, sin P/Invoke ni binarios nativos     |
+|  E/S                 RandomAccess asíncrono, sin P/Invoke               |
 +-------------------------------------------------------------------------+
 ```
 
-Cada capa expone su contrato como interfaz interna y se prueba sola: el pager no sabe que existe el B+Tree, y el B+Tree no sabe que las páginas van cifradas.
+| Decisión | Consecuencia |
+| --- | --- |
+| Copy-on-write: una página confirmada nunca se modifica | Los lectores no bloquean; un snapshot, un backup o un estado pasado son sólo una raíz que se conserva |
+| Commit = escribir páginas nuevas, vaciar, y cambiar un registro de raíz | No hay WAL que reproducir ni checkpoint; tras un corte la base abre en el último commit completo |
+| Todo son B+Trees del mismo archivo | Índices, catálogo, zone maps y el grafo vectorial heredan transacciones, cifrado y commit atómico |
+| El nonce de cada página cifrada es `página ‖ transacción` | Una página nunca se cifra dos veces con el mismo nonce |
+| Generador de código en vez de reflexión | Funciona bajo Native AOT; los errores de modelo son errores de compilación (`TK0001`…) |
 
-El diseño completo —formato de archivo, flujo de commit, construcción del nonce, índices y justificación de cada decisión— está en [`TekiumDB-plan.md`](TekiumDB-plan.md).
+## Confiabilidad
 
-## Estado y hoja de ruta
+Cómo se prueba el motor:
 
-Las fases son estrictamente secuenciales: cada una termina con su criterio de salida cumplido y CI en verde antes de empezar la siguiente. Mientras no haya CI disponible, la verificación es local: macOS directamente y Linux con `scripts/test-linux.sh`.
+- **Contra un modelo.** El B+Tree, los índices, las restricciones y las consultas se comparan con una implementación de referencia en memoria sobre secuencias aleatorias de operaciones (un millón en el árbol), verificando además la estructura y que no se pierda ninguna página.
+- **Cortes de energía.** El commit se interrumpe antes de cada operación de E/S, perdiendo a pedazos lo que no se había vaciado al disco; la base tiene que abrir siempre en un estado confirmado.
+- **Procesos muertos.** Un proceso hijo se mata en cada punto del commit, con el mismo requisito.
+- **Corrupción.** Se daña cada página de un archivo, una por una: la inspección la nombra siempre, sin lanzar, y la verificación en línea la encuentra aunque esté en caché.
+- **Criptografía.** Argon2id y BLAKE2b contra vectores de referencia (RFC 9106); el resto es la criptografía de .NET.
+- **Archivo y memoria.** Las pruebas del almacenamiento corren sobre los dos dispositivos, con inyección de fallos de E/S.
+- **Native AOT.** Un programa publicado con AOT ejercita el motor, las tablas tipadas, los vectores, las herramientas, LINQ y SQL en cada verificación.
+- **Las pruebas se prueban.** Se introducen defectos a mano en el motor y se comprueba que alguna prueba falle.
 
-| Fase | Entrega | Estado |
-| --- | --- | --- |
-| 0 | Esqueleto de la solución, CI, BenchmarkDotNet, analizadores | Hecho en macOS y Linux; Windows sin verificar |
-| 0.5 | Spike de validación: pager y B+Tree mínimos medidos contra SQLite | Hecho: [dentro del criterio](docs/benchmarks/fase-0.5.md), se sigue |
-| 1 | Capa de E/S y pager: caché de páginas, checksums, free-list | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-1.md); Windows sin verificar |
-| 1.5 | Modo en memoria | Hecho en macOS y Linux: las pruebas del pager corren sobre archivo y sobre memoria; Windows sin verificar |
-| 2 | Cifrado por página y derivación de clave | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-2.md); Windows sin verificar |
-| 3 | B+Tree copy-on-write: insert, lookup, delete, split, merge | Hecho en macOS y Linux: un millón de operaciones aleatorias contra un modelo; Windows sin verificar |
-| 4 | MVCC, transacciones y commit atómico | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-4.md); Windows sin verificar |
-| 5 | Catálogo, filas tipadas y generador de código | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-5.md); Windows sin verificar |
-| 5.5 | Compresión Zstandard por página | Hecho y [medido](docs/benchmarks/fase-5.5.md): comprime 3,3× los bytes escritos pero no ahorra disco y cuesta latencia; queda apagada por defecto |
-| 6 | Índices secundarios, codificación ordenada de claves, índices sobre expresiones y parciales | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.md); Windows sin verificar |
-| 6.5 | Restricciones declarativas: `CHECK`, `UNIQUE`, `FOREIGN KEY` | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.5.md); Windows sin verificar |
-| 6.7 | Change feed post-commit | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-6.7.md); Windows sin verificar |
-| 6.8 | Carga masiva: el B+Tree construido de abajo hacia arriba | Hecho en macOS y Linux, [medido](docs/benchmarks/fase-6.8.md): 3× más rápida que insertar fila por fila en una sola transacción, con la novena parte de la memoria; no es el orden de magnitud del criterio, que sólo se alcanza contra insertar con un commit cada mil filas (58×) |
-| 7 | Índice temporal con zone maps y split 100/0 | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-7.md); Windows sin verificar |
-| 8 | Índice UUID v7 | Hecho en macOS y Linux, [medido](docs/benchmarks/fase-8.md): criterio cumplido con hasta decenas de UUID por milisegundo (96–99 % de ocupación); no con cientos por milisegundo creados en un bucle (68 %); Windows sin verificar |
-| 9 | Índice vectorial HNSW | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-9.md) (recall@10 de 0,98 sobre un millón de vectores con estructura); Windows sin verificar |
-| 10 | Herramientas: `tkdb` para inspeccionar, reparar, cambiar la contraseña y compactar | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.md); Windows sin verificar |
-| 10.2 | Backup en caliente desde un snapshot fijado | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.2.md); Windows sin verificar |
-| 10.4 | `VerifyAsync` y contadores de diagnóstico por `Meter` | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.4.md); Windows sin verificar |
-| 10.6 | Viaje en el tiempo: leer la base como estaba en una transacción pasada | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-10.6.md); Windows sin verificar |
-| 11 | Capa LINQ | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-11.md); Windows sin verificar |
-| 12 | Capa SQL y proveedor ADO.NET | Hecho en macOS y Linux: [criterio cumplido](docs/benchmarks/fase-12.md) sobre un subconjunto de SQL (sin subconsultas, `UNION`, joins externos ni búsqueda vectorial desde SQL); Windows sin verificar |
-| 13 – 14 | Funciones y procedimientos: C# por generador y PL/Tk | Pendiente |
-| 15 | Adaptadores: EF Core, `IDistributedCache`, Data Protection, HealthChecks | Pendiente |
+Plataformas: verificado en macOS (arm64) y en Linux (arm64, contenedor). Windows no se ha verificado.
 
-Las fases 0 a 4 concentran el riesgo del proyecto. El producto es entregable al terminar la 10. Los criterios de salida de cada fase están en el [plan](TekiumDB-plan.md#fases-de-entrega).
+## Límites
+
+Lo que conviene saber antes de adoptarla:
+
+- **Un proceso por archivo.** No hay acceso concurrente desde varios procesos.
+- **Un escritor a la vez.** Las escrituras se serializan; muchos commits pequeños y durables son más lentos que en SQLite con WAL.
+- **Lectores largos hacen crecer el archivo**, y el archivo no se achica solo: se compacta con `tkdb compact`.
+- **SQL es un subconjunto:** sin subconsultas, `UNION`, joins externos ni `ALTER TABLE`.
+- **LINQ traduce o rechaza:** sin `||`, `!=`, ordenar ni agrupar.
+- **Sin triggers, vistas materializadas, replicación ni borrado en cascada.** En su lugar: restricciones declarativas, índices sobre expresiones y change feed.
+- **El índice vectorial** no recupera el espacio de los vectores borrados hasta eliminarlo, y no se consulta desde SQL.
+- **Formato de archivo sin estabilizar** hasta la primera versión publicada.
 
 ## Compilar y probar
 
 Requisitos: SDK de .NET 11. Para publicar con Native AOT hace falta además la cadena de herramientas nativa de la plataforma (Xcode en macOS, `clang` en Linux, las herramientas de C++ de Visual Studio en Windows).
 
 ```bash
-# Compilar (los warnings son errores)
-dotnet build -c Release
+dotnet build -c Release                                   # los warnings son errores
+dotnet test -c Release                                    # todas las pruebas
+dotnet test --filter-class "*BTreePropertyTests"          # una clase
 
-# Pruebas
-dotnet test
-
-# Una sola clase de pruebas
-dotnet test --filter-class "*PageSizeTests"
-
-# Verificar la compatibilidad con Native AOT
+# Native AOT
 dotnet publish tests/Tekium.Embedded.AotSmoke -c Release -o artifacts/aot
 ./artifacts/aot/Tekium.Embedded.AotSmoke
 
 # Benchmarks
 dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'
 
-# Todo lo anterior en Linux, dentro de un contenedor (requiere Docker)
+# Build, pruebas y AOT en Linux, dentro de un contenedor (requiere Docker)
 scripts/test-linux.sh
 ```
 
 Las pruebas usan xUnit v3 sobre Microsoft.Testing.Platform, por eso los filtros son `--filter-class` y `--filter-method` en lugar de `--filter`.
 
-## Estructura del repositorio
-
 ```
 src/
-  Tekium.Embedded.Cli/           tkdb: herramienta de línea de comandos
-  Tekium.Embedded.Core/          Núcleo del motor y API pública
-  Tekium.Embedded.Generators/    Generador de código fuente: serializador, campos, índices y restricciones de cada [TkTable]
-  Tekium.Embedded.Linq/          Consultas con predicados de C#, traducidos a filtros del motor
-  Tekium.Embedded.Sql/           SQL y proveedor ADO.NET
-  Tekium.Embedded.Vectors/       Búsqueda vectorial HNSW, en su propio paquete
-tests/
-  Tekium.Embedded.Core.Tests/    Pruebas unitarias
-  Tekium.Embedded.Vectors.Tests/ Pruebas del índice vectorial, contra fuerza bruta
-  Tekium.Embedded.CrashChild/    Proceso que las pruebas de crash lanzan y matan a mitad de un commit
-  Tekium.Embedded.Benchmarks/    Benchmarks con BenchmarkDotNet
-  Tekium.Embedded.AotSmoke/      Consumidor mínimo publicado con Native AOT
-docs/benchmarks/                 Resultados de benchmarks publicados por fase
-.github/workflows/ci.yml         Build, pruebas y AOT en Linux, Windows y macOS
-scripts/test-linux.sh            Lo mismo dentro de un contenedor Linux, para verificar sin CI
-BannedSymbols.txt                APIs prohibidas en todo el repositorio
-src/BannedSymbols.Engine.txt     APIs prohibidas dentro del motor
-CLAUDE.md                        Reglas de trabajo y de rendimiento
-TekiumDB-plan.md                 Diseño completo y fases de entrega
+  Tekium.Embedded.Core/          Motor y API pública
+  Tekium.Embedded.Generators/    Generador de código: tablas, índices, restricciones y rutinas
+  Tekium.Embedded.Sql/           SQL, proveedor ADO.NET, funciones y procedimientos en C#
+  Tekium.Embedded.Linq/          Consultas con predicados de C#
+  Tekium.Embedded.Vectors/       Búsqueda vectorial HNSW
+  Tekium.Embedded.Cli/           tkdb
+tests/                           Pruebas, benchmarks y el programa de verificación de Native AOT
+docs/benchmarks/                 Mediciones, con sus condiciones
 ```
-
-## Principios de ingeniería
-
-- **Las pruebas son el producto.** Nadie adopta una base de datos en la que no confía. Todo se escribe con TDD, y el motor se valida con pruebas de propiedades contra un modelo de referencia, pruebas de crash en cada punto del commit e inyección de fallos de E/S.
-- **Async de punta a punta.** Sin sync-over-async, sin `lock` en código asíncrono, `ConfigureAwait(false)` en toda la librería.
-- **Cero asignaciones en el camino caliente.** Buffers alquilados, claves comparadas como `ReadOnlySpan<byte>`, cursores `ref struct`.
-- **Compatible con AOT, nunca obligatorio.** La misma librería corre bajo Native AOT y bajo JIT; quien la consume elige.
-- **Ninguna optimización sin medición.** Cada una va con su número antes y después, medido con BenchmarkDotNet.
-
-Varias de estas reglas las impone el build: `.Result`, `.Wait()`, `FileStream`, `Guid.ToByteArray()` sin `bigEndian` y la falta de `ConfigureAwait(false)` en `/src` son errores de compilación.
-
-## Fuera de alcance
-
-Decisiones de diseño, no pendientes:
-
-- Triggers y vistas materializadas. En su lugar: restricciones declarativas, índices sobre expresiones y change feed post-commit.
-- Acceso desde varios procesos al mismo archivo.
-- Replicación y sincronización.
-- Almacenamiento columnar, caché de resultados de consulta e hilos de mantenimiento en segundo plano.
-- Compatibilidad de formato con VistaDB.
-
-## Contribuir
-
-El repositorio es privado mientras el motor se estabiliza. Para quien trabaje en él:
-
-1. Leer la sección de la fase en curso en [`TekiumDB-plan.md`](TekiumDB-plan.md) y las reglas de [`CLAUDE.md`](CLAUDE.md).
-2. Escribir primero la prueba y verla fallar.
-3. No adelantar trabajo de fases futuras.
-4. Toda dependencia nueva debe ser compatible con MIT, y el núcleo no admite dependencias en runtime.
-5. Cada archivo `.cs` lleva la cabecera de licencia; el build la exige.
 
 ## Licencia
 

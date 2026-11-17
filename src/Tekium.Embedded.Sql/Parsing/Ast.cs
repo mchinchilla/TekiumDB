@@ -69,3 +69,6 @@ internal sealed record CreateViewStatement(string Name, SelectStatement Query, s
 internal sealed record DropStatement(string Kind, string Name, string? Table, bool IfExists) : SqlStatement;
 
 internal sealed record ExplainStatement(SelectStatement Query) : SqlStatement;
+
+/// <summary>CALL of a procedure the application registered.</summary>
+internal sealed record CallStatement(string Name, IReadOnlyList<SqlExpr> Arguments) : SqlStatement;

@@ -98,6 +98,31 @@ internal static class Diagnostics
         "A zone map must be on a date column",
         "'{0}' cannot have a zone map: [TkZoneMap] goes on a column of type DateTimeOffset, DateTime or DateOnly, with windows of at least one minute");
 
+    public static readonly DiagnosticDescriptor RoutineNotCallable = Error(
+        "TK0019",
+        "A SQL routine must be a static method generated code can call",
+        "'{0}' cannot be a SQL routine: [TkFunction] and [TkProcedure] go on a static, non-generic method that is public or internal, in types that are too, with a name");
+
+    public static readonly DiagnosticDescriptor RoutineType = Error(
+        "TK0020",
+        "A SQL function uses a type SQL has no value for",
+        "'{0}' cannot be a SQL function: {1}. A function takes and returns bool, int, long, double, decimal, string, Guid, DateTime, DateTimeOffset or byte[], and may take ReadOnlySpan<char>.");
+
+    public static readonly DiagnosticDescriptor VectorShape = Error(
+        "TK0021",
+        "A vectorized function takes spans in and a span out",
+        "'{0}' cannot be a vectorized function: it must return nothing and take one ReadOnlySpan<T> per argument followed by a Span<T> for the results, with T one of double, float, long or int");
+
+    public static readonly DiagnosticDescriptor ProcedureShape = Error(
+        "TK0022",
+        "A procedure takes a TkContext first and returns a task",
+        "'{0}' cannot be a SQL procedure: its first parameter must be a TkContext and it must return a ValueTask or a Task, with or without a value SQL can hold");
+
+    public static readonly DiagnosticDescriptor DuplicateRoutine = Error(
+        "TK0023",
+        "Two SQL routines have the same name",
+        "The assembly declares more than one SQL routine named '{0}'");
+
     public static DiagnosticDescriptor? Find(string id) => id switch
     {
         "TK0001" => NotPartial,
@@ -118,6 +143,11 @@ internal static class Diagnostics
         "TK0016" => UnsupportedForeignKey,
         "TK0017" => DuplicateConstraint,
         "TK0018" => UnsupportedZoneMap,
+        "TK0019" => RoutineNotCallable,
+        "TK0020" => RoutineType,
+        "TK0021" => VectorShape,
+        "TK0022" => ProcedureShape,
+        "TK0023" => DuplicateRoutine,
         _ => null,
     };
 

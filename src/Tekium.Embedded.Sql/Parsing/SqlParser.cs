@@ -240,7 +240,25 @@ internal sealed class SqlParser
             return Drop();
         }
 
-        throw Error("SELECT, INSERT, UPDATE, DELETE, CREATE, DROP or EXPLAIN");
+        if (Accept("CALL"))
+        {
+            var name = Name("the name of a procedure");
+            Expect("(");
+            var arguments = new List<SqlExpr>();
+            if (!Accept(")"))
+            {
+                do
+                {
+                    arguments.Add(Expression());
+                }
+                while (Accept(","));
+                Expect(")");
+            }
+
+            return new CallStatement(name, arguments);
+        }
+
+        throw Error("SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, CALL or EXPLAIN");
     }
 
     private SelectStatement Select()

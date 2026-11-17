@@ -97,7 +97,7 @@ public sealed class TkCommand : DbCommand
         var connection = Connected();
         var database = connection.Db;
         var statement = connection.Engine.Parse(CommandText);
-        var parameters = _parameters.ToValues();
+        var parameters = new StatementContext(_parameters.ToValues(), connection.Engine.Routines);
 
         // In the transaction given to the command, or else the one in progress on the connection.
         if ((DbTransaction as TkDbTransaction ?? connection.Current) is { } transaction)

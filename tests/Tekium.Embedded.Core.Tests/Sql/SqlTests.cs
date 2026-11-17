@@ -477,7 +477,7 @@ public abstract class SqlTests : DatabaseTests
         Assert.True((await database.VerifyAsync(Ct)).IsHealthy);
     }
 
-    private protected static async Task<(List<Item> Items, List<(int Id, string Name, string Region)> Owners)> FillAsync(TekiumDb database)
+    internal static async Task<(List<Item> Items, List<(int Id, string Name, string Region)> Owners)> FillAsync(TekiumDb database)
     {
         var random = new Random(17);
         var items = new List<Item>();
@@ -514,14 +514,14 @@ public abstract class SqlTests : DatabaseTests
         return (items, owners);
     }
 
-    private protected static async Task<int> RunAsync(DbConnection connection, string sql, params (string Name, object? Value)[] parameters)
+    internal static async Task<int> RunAsync(DbConnection connection, string sql, params (string Name, object? Value)[] parameters)
     {
         await using var command = Command(connection, sql, parameters);
         return await command.ExecuteNonQueryAsync(Ct);
     }
 
     /// <summary>Cada fila como texto, con sus valores separados por barras; un NULL es vacío.</summary>
-    private protected static async Task<List<string>> QueryAsync(DbConnection connection, string sql, params (string Name, object? Value)[] parameters)
+    internal static async Task<List<string>> QueryAsync(DbConnection connection, string sql, params (string Name, object? Value)[] parameters)
     {
         await using var command = Command(connection, sql, parameters);
         await using var reader = await command.ExecuteReaderAsync(Ct);
@@ -531,6 +531,7 @@ public abstract class SqlTests : DatabaseTests
             rows.Add(string.Join('|', Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? string.Empty : reader.GetValue(i) switch
             {
                 DateTimeOffset moment => moment.ToString("O", CultureInfo.InvariantCulture),
+                byte[] bytes => Convert.ToHexString(bytes),
                 IFormattable value => value.ToString(null, CultureInfo.InvariantCulture),
                 var value => value.ToString(),
             })));
@@ -553,7 +554,7 @@ public abstract class SqlTests : DatabaseTests
         return lines;
     }
 
-    private static async Task<string> RefusedAsync<TException>(DbConnection connection, string sql, string mention)
+    internal static async Task<string> RefusedAsync<TException>(DbConnection connection, string sql, string mention)
         where TException : Exception
     {
         var failure = await Assert.ThrowsAsync<TException>(async () => await RunAsync(connection, sql));
