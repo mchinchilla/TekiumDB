@@ -170,6 +170,107 @@ public abstract class JsonIndexTests : DatabaseTests
     }
 
     [Fact]
+    public async Task The_planner_gives_through_a_path_index_what_the_same_table_without_it_gives()
+    {
+        // Las mismas filas en dos tablas, una con los índices por ruta y otra sin ellos: cada consulta da lo mismo en las dos.
+        await using var database = await OpenAsync(NewDevice());
+        await using var connection = new TkConnection(database);
+        foreach (var table in new[] { "indexed", "plain" })
+        {
+            await RunAsync(connection, $"CREATE TABLE {table} (id INT PRIMARY KEY, doc JSONB NOT NULL)");
+            await RunAsync(connection, $$"""
+                INSERT INTO {{table}} (id, doc) VALUES
+                (1, '{"w":1.00000000000000000001,"code":5}'),
+                (2, '{"w":1,"code":7}'),
+                (3, '{"w":0.99999999999999999999,"code":5}'),
+                (4, '{"w":2,"code":5.0}'),
+                (5, '{"w":-3}')
+                """);
+        }
+
+        await RunAsync(connection, "CREATE INDEX by_w ON indexed (JSON_VALUE(doc, '$.w') AS DOUBLE)");
+        await RunAsync(connection, "CREATE INDEX by_code ON indexed (JSON_VALUE(doc, '$.code'))");
+        foreach (var where in new[]
+        {
+            // Un DOUBLE redondea: 1.00000000000000000001 y 0.99999999999999999999 son 1 en el índice, y el WHERE decide.
+            "JSON_VALUE(doc, '$.w') > 1",
+            "JSON_VALUE(doc, '$.w') < 1",
+            "JSON_VALUE(doc, '$.w') >= 1",
+            "JSON_VALUE(doc, '$.w') <= 1",
+
+            // La ruta del otro lado de la comparación.
+            "1 < JSON_VALUE(doc, '$.w')",
+            "2 >= JSON_VALUE(doc, '$.w')",
+            "0 > JSON_VALUE(doc, '$.w')",
+
+            // Una constante numérica contra un índice de texto, que no guarda números: no se busca "5" en él como si fuera texto.
+            "JSON_VALUE(doc, '$.code') = 5",
+            "5 = JSON_VALUE(doc, '$.code')",
+        })
+        {
+            List<string> plainRows, indexedRows;
+            try
+            {
+                plainRows = [.. await QueryAsync(connection, $"SELECT id FROM plain WHERE {where} ORDER BY id")];
+            }
+            catch (Exception failed)
+            {
+                throw new InvalidOperationException($"plain: {where}", failed);
+            }
+
+            try
+            {
+                indexedRows = [.. await QueryAsync(connection, $"SELECT id FROM indexed WHERE {where} ORDER BY id")];
+            }
+            catch (Exception failed)
+            {
+                throw new InvalidOperationException($"indexed: {where}", failed);
+            }
+
+            Assert.Equal(plainRows, indexedRows);
+        }
+
+        Assert.Contains(await QueryAsync(connection, "EXPLAIN SELECT id FROM indexed WHERE 1 < JSON_VALUE(doc, '$.w')"), static line => line.Contains("by_w", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_document_goes_into_a_column_in_its_form_and_two_that_say_the_same_are_equal()
+    {
+        await using var database = await OpenAsync(NewDevice());
+        await using var connection = new TkConnection(database);
+        await RunAsync(connection, "CREATE TABLE docs (id INT PRIMARY KEY, kept JSON NOT NULL, normal JSONB NOT NULL)");
+        var text = TkJson.Parse("""{ "b": 1, "a": 1.50 }""");
+        await RunAsync(connection, "INSERT INTO docs (id, kept, normal) VALUES (1, @kept, @normal)", ("kept", text), ("normal", text));
+        Assert.Equal(["""{ "b": 1, "a": 1.50 }|{"a":1.5,"b":1}"""], await QueryAsync(connection, "SELECT kept, normal FROM docs"));
+
+        // Iguales por lo que dicen, no por cómo están escritos.
+        Assert.Equal(["1"], await QueryAsync(connection, """SELECT id FROM docs WHERE kept = JSON('{"a":1.5,"b":1}')"""));
+        Assert.Equal(["1"], await QueryAsync(connection, "SELECT id FROM docs WHERE kept = normal"));
+        Assert.Empty(await QueryAsync(connection, """SELECT id FROM docs WHERE kept = JSON('{"a":1.5,"b":2}')"""));
+
+        // Lo que devuelve RETURNING es lo que la columna guarda.
+        Assert.Equal(["""{ "b": 1, "a": 1.50 }|{"a":1.5,"b":1}"""], await QueryAsync(connection, "INSERT INTO docs (id, kept, normal) VALUES (2, @kept, @normal) RETURNING kept, normal", ("kept", text), ("normal", text)));
+    }
+
+    [Fact]
+    public void A_stored_path_that_is_not_canonical_is_not_used()
+    {
+        TkColumn[] columns = [new("id", TkColumnType.I64, false), new("doc", TkColumnType.Json, false)];
+        var good = StoredIndex.Create("by_a", columns, [1], unique: false, [(TkJsonPath.Parse("$.a"), TkColumnType.Text)]);
+        Assert.Null(good.Unmaintainable);
+        Assert.Equal("$.a", good.Paths[0]?.Text);
+
+        // La misma definición con la ruta escrita "$.\"a\"": dice lo mismo, pero no es como se guarda, así que no se usa.
+        var definition = good.Definition;
+        var at = definition.AsSpan().IndexOf("$.a"u8);
+        Assert.Equal(3, System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(definition.AsSpan(at - 4)));
+        var quoted = "$.\"a\""u8.ToArray();
+        byte[] changed = [.. definition[..(at - 4)], .. BitConverter.GetBytes(quoted.Length), .. quoted, .. definition[(at + 3)..]];
+        var decoded = StoredIndex.Decode("by_a", changed, columns);
+        Assert.NotNull(decoded.Unmaintainable);
+    }
+
+    [Fact]
     public async Task Changing_the_column_of_a_path_index_keeps_the_index_or_says_why_not()
     {
         await using var database = await OpenAsync(NewDevice());
@@ -179,7 +280,7 @@ public abstract class JsonIndexTests : DatabaseTests
         await RunAsync(connection, """INSERT INTO notes (id, body) VALUES (1, '{"tag":"x"}'), (2, '{"tag":"y"}')""");
 
         await RefusedAsync<TkSqlException>(connection, "ALTER TABLE notes DROP COLUMN body", "index 'by_tag'");
-        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE notes ALTER COLUMN body TEXT NOT NULL", "index 'by_tag'");
+        await RefusedAsync<TkSqlException>(connection, "ALTER TABLE notes ALTER COLUMN body TEXT NOT NULL", "cannot stop being a JSON column: index 'by_tag'");
         await RunAsync(connection, "ALTER TABLE notes RENAME COLUMN body TO doc");
         await RunAsync(connection, "ALTER TABLE notes ALTER COLUMN doc JSONB");
         Assert.Equal(["2"], await QueryAsync(connection, "SELECT id FROM notes WHERE doc ->> 'tag' = 'y'"));

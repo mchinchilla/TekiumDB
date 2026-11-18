@@ -1,6 +1,6 @@
 # Fase 19 — columnas json y jsonb
 
-**Criterio de salida cumplido en macOS; las pruebas de mutación van por la mitad y Linux está pendiente.** Un documento inválido se rechaza al escribir; json devuelve el texto exacto y jsonb el normalizado; dos jsonb iguales comparan iguales; cada lectura por ruta da lo mismo que `json_extract` de SQLite sobre los mismos documentos; un índice sobre una ruta lo mantienen igual SQL y la API tipada, y una consulta por esa ruta lo usa; un predicado LINQ por ruta da lo mismo que sobre objetos; EF Core guarda y consulta por ruta como el proveedor de SQLite. Windows no se ha verificado.
+**Criterio de salida cumplido.** Un documento inválido se rechaza al escribir; json devuelve el texto exacto y jsonb el normalizado; dos jsonb iguales comparan iguales; cada lectura por ruta da lo mismo que `json_extract` de SQLite sobre los mismos documentos; un índice sobre una ruta lo mantienen igual SQL y la API tipada, y una consulta por esa ruta lo usa; un predicado LINQ por ruta da lo mismo que sobre objetos; EF Core guarda y consulta por ruta como el proveedor de SQLite. Windows no se ha verificado.
 
 Hecho el 2026-11-17.
 
@@ -142,20 +142,22 @@ Sobre archivo y sobre memoria.
 
 ### Las pruebas detectan el código roto
 
-**En curso.** De 63 roturas preparadas se corrieron 38: 30 detectadas, una cuya forma no compilaba y siete que sobreviven, todas en la comprobación de documentos:
+Se prepararon 63 roturas del código (una condición invertida, una comprobación quitada, un caso tomado por otro) y se corrió cada una contra las pruebas de JSON, SQL, LINQ, el generador y EF Core. Se detectan 62. La que queda es equivalente: quitar el atajo `a == b` al comparar dos documentos en SQL deja la comparación por el texto canónico, que da cero exactamente cuando los documentos son iguales.
 
-- `JsonBinary.Verify` acepta claves fuera de orden, números que no están en su única forma, bytes de más después del valor y cuentas que no están en su forma más corta.
-- El texto acepta una marca de orden de bytes al principio.
-- Un documento de texto leído de una fila no se comprueba.
-- Un número entero se lee como decimal.
+Catorce sobrevivieron la primera vez y cada una pidió una prueba:
 
-Cada una pide un caso de prueba; la prueba que daña cada byte no las cubre porque el daño no rompe el documento, sólo lo deja en una forma que no es la canónica. Faltan 25 por correr.
+- `JsonBinary.Verify` aceptaba claves repetidas, números con un cero al final, bytes de más después del valor y cuentas que no estaban en su forma más corta. La prueba que daña cada byte no las cubría: el daño no rompe el documento, sólo lo deja en una forma que no es la canónica. Ahora hay un caso para cada una (`TkJsonTests`).
+- El texto aceptaba una marca de orden de bytes al principio, un documento de texto leído de una fila no se comprobaba y un número entero salía como decimal (`TkJsonTests`).
+- Una ruta guardada que no estaba en su forma canónica se usaba. Con un `DOUBLE`, los límites no se hacían inclusivos. Una constante numérica se buscaba en un índice de texto. Una ruta del otro lado de la comparación no se invertía. Con esas tres roturas el índice daba menos filas que el recorrido. Ahora `JsonIndexTests` compara cada consulta contra la misma tabla sin índices, con números que un `DOUBLE` redondea.
+- Una columna con un índice por ruta podía dejar de ser JSON, y `RETURNING` devolvía un documento jsonb en la forma de texto con que llegó.
+
+Una rotura no compilaba en su primera forma y se reescribió.
 
 ## Verificación
 
 | Dónde | Qué | Resultado |
 | --- | --- | --- |
-| macOS (arm64) | `dotnet test -c Release` | 958 pasan, 3 explícitas omitidas |
+| macOS (arm64) | `dotnet test -c Release` | 968 pasan, 3 explícitas omitidas |
 | macOS (arm64) | Smoke de Native AOT | Pasa |
-| Linux (arm64, contenedor) | `scripts/test-linux.sh` | PENDIENTE |
+| Linux (arm64, contenedor) | `scripts/test-linux.sh` | 968 pasan, 3 explícitas omitidas; smoke de AOT pasa |
 | Windows | — | Sin verificar |

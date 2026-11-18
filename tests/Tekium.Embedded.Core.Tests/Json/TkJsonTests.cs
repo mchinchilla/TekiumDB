@@ -47,6 +47,7 @@ public sealed class TkJsonTests
     [InlineData("NaN")]
     [InlineData("01")]
     [InlineData("\"\\ud800\"")]
+    [InlineData("\uFEFF1")]
     public void What_is_not_strict_json_is_refused_saying_so(string text)
     {
         var failure = Assert.Throws<FormatException>(() => TkJson.Parse(text));
@@ -180,6 +181,55 @@ public sealed class TkJsonTests
 
         Assert.Throws<InvalidDataException>(() => TkJson.FromBinary(binary.AsSpan(0, binary.Length - 1)));
         Assert.Throws<InvalidDataException>(() => TkJson.FromBinary([]));
+    }
+
+    [Fact]
+    public void A_binary_document_not_in_its_one_form_is_refused()
+    {
+        // Una clave repetida: {"a":1,"b":2} con la "b" cambiada por "a".
+        var keys = TkJson.Parse("""{"a":1,"b":2}""").ToBinary().GetBinary().ToArray();
+        var b = Array.LastIndexOf(keys, (byte)'b');
+        keys[b] = (byte)'a';
+        Assert.Contains("order or repeat", Assert.Throws<InvalidDataException>(() => TkJson.FromBinary(keys)).Message, StringComparison.Ordinal);
+
+        // Un número con un cero al final: 1.5 son los dígitos "15" con exponente -1; "10" con -1 sería 1.0, que se escribe "1" con 0.
+        var number = TkJson.Parse("1.5").ToBinary().GetBinary().ToArray();
+        number[Array.IndexOf(number, (byte)'5')] = (byte)'0';
+        Assert.Contains("one form", Assert.Throws<InvalidDataException>(() => TkJson.FromBinary(number)).Message, StringComparison.Ordinal);
+
+        // Un byte de más después del valor.
+        var whole = TkJson.Parse("""{"a":[1,2]}""").ToBinary().GetBinary().ToArray();
+        Assert.Contains("after its value", Assert.Throws<InvalidDataException>(() => TkJson.FromBinary([.. whole, 0])).Message, StringComparison.Ordinal);
+
+        // Un largo escrito con un byte de más: el de "x" (1) como 0x81 0x00.
+        var text = TkJson.Parse("\"x\"").ToBinary().GetBinary().ToArray();
+        var count = Array.IndexOf(text, (byte)'x') - 1;
+        Assert.Equal(1, text[count]);
+        byte[] padded = [.. text[..count], 0x81, 0x00, .. text[(count + 1)..]];
+        Assert.Contains("shortest form", Assert.Throws<InvalidDataException>(() => TkJson.FromBinary(padded)).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_number_is_given_as_the_type_that_holds_it_exactly()
+    {
+        var json = TkJson.Parse("""{"n":12,"neg":-7,"e":12e3,"big":12345678901234567890,"f":1.5,"huge":1e400}""");
+        foreach (var form in new[] { json, json.ToBinary() })
+        {
+            Assert.Equal(12L, Assert.IsType<long>(Get(form, "$.n").GetNumber()));
+            Assert.Equal(-7L, Assert.IsType<long>(Get(form, "$.neg").GetNumber()));
+            Assert.Equal(12000L, Assert.IsType<long>(Get(form, "$.e").GetNumber()));
+            Assert.Equal(12345678901234567890m, Assert.IsType<decimal>(Get(form, "$.big").GetNumber()));
+            Assert.Equal(1.5m, Assert.IsType<decimal>(Get(form, "$.f").GetNumber()));
+            Assert.IsType<double>(Get(form, "$.huge").GetNumber());
+        }
+    }
+
+    [Fact]
+    public void A_stored_text_document_is_checked_as_it_is_read()
+    {
+        Assert.Equal("""{"a":1}""", TkJson.FromStored("""{"a":1}"""u8, TkJsonFormat.Text).ToString());
+        Assert.Throws<InvalidDataException>(() => TkJson.FromStored("""{"a":"""u8, TkJsonFormat.Text));
+        Assert.Throws<InvalidDataException>(() => TkJson.FromStored("\uFEFF1"u8, TkJsonFormat.Text));
     }
 
     private static TkJson Get(TkJson json, string path) => json.TryGet(TkJsonPath.Parse(path), out var value) ? value : throw new KeyNotFoundException(path);
