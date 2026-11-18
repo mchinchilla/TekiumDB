@@ -203,6 +203,28 @@ public sealed class Table<T> : TekiumDb.ITable
         return new TkPlan(choice.Access, choice.Index >= 0 ? _indexes[choice.Index].Name : null);
     }
 
+    /// <summary>
+    /// Makes the table in the file what this type declares, without writing a row: what the first write of
+    /// the type would do. Creates the table if it does not exist, registers a new version of its schema if
+    /// the type has other columns than the last one written (the rows are not rewritten), and builds, builds
+    /// again or drops its indexes and zone maps, and its constraints, which are checked against the rows the
+    /// table has. Afterwards SQL sees the table, its columns and its indexes as this type declares them.
+    /// </summary>
+    /// <remarks>
+    /// Meant for when the application starts, before SQL reads a table the application has not written yet.
+    /// A table that is already as the type declares it is not changed.
+    /// </remarks>
+    /// <param name="transaction">The write transaction.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task that completes when the table is part of the transaction as the type declares it.</returns>
+    /// <exception cref="TkSchemaException">The rows the table has cannot be read with the columns of this type.</exception>
+    /// <exception cref="TkConstraintException">A row the table has violates a constraint of this type. The transaction can only be rolled back.</exception>
+    public async ValueTask EnsureAsync(TkWriteTransaction transaction, CancellationToken cancellationToken = default)
+    {
+        Check(transaction);
+        await transaction.TableForWriteAsync(this, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Adds a row.</summary>
     /// <param name="transaction">The write transaction.</param>
     /// <param name="row">The row.</param>

@@ -51,6 +51,7 @@ failures += await SqlAsync();
 failures += await RoutinesAsync();
 failures += await AdaptersAsync();
 failures += await JsonAsync();
+failures += await EnsureAsync();
 
 await Console.Out.WriteLineAsync(
     $"TekiumDB AOT smoke: {(failures == 0 ? "OK" : "FAILED")} " +
@@ -89,6 +90,39 @@ static async Task<int> JsonAsync()
     }
 
     await Console.Error.WriteLineAsync($"JSON failed: {lima} {plan} {count} {zip} {kg}");
+    return 1;
+}
+
+// Fase 20: una tabla preparada con su tipo y sin filas, que SQL ve con su índice por ruta.
+static async Task<int> EnsureAsync()
+{
+    await using var database = await TekiumDb.OpenAsync(new DbOptions { InMemory = true });
+    await using (var writer = await database.BeginWriteAsync())
+    {
+        await database.Table<Parcel>().EnsureAsync(writer);
+        await writer.CommitAsync();
+    }
+
+    await using var connection = new TkConnection(database);
+    await using var command = connection.CreateCommand();
+    command.CommandText = "EXPLAIN SELECT Id FROM parcels WHERE JSON_VALUE(Label, '$.to.city') = 'Lima'";
+    var plan = new List<string>();
+    await using (var reader = await command.ExecuteReaderAsync())
+    {
+        while (await reader.ReadAsync())
+        {
+            plan.Add(reader.GetString(0));
+        }
+    }
+
+    command.CommandText = "SELECT COUNT(*) FROM parcels";
+    var count = (long)(await command.ExecuteScalarAsync())!;
+    if (count == 0 && plan.Exists(static line => line.Contains("by_city", StringComparison.Ordinal)))
+    {
+        return 0;
+    }
+
+    await Console.Error.WriteLineAsync($"Ensure failed: {count} {string.Join(" / ", plan)}");
     return 1;
 }
 

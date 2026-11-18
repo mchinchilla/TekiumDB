@@ -144,7 +144,7 @@ Sobre archivo y sobre memoria.
 
 Se prepararon 63 roturas del código (una condición invertida, una comprobación quitada, un caso tomado por otro) y se corrió cada una contra las pruebas de JSON, SQL, LINQ, el generador y EF Core. Se detectan 62. La que queda es equivalente: quitar el atajo `a == b` al comparar dos documentos en SQL deja la comparación por el texto canónico, que da cero exactamente cuando los documentos son iguales.
 
-Catorce sobrevivieron la primera vez y cada una pidió una prueba:
+Catorce sobrevivieron la primera vez. Trece se detectan ahora con una prueba nueva; la otra es la equivalente:
 
 - `JsonBinary.Verify` aceptaba claves repetidas, números con un cero al final, bytes de más después del valor y cuentas que no estaban en su forma más corta. La prueba que daña cada byte no las cubría: el daño no rompe el documento, sólo lo deja en una forma que no es la canónica. Ahora hay un caso para cada una (`TkJsonTests`).
 - El texto aceptaba una marca de orden de bytes al principio, un documento de texto leído de una fila no se comprobaba y un número entero salía como decimal (`TkJsonTests`).
