@@ -1,0 +1,917 @@
+// Copyright (c) Tekium. Licensed under the MIT License.
+
+using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
+using TekiumDB;
+using TekiumDB.AotSmoke;
+using TekiumDB.Indexing;
+using TekiumDB.Linq;
+using TekiumDB.Security;
+using TekiumDB.Sql;
+using TekiumDB.Storage;
+using TekiumDB.Transactions;
+using TekiumDB.Vectors;
+
+// Ejercita el núcleo bajo Native AOT. Devuelve 0 si todo va bien; CI ejecuta el binario publicado.
+// Cada fase agrega aquí su camino feliz mínimo.
+var failures = 0;
+
+foreach (var size in PageSize.Supported.ToArray())
+{
+    if (PageSize.FromBytes(size.Bytes) != size)
+    {
+        await Console.Error.WriteLineAsync($"PageSize round-trip failed for {size}.");
+        failures++;
+    }
+}
+
+if (PageSize.TryFromBytes(12288, out _))
+{
+    await Console.Error.WriteLineAsync("PageSize accepted an unsupported size.");
+    failures++;
+}
+
+// Motor: escribir, cerrar, reabrir y leer por el camino asíncrono, sobre archivo y sobre memoria.
+var path = Path.Combine(Path.GetTempPath(), $"tekium-aot-{Guid.NewGuid():N}.tkdb");
+try
+{
+    failures += await RoundTripAsync("file", () => FileStorageDevice.Open(path, FileMode.OpenOrCreate), reopen: true);
+}
+finally
+{
+    File.Delete(path);
+}
+
+failures += await RoundTripAsync("memory", static () => new MemoryStorageDevice(), reopen: false);
+failures += await EncryptedRoundTripAsync();
+failures += await TypedRoundTripAsync();
+failures += await VectorRoundTripAsync();
+failures += await MaintenanceAsync();
+failures += await SqlAsync();
+failures += await RoutinesAsync();
+failures += await AdaptersAsync();
+failures += await JsonAsync();
+failures += await EnsureAsync();
+
+await Console.Out.WriteLineAsync(
+    $"TekiumDB AOT smoke: {(failures == 0 ? "OK" : "FAILED")} " +
+    $"(dynamic code supported: {RuntimeFeature.IsDynamicCodeSupported})");
+
+return failures;
+
+// Fase 15: la caché distribuida y el health check, cada uno desde su paquete, bajo Native AOT.
+// Fase 19: un documento JSON guardado por la API tipada, buscado por su índice desde LINQ y leído por ruta desde SQL.
+static async Task<int> JsonAsync()
+{
+    await using var database = await TekiumDb.OpenAsync(new DbOptions { InMemory = true });
+    var parcels = database.Table<Parcel>();
+    await using (var writer = await database.BeginWriteAsync())
+    {
+        for (var i = 0; i < 50; i++)
+        {
+            var label = TkJson.Parse($$"""{"to":{"city":"{{(i % 2 == 0 ? "Lima" : "Quito")}}","zip":{{1000 + i}}},"kg":{{i / 4.0}}}""");
+            await parcels.InsertAsync(writer, new Parcel { Id = i, Label = label }, default);
+        }
+
+        await writer.CommitAsync();
+    }
+
+    var lima = await TekiumDB.Linq.TkLinq.Where(parcels, static p => p.Label.TextAt("$.to.city") == "Lima").CountAsync();
+    var plan = await TekiumDB.Linq.TkLinq.Where(parcels, static p => p.Label.TextAt("$.to.city") == "Lima").ExplainAsync();
+    await using var connection = new TkConnection(database);
+    await using var command = connection.CreateCommand();
+    command.CommandText = "SELECT COUNT(*), MAX(Label ->> '$.to.zip'), SUM(JSON_VALUE(Label, '$.kg')) FROM parcels WHERE JSON_VALUE(Label, '$.to.city') = 'Quito'";
+    await using var reader = await command.ExecuteReaderAsync();
+    await reader.ReadAsync();
+    var (count, zip, kg) = (reader.GetInt64(0), reader.GetInt64(1), reader.GetDecimal(2));
+    if (lima == 25 && plan.Index == "by_city" && count == 25 && zip == 1049 && kg == 156.25m)
+    {
+        return 0;
+    }
+
+    await Console.Error.WriteLineAsync($"JSON failed: {lima} {plan} {count} {zip} {kg}");
+    return 1;
+}
+
+// Fase 20: una tabla preparada con su tipo y sin filas, que SQL ve con su índice por ruta.
+static async Task<int> EnsureAsync()
+{
+    await using var database = await TekiumDb.OpenAsync(new DbOptions { InMemory = true });
+    await using (var writer = await database.BeginWriteAsync())
+    {
+        await database.Table<Parcel>().EnsureAsync(writer);
+        await writer.CommitAsync();
+    }
+
+    await using var connection = new TkConnection(database);
+    await using var command = connection.CreateCommand();
+    command.CommandText = "EXPLAIN SELECT Id FROM parcels WHERE JSON_VALUE(Label, '$.to.city') = 'Lima'";
+    var plan = new List<string>();
+    await using (var reader = await command.ExecuteReaderAsync())
+    {
+        while (await reader.ReadAsync())
+        {
+            plan.Add(reader.GetString(0));
+        }
+    }
+
+    command.CommandText = "SELECT COUNT(*) FROM parcels";
+    var count = (long)(await command.ExecuteScalarAsync())!;
+    if (count == 0 && plan.Exists(static line => line.Contains("by_city", StringComparison.Ordinal)))
+    {
+        return 0;
+    }
+
+    await Console.Error.WriteLineAsync($"Ensure failed: {count} {string.Join(" / ", plan)}");
+    return 1;
+}
+
+static async Task<int> AdaptersAsync()
+{
+    await using var database = await TekiumDb.OpenAsync(new DbOptions { InMemory = true });
+    var cache = new TekiumDB.Caching.TkDistributedCache(database);
+    var options = new Microsoft.Extensions.Caching.Distributed.DistributedCacheEntryOptions { SlidingExpiration = TimeSpan.FromMinutes(5) };
+    await cache.SetAsync("session", [1, 2, 3], options);
+    var hit = await cache.GetAsync("session");
+    await cache.RemoveAsync("session");
+    var miss = await cache.GetAsync("session");
+
+    var check = new TekiumDB.HealthChecks.TkHealthCheck(database, new TekiumDB.HealthChecks.TkHealthCheckOptions { Verify = true });
+    var context = new Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckContext
+    {
+        Registration = new Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckRegistration("tekiumdb", check, null, null),
+    };
+    var health = await check.CheckHealthAsync(context);
+
+    // Las claves de Data Protection: guardadas, escritas al archivo y leídas por otro repositorio.
+    int keys;
+    await using (var repository = await TekiumDB.DataProtection.TkXmlRepository.CreateAsync(database))
+    {
+        repository.StoreElement(new System.Xml.Linq.XElement("key", new System.Xml.Linq.XAttribute("id", "1")), "key-1");
+        await repository.FlushAsync();
+        await using var other = await TekiumDB.DataProtection.TkXmlRepository.CreateAsync(database);
+        keys = other.GetAllElements().Count;
+    }
+
+    if (hit is [1, 2, 3] && miss is null && health.Status == Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Healthy && keys == 1)
+    {
+        return 0;
+    }
+
+    await Console.Error.WriteLineAsync($"Adapters failed: cache hit {hit?.Length}, miss {miss?.Length}, health {health.Status}: {health.Description}, {keys} keys.");
+    return 1;
+}
+
+// Criterio de salida de la Fase 13: una función escalar y una vectorizada escritas en C# corren desde SQL
+// bajo Native AOT, y un procedimiento. El generador escribió el código que las llama: no hay reflexión.
+static async Task<int> RoutinesAsync()
+{
+    await using var database = await TekiumDb.OpenAsync(new DbOptions { InMemory = true, AllowStoredProcedures = true, ProcedureInstructionLimit = 100_000 });
+    database.UseRoutines(TekiumDB.AotSmoke.TkRoutines.All);
+    await using var connection = new TkConnection(database);
+    await RunAsync("CREATE TABLE readings (id BIGINT PRIMARY KEY, label TEXT NOT NULL, a DOUBLE NOT NULL, b DOUBLE NOT NULL)");
+    await using (var transaction = await connection.BeginTransactionAsync())
+    {
+        for (var i = 0; i < 3000; i++)
+        {
+            await RunAsync($"INSERT INTO readings (id, label, a, b) VALUES ({i}, 'Sensor No. {i % 5}', {i}, {i * 3})");
+        }
+
+        await transaction.CommitAsync();
+    }
+
+    SmokeRoutines.VectorCalls = 0;
+    var total = await ScalarAsync("SELECT SUM(smoke_delta(a, b)) FROM readings");
+    var slugs = await ScalarAsync("SELECT COUNT(*) FROM readings WHERE smoke_slug(label) = 'sensor-no--3'");
+    var trimmed = await ScalarAsync("CALL smoke_trim(2990)");
+    var left = await ScalarAsync("SELECT COUNT(*) FROM readings");
+    var unknown = false;
+    try
+    {
+        await ScalarAsync("SELECT nowhere(a) FROM readings");
+    }
+    catch (TkSqlException)
+    {
+        unknown = true;
+    }
+
+    // Criterio de salida de la Fase 14: un procedimiento guardado, con un bucle y SQL embebido, corre; y el
+    // límite de instrucciones corta un bucle que no termina.
+    await RunAsync("CREATE TABLE kept (id BIGINT PRIMARY KEY, label TEXT NOT NULL)");
+    await RunAsync("""
+        CREATE PROCEDURE keep_some(top BIGINT) RETURNS INT AS $$
+        DECLARE n INT := 0;
+        BEGIN
+            FOR r IN SELECT id, label FROM readings WHERE id < top LOOP
+                INSERT INTO kept (id, label) VALUES (r.id, smoke_slug(r.label));
+                DELETE FROM readings WHERE id = r.id;
+                n := n + 1;
+            END LOOP;
+            RETURN n;
+        END $$
+        """);
+    await RunAsync("CREATE PROCEDURE forever() AS $$ DECLARE n INT := 0; BEGIN WHILE TRUE LOOP n := n + 1; END LOOP; END $$");
+    var moved = await ScalarAsync("CALL keep_some(500)");
+    var kept = await ScalarAsync("SELECT COUNT(*) FROM kept WHERE label = 'sensor-no--3'");
+    var remaining = await ScalarAsync("SELECT COUNT(*) FROM readings");
+    var stopped = false;
+    try
+    {
+        await ScalarAsync("CALL forever()");
+    }
+    catch (TkSqlException cut) when (cut.Message.Contains("was stopped after 100000 instructions", StringComparison.Ordinal))
+    {
+        stopped = true;
+    }
+
+    // 3 000 filas: tres bloques, no tres mil llamadas.
+    if (total is 8_997_000.0 && slugs is 600L && trimmed is 10 && left is 2990L && unknown && SmokeRoutines.VectorCalls == 3
+        && moved is 500 && kept is 100L && remaining is 2490L && stopped)
+    {
+        return 0;
+    }
+
+    await Console.Error.WriteLineAsync($"Stored procedures: {moved}, {kept}, {remaining}, stopped {stopped}.");
+
+    await Console.Error.WriteLineAsync($"Routines failed: {total}, {slugs}, {trimmed}, {left}, {unknown}, {SmokeRoutines.VectorCalls} calls.");
+    return 1;
+
+    async Task RunAsync(string sql)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await command.ExecuteNonQueryAsync();
+    }
+
+    async Task<object?> ScalarAsync(string sql)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return await command.ExecuteScalarAsync();
+    }
+}
+
+// SQL por ADO.NET: crear, escribir con parámetros, consultar con join, agregados y una vista, y leer el plan.
+static async Task<int> SqlAsync()
+{
+    var file = Path.Combine(Path.GetTempPath(), $"tekium-aot-sql-{Guid.NewGuid():N}.tkdb");
+    try
+    {
+        await using var connection = new TkConnection($"Data Source={file};Password=aot sql password;Cache Size=8");
+        await connection.OpenAsync();
+        await RunAsync("CREATE TABLE cities (id INT PRIMARY KEY, name TEXT NOT NULL UNIQUE)");
+        await RunAsync("CREATE TABLE people (id BIGINT PRIMARY KEY, name TEXT NOT NULL, city INT NOT NULL, born TIMESTAMP, score DECIMAL)");
+        await RunAsync("CREATE INDEX by_city ON people (city)");
+        await RunAsync("INSERT INTO cities (id, name) VALUES (1, 'Lima'), (2, 'Quito')");
+        await using (var transaction = await connection.BeginTransactionAsync())
+        {
+            for (var i = 0; i < 200; i++)
+            {
+                await RunAsync(
+                    "INSERT INTO people (id, name, city, born, score) VALUES (@id, @name, @city, @born, @score)",
+                    ("id", (long)i), ("name", $"Person {i}"), ("city", 1 + (i % 2)), ("born", new DateTimeOffset(1990, 1, 1, 0, 0, 0, TimeSpan.Zero).AddDays(i)), ("score", i * 1.5m));
+            }
+
+            await transaction.CommitAsync();
+        }
+
+        await RunAsync("CREATE VIEW by_place AS SELECT c.name AS place, COUNT(*) AS people, MAX(p.score) AS best FROM people p JOIN cities c ON c.id = p.city GROUP BY c.name");
+        var summary = await QueryAsync("SELECT place, people, best FROM by_place WHERE people > @least ORDER BY place", ("least", 50));
+        var plan = await QueryAsync("EXPLAIN SELECT name FROM people WHERE city = 2 AND score > 100");
+        var changed = await RunAsync("UPDATE people SET score = score + 1 WHERE id < 10");
+
+        // Lo que la Fase 16 agregó al SQL: LEFT JOIN, subconsultas que leen la fila de afuera, CASE, CAST, RETURNING y la clave entera que no se da.
+        await RunAsync("INSERT INTO cities (id, name) VALUES (3, 'Cusco')");
+        var empty = await QueryAsync("SELECT c.name FROM cities c LEFT JOIN people p ON p.city = c.id WHERE p.id IS NULL");
+        var crowded = await QueryAsync("SELECT c.name, (SELECT COUNT(*) FROM people p WHERE p.city = c.id) FROM cities c WHERE EXISTS (SELECT 1 FROM people p WHERE p.city = c.id AND p.id > 197) ORDER BY c.id");
+        var kinds = await QueryAsync("SELECT CASE WHEN id < 2 THEN 'first' ELSE CAST(id AS TEXT) END FROM people WHERE id < 4 ORDER BY id");
+        var born = await QueryAsync("INSERT INTO people (name, city) VALUES ('Latecomer', 3) RETURNING id, name");
+        if (empty is not ["Cusco"] || crowded is not ["Lima|100", "Quito|100"] || kinds is not ["first", "first", "2", "3"] || born is not ["200|Latecomer"])
+        {
+            await Console.Error.WriteLineAsync($"SQL of phase 16 failed: {string.Join(" ; ", empty)} / {string.Join(" ; ", crowded)} / {string.Join(" ; ", kinds)} / {string.Join(" ; ", born)}");
+            return 1;
+        }
+
+        // Lo que la Fase 17 agregó: claves foráneas que SQL declara y comprueba, y columnas nuevas.
+        await RunAsync("ALTER TABLE people ADD CONSTRAINT lives_in FOREIGN KEY (city) REFERENCES cities (id)");
+        await RunAsync("ALTER TABLE cities ADD COLUMN country TEXT NOT NULL DEFAULT 'PE'");
+        await RunAsync("ALTER TABLE cities ADD COLUMN mayor TEXT");
+        var country = await QueryAsync("SELECT name, country, mayor FROM cities WHERE id = 3");
+        var kept = string.Empty;
+        try
+        {
+            await RunAsync("DELETE FROM cities WHERE id = 1");
+        }
+        catch (TkConstraintException referred)
+        {
+            kept = referred.Constraint;
+        }
+
+        var lost = string.Empty;
+        try
+        {
+            await RunAsync("INSERT INTO people (name, city) VALUES ('Nowhere', 99)");
+        }
+        catch (TkConstraintException missing)
+        {
+            lost = missing.Constraint;
+        }
+
+        if (country is not ["Cusco|PE|"] || kept != "lives_in" || lost != "lives_in")
+        {
+            await Console.Error.WriteLineAsync($"SQL of phase 17 failed: {string.Join(" ; ", country)} / {kept} / {lost}");
+            return 1;
+        }
+
+        // Lo que la Fase 18 agregó: quitar, renombrar y cambiar columnas, y renombrar una tabla.
+        await RunAsync("ALTER TABLE cities RENAME COLUMN mayor TO head");
+        await RunAsync("ALTER TABLE cities DROP COLUMN head");
+        await RunAsync("ALTER TABLE people ALTER COLUMN born TEXT");
+        var guarded = string.Empty;
+        try
+        {
+            await RunAsync("ALTER TABLE cities RENAME TO towns");
+        }
+        catch (TkSqlException refused)
+        {
+            // La vista by_place nombra la tabla: renombrarla la dejaría rota.
+            guarded = refused.Message.Contains("view 'by_place'", StringComparison.Ordinal) ? "view" : refused.Message;
+        }
+
+        await RunAsync("DROP VIEW by_place");
+        await RunAsync("ALTER TABLE cities RENAME TO towns");
+        var renamed = await QueryAsync("SELECT t.name, t.country FROM towns t WHERE t.id = 3");
+        var still = string.Empty;
+        try
+        {
+            await RunAsync("DELETE FROM towns WHERE id = 1");
+        }
+        catch (TkConstraintException referred)
+        {
+            still = referred.Constraint;
+        }
+
+        if (renamed is not ["Cusco|PE"] || still != "lives_in" || guarded != "view")
+        {
+            await Console.Error.WriteLineAsync($"SQL of phase 18 failed: {string.Join(" ; ", renamed)} / {still} / {guarded}");
+            return 1;
+        }
+
+        if (summary is ["Lima|100|297.0", "Quito|100|298.5"] && changed == 10 && plan.Exists(static line => line.Contains("Index by_city of people", StringComparison.Ordinal)))
+        {
+            return 0;
+        }
+
+        await Console.Error.WriteLineAsync($"SQL failed: {string.Join(" ; ", summary)} / {string.Join(" ; ", plan)} / {changed} changed.");
+        return 1;
+
+        async Task<int> RunAsync(string sql, params (string Name, object Value)[] parameters)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            foreach (var (name, value) in parameters)
+            {
+                command.Parameters.Add(new TkParameter(name, value));
+            }
+
+            return await command.ExecuteNonQueryAsync();
+        }
+
+        async Task<List<string>> QueryAsync(string sql, params (string Name, object Value)[] parameters)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            foreach (var (name, value) in parameters)
+            {
+                command.Parameters.Add(new TkParameter(name, value));
+            }
+
+            var rows = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                rows.Add(string.Join('|', Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? string.Empty : reader.GetString(i))));
+            }
+
+            return rows;
+        }
+    }
+    finally
+    {
+        File.Delete(file);
+    }
+}
+
+// Herramientas: inspeccionar sin abrir, compactar a un archivo nuevo, y diagnosticar y reparar uno dañado a mano.
+static async Task<int> MaintenanceAsync()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"tekium-aot-tools-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    var source = Path.Combine(directory, "source.tkdb");
+    var index = new VectorIndexOptions { Dimensions = 8, Metric = VectorMetric.Euclidean };
+    try
+    {
+        var database = await TekiumDb.OpenAsync(new DbOptions { Path = source, Password = "aot tools password".AsMemory(), CacheSizeMb = 8 });
+        await using (database)
+        {
+            for (var round = 0; round < 3; round++)
+            {
+                await using var writer = await database.BeginWriteAsync();
+                for (var i = 0; i < 400; i++)
+                {
+                    await database.VectorIndex<int>("points", index).UpsertAsync(writer, i, new float[] { i, round, 1, 2, 3, 4, 5, 6 });
+                }
+
+                await writer.CommitAsync();
+            }
+        }
+
+        // Backup en caliente: con la base abierta, a un archivo con su propia contraseña.
+        var backup = Path.Combine(directory, "backup.tkdb");
+        database = await TekiumDb.OpenAsync(new DbOptions { Path = source, Password = "aot tools password".AsMemory(), CacheSizeMb = 8, Diagnostics = true });
+        await using (database)
+        {
+            // Verificación de la base abierta, y contadores leídos como los leería un exportador de métricas.
+            long hits = 0;
+            using var listener = new System.Diagnostics.Metrics.MeterListener();
+            listener.InstrumentPublished = static (instrument, self) =>
+            {
+                if (instrument.Meter.Name == TekiumDb.MeterName)
+                {
+                    self.EnableMeasurementEvents(instrument);
+                }
+            };
+            listener.SetMeasurementEventCallback<long>((instrument, value, _, _) => hits += instrument.Name == "tekium.cache.hits" ? value : 0);
+            listener.Start();
+            var verified = await database.VerifyAsync();
+            _ = await database.VectorIndex<int>("points", index).SearchAsync(new float[] { 1, 2, 1, 2, 3, 4, 5, 6 }, topK: 3);
+            listener.RecordObservableInstruments();
+            if (!verified.IsHealthy || verified.Trees.Count != 5 || verified.TransactionId != database.LastTransactionId || hits == 0)
+            {
+                await Console.Error.WriteLineAsync($"Verification failed: {verified.Findings.Count} findings, {hits} cache hits counted.");
+                return 1;
+            }
+
+            var taken = await database.BackupAsync(backup, new TkBackupOptions { Password = "aot backup password".AsMemory() });
+            var copied = await TkInspector.InspectAsync(backup, "aot backup password".AsMemory());
+            if (taken.TransactionId != database.LastTransactionId || !copied.IsHealthy || copied.Trees.Count != 5)
+            {
+                await Console.Error.WriteLineAsync($"Backup failed: transaction {taken.TransactionId}, {copied.Findings.Count} findings.");
+                return 1;
+            }
+        }
+
+        var password = new TkCopyOptions { Password = "aot tools password".AsMemory(), NewPassword = ReadOnlyMemory<char>.Empty };
+        var healthy = await TkInspector.InspectAsync(source, "aot tools password".AsMemory());
+        var compacted = Path.Combine(directory, "compacted.tkdb");
+        var report = await TkMaintenance.CompactAsync(source, compacted, password);
+        var copy = await TkInspector.InspectAsync(compacted);
+
+        // Un byte cambiado en la última página en uso: se nombra, compactar se niega y reparar escribe lo demás.
+        var bytes = await File.ReadAllBytesAsync(compacted);
+        bytes[((int)copy.RootSlots[copy.CurrentSlot].RootPage * copy.PageSize) + 300] ^= 0xFF;
+        await File.WriteAllBytesAsync(compacted, bytes);
+        var damaged = await TkInspector.InspectAsync(compacted);
+        var repaired = Path.Combine(directory, "repaired.tkdb");
+        var repair = await TkMaintenance.RepairAsync(compacted, repaired);
+        if (healthy.IsHealthy && healthy.Trees.Count == 5 && copy.IsHealthy && !copy.IsEncrypted
+            && report.DestinationBytes < report.SourceBytes
+            && !damaged.IsHealthy && damaged.Findings[0].Page == copy.RootSlots[copy.CurrentSlot].RootPage
+            && repair.Findings.Count > 0 && (await TkInspector.InspectAsync(repaired)).IsHealthy)
+        {
+            return 0;
+        }
+
+        await Console.Error.WriteLineAsync($"Maintenance failed: {healthy.Findings.Count} + {copy.Findings.Count} findings, {damaged.Findings.Count} after damage.");
+        return 1;
+    }
+    finally
+    {
+        Directory.Delete(directory, recursive: true);
+    }
+}
+
+// Búsqueda vectorial: construir, cerrar, reabrir y encontrar, con y sin cuantización, sobre una base cifrada.
+static async Task<int> VectorRoundTripAsync()
+{
+    var file = Path.Combine(Path.GetTempPath(), $"tekium-aot-vectors-{Guid.NewGuid():N}.tkdb");
+    var options = new DbOptions { Path = file, Password = "aot vector password".AsMemory(), CacheSizeMb = 16 };
+    var plain = new VectorIndexOptions { Dimensions = 24, Metric = VectorMetric.Cosine };
+    var small = new VectorIndexOptions { Dimensions = 24, Metric = VectorMetric.Euclidean, Quantize = true, QuantizationMin = -2, QuantizationMax = 2 };
+    var random = new Random(5);
+    var vectors = new float[800][];
+    for (var i = 0; i < vectors.Length; i++)
+    {
+        vectors[i] = new float[24];
+        for (var j = 0; j < 24; j++)
+        {
+            vectors[i][j] = (float)((random.NextDouble() * 2) - 1);
+        }
+    }
+
+    try
+    {
+        var database = await TekiumDb.OpenAsync(options);
+        await using (database)
+        {
+            await using var writer = await database.BeginWriteAsync();
+            for (var i = 0; i < vectors.Length; i++)
+            {
+                await database.VectorIndex<Guid>("by_id", plain).UpsertAsync(writer, Guid.CreateVersion7(DateTimeOffset.UnixEpoch.AddSeconds(i)), vectors[i]);
+                await database.VectorIndex<string>("by_name", small).UpsertAsync(writer, $"v{i}", vectors[i]);
+            }
+
+            await database.VectorIndex<string>("by_name", small).RemoveAsync(writer, "v7");
+            await writer.CommitAsync();
+        }
+
+        database = await TekiumDb.OpenAsync(options);
+        await using (database)
+        {
+            // Cada vector es su propio vecino más cercano; el borrado no aparece.
+            var misses = 0;
+            for (var i = 0; i < vectors.Length; i += 13)
+            {
+                var byId = await database.VectorIndex<Guid>("by_id", plain).SearchAsync(vectors[i], topK: 3);
+                var byName = await database.VectorIndex<string>("by_name", small).SearchAsync(vectors[i], topK: 3);
+                misses += byId.Count == 3 && byId[0].Distance < 1e-3f ? 0 : 1;
+                misses += byName.Count == 3 && byName[0].Key == $"v{i}" && byName[0].Distance < 1e-3f ? 0 : 1;
+            }
+
+            var removed = await database.VectorIndex<string>("by_name", small).SearchAsync(vectors[7], topK: 800, efSearch: 800);
+            if (misses == 0 && removed.Count == 799 && !removed.Any(static hit => hit.Key == "v7"))
+            {
+                return 0;
+            }
+
+            await Console.Error.WriteLineAsync($"Vector round-trip failed: {misses} misses, {removed.Count} found after a removal.");
+            return 1;
+        }
+    }
+    finally
+    {
+        File.Delete(file);
+    }
+}
+
+// La API pública de punta a punta: serializadores generados, catálogo y evolución de esquema, sin reflexión.
+static async Task<int> TypedRoundTripAsync()
+{
+    var file = Path.Combine(Path.GetTempPath(), $"tekium-aot-typed-{Guid.NewGuid():N}.tkdb");
+    // Cifrada y comprimida: Zstandard viene de la biblioteca nativa del propio runtime, que AOT enlaza dentro del binario.
+    var options = new DbOptions { Path = file, Password = "aot typed password".AsMemory(), CacheSizeMb = 8, Compression = true, ChangeRetention = 16 };
+    // Con su marca de tiempo explícita: dos UUID v7 del mismo milisegundo no tienen orden garantizado.
+    var at = new DateTimeOffset(2026, 11, 16, 9, 30, 0, TimeSpan.FromHours(-6));
+    var first = Guid.CreateVersion7(at);
+    var second = Guid.CreateVersion7(at.AddSeconds(1));
+
+    // Mucho más grande que una página: la fila sale a páginas de overflow.
+    var large = new byte[200_000];
+    new Random(11).NextBytes(large);
+    try
+    {
+        var database = await TekiumDb.OpenAsync(options);
+        await using (database)
+        {
+            await using var writer = await database.BeginWriteAsync();
+            await database.Table<EventV1>().InsertAsync(writer, new EventV1 { Id = first, Title = "written as version 1", At = at, Obsolete = 9 });
+            await writer.CommitAsync();
+        }
+
+        database = await TekiumDb.OpenAsync(options);
+        await using (database)
+        {
+            var events = database.Table<EventV2>();
+            var old = await events.GetAsync(first);
+            await using (var writer = await database.BeginWriteAsync())
+            {
+                await database.Table<Venue>().InsertAsync(writer, new Venue { Name = "here" });
+                await events.InsertAsync(writer, new EventV2 { Id = second, Title = "written as version 2", At = at, Place = "here", Cost = 12.50m, Mood = Mood.Busy, Attachment = large, Weight = 0.5 });
+                await writer.CommitAsync();
+            }
+
+            var titles = new List<string>();
+            await foreach (var row in events.ScanAsync())
+            {
+                titles.Add(row.Title);
+            }
+
+            // Índices: el de fecha se construyó con la fila vieja dentro, y el parcial sólo se usa si la consulta lo implica.
+            var byDate = new List<string>();
+            await foreach (var row in events.QueryAsync(EventV2.Fields.At.Between(at.AddMinutes(-1), at.ToOffset(TimeSpan.Zero))))
+            {
+                byDate.Add(row.Title);
+            }
+
+            var busy = EventV2.Fields.Mood.EqualTo(Mood.Busy).And(EventV2.Fields.Cost.AtLeast(10m));
+            var byCost = new List<string>();
+            await foreach (var row in events.QueryAsync(busy))
+            {
+                byCost.Add(row.Title);
+            }
+
+            var byLength = new List<string>();
+            await foreach (var row in events.QueryAsync(EventV2.Fields.TitleLength.EqualTo("written as version 2".Length).And(EventV2.Fields.Place.IsNotNull())))
+            {
+                byLength.Add(row.Title);
+            }
+
+            if (byDate.Count != 2
+                || byCost is not ["written as version 2"]
+                || byLength is not ["written as version 2"]
+                || await events.ExplainAsync(busy) is not { Access: TkAccess.IndexScan, Index: "busy" }
+                || await events.ExplainAsync(EventV2.Fields.Cost.AtLeast(10m)) is not { Access: TkAccess.TableScan }
+                || await events.ExplainAsync(EventV2.Fields.TitleLength.EqualTo(3)) is not { Access: TkAccess.IndexScan, Index: "TitleLength" })
+            {
+                await Console.Error.WriteLineAsync($"Index round-trip failed: {byDate.Count} by date, {byCost.Count} by cost, {byLength.Count} by length.");
+                return 1;
+            }
+
+            // Restricciones: cada violación nombra la suya y aborta su transacción.
+            var third = Guid.CreateVersion7(at.AddSeconds(2));
+            var violated = new List<string?>();
+            foreach (var attempt in new Func<TkWriteTransaction, ValueTask>[]
+            {
+                writer => events.InsertAsync(writer, new EventV2 { Id = third, Title = "negative", At = at, Cost = -1m }),
+                writer => events.InsertAsync(writer, new EventV2 { Id = third, Title = "written as version 2", At = at }),
+                writer => events.InsertAsync(writer, new EventV2 { Id = third, Title = "nowhere", At = at, Place = "missing" }),
+                async writer => await database.Table<Venue>().DeleteAsync(writer, "here"),
+            })
+            {
+                await using var writer = await database.BeginWriteAsync();
+                try
+                {
+                    await attempt(writer);
+                    await writer.CommitAsync();
+                    violated.Add("none");
+                }
+                catch (TkConstraintException violation)
+                {
+                    violated.Add(violation.Constraint);
+                }
+            }
+
+            if (violated is not ["CostIsNotNegative", "Title", "fk_Place", "fk_Place"]
+                || await events.ExplainAsync(EventV2.Fields.Title.EqualTo("written as version 2")) is not { Access: TkAccess.UniqueLookup, Index: "Title" })
+            {
+                await Console.Error.WriteLineAsync($"Constraint round-trip failed: {string.Join(", ", violated)}.");
+                return 1;
+            }
+
+            // Change feed: desde el principio, con lo que escribió la sesión anterior con el otro tipo.
+            var kinds = new List<TkChangeKind>();
+            await foreach (var change in database.WatchAsync<EventV2>(0))
+            {
+                kinds.Add(change.Kind);
+                if (change.TransactionId == database.LastTransactionId)
+                {
+                    break;
+                }
+            }
+
+            if (kinds is not [TkChangeKind.Insert, TkChangeKind.Insert])
+            {
+                await Console.Error.WriteLineAsync($"Change feed failed: {string.Join(", ", kinds)}.");
+                return 1;
+            }
+
+            // Carga masiva: filas desordenadas, a una tabla con índices y restricciones que ya tiene filas.
+            await using (var writer = await database.BeginWriteAsync())
+            {
+                var loaded = await events.BulkInsertAsync(
+                    writer,
+                    Enumerable.Range(0, 3000).Select(i => new EventV2 { Id = Guid.CreateVersion7(at.AddMinutes(3000 - i)), Title = $"loaded {i}", At = at.AddDays(1 + i), Place = "here" }));
+                await writer.CommitAsync();
+                var counted = 0;
+                await foreach (var row in events.QueryAsync(EventV2.Fields.At.GreaterThan(at.AddHours(1))))
+                {
+                    counted += row.Title.StartsWith("loaded", StringComparison.Ordinal) ? 1 : 0;
+                }
+
+                // Lo creado en un lapso es un rango de la clave UUID v7: las filas cargadas son una por minuto.
+                var created = EventV2.Fields.Id.CreatedBetween(at.AddMinutes(1), at.AddMinutes(100));
+                var inSpan = 0;
+                await foreach (var row in events.QueryAsync(created))
+                {
+                    inSpan += row.Title.StartsWith("loaded", StringComparison.Ordinal) ? 1 : 0;
+                }
+
+                // Un rango de fechas de varias ventanas va por el zone map; dentro de una, por el índice.
+                if (loaded != 3000
+                    || counted != 3000
+                    || inSpan != 100
+                    || await events.ExplainAsync(created) is not { Access: TkAccess.KeyRange }
+                    || await events.ExplainAsync(EventV2.Fields.At.GreaterThan(at.AddHours(1))) is not { Access: TkAccess.ZoneScan, Index: "zone_At" }
+                    || await events.ExplainAsync(EventV2.Fields.At.EqualTo(at)) is not { Access: TkAccess.IndexScan, Index: "At" }
+                    || await events.ExplainAsync(EventV2.Fields.Title.EqualTo("loaded 7")) is not { Access: TkAccess.UniqueLookup }
+                    || (await events.GetAsync(first))?.Title != "written as version 1")
+                {
+                    await Console.Error.WriteLineAsync($"Bulk load failed: {loaded} loaded, {counted} found by index.");
+                    return 1;
+                }
+            }
+
+            // LINQ: un predicado de C# traducido sin compilar nada, con una variable capturada y una llamada del lado del valor.
+            var wanted = second;
+            var byLinq = await events.Where(e => e.Id == wanted && e.At >= at.AddMinutes(-1)).ToListAsync();
+            var refused = false;
+            try
+            {
+                _ = events.Where(e => e.Title != "nothing");
+            }
+            catch (NotSupportedException)
+            {
+                refused = true;
+            }
+
+            if (byLinq.Count != 1 || byLinq[0].Id != second || !refused
+                || await events.Where(e => e.Id == wanted).ExplainAsync() is not { Access: TkAccess.KeyLookup })
+            {
+                await Console.Error.WriteLineAsync($"LINQ failed: {byLinq.Count} rows, refused: {refused}.");
+                return 1;
+            }
+
+            // Viaje en el tiempo: la base como estaba antes del último commit de esta sesión.
+            var present = database.LastTransactionId;
+            await using (var extra = await database.BeginWriteAsync())
+            {
+                await events.DeleteAsync(extra, second);
+                await extra.CommitAsync();
+            }
+
+            await using (var past = await database.AsOfAsync(present))
+            {
+                if (past.TransactionId != present || await events.GetAsync(past, second) is null || await events.GetAsync(second) is not null)
+                {
+                    await Console.Error.WriteLineAsync("Time travel failed: the past state does not hold the row deleted since.");
+                    return 1;
+                }
+            }
+
+            await using (var restore = await database.BeginWriteAsync())
+            {
+                await using var before = await database.AsOfAsync(present);
+                await events.InsertAsync(restore, (await events.GetAsync(before, second))!);
+                await restore.CommitAsync();
+            }
+
+            var recent = await events.GetAsync(second);
+            if (old is { Title: "written as version 1", Place: null, Cost: null, Mood: Mood.Calm, Weight: 0 }
+                && old.At == at
+                && old.At.Offset == at.Offset
+                && recent is { Place: "here", Cost: 12.50m, Mood: Mood.Busy, Weight: 0.5 }
+                && recent.Attachment.AsSpan().SequenceEqual(large)
+                && titles is ["written as version 1", "written as version 2"]
+                && database.IsEncrypted
+                && database.IsCompressed)
+            {
+                return 0;
+            }
+
+            await Console.Error.WriteLineAsync($"Typed round-trip failed: {titles.Count} rows, old row {(old is null ? "missing" : old.Title)}.");
+            return 1;
+        }
+    }
+    finally
+    {
+        File.Delete(file);
+    }
+}
+
+// Cifrado: AesGcm, HKDF, HMAC y el Argon2id administrado bajo Native AOT.
+static async Task<int> EncryptedRoundTripAsync()
+{
+    var device = new MemoryStorageDevice();
+    var options = new PagerOptions { KeyDerivation = new Argon2Parameters(256, 1, 2) };
+    var key = new byte[8];
+    var pager = await Pager.CreateAsync(device, options, "aot smoke password", CancellationToken.None);
+    await using (pager)
+    {
+        var tree = new BTree(pager);
+        await using (var transaction = await pager.BeginWriteAsync(CancellationToken.None))
+        {
+            for (var i = 0; i < 2000; i++)
+            {
+                BinaryPrimitives.WriteInt64BigEndian(key, i);
+                await tree.PutAsync(transaction, key, key, CancellationToken.None);
+            }
+
+            await transaction.CommitAsync(CancellationToken.None);
+        }
+
+        // Cambiar la contraseña ejercita la envoltura de la clave en ambas direcciones.
+        await pager.ChangePasswordAsync("another password", CancellationToken.None);
+        var scanned = 0;
+        await foreach (var entry in tree.RangeAsync(default, default, CancellationToken.None))
+        {
+            scanned += entry.Key.Span.SequenceEqual(entry.Value.Span) ? 1 : 0;
+        }
+
+        if (scanned == 2000 && pager.IsEncrypted)
+        {
+            return 0;
+        }
+
+        await Console.Error.WriteLineAsync($"Encrypted round-trip failed: scanned {scanned}.");
+        return 1;
+    }
+}
+
+static async Task<int> RoundTripAsync(string name, Func<IStorageDevice> open, bool reopen)
+{
+    const int Rows = 5000;
+    var key = new byte[8];
+    var pager = await Pager.CreateAsync(open(), new PagerOptions(), CancellationToken.None);
+    try
+    {
+        var tree = new BTree(pager);
+        await using (var transaction = await pager.BeginWriteAsync(CancellationToken.None))
+        {
+            for (var i = 0; i < Rows; i++)
+            {
+                BinaryPrimitives.WriteInt64BigEndian(key, i);
+                await tree.PutAsync(transaction, key, key, CancellationToken.None);
+            }
+
+            await transaction.CommitAsync(CancellationToken.None);
+        }
+
+        // Una base en memoria no sobrevive al cierre: sólo el archivo se reabre.
+        if (reopen)
+        {
+            await pager.DisposeAsync();
+            pager = await Pager.OpenAsync(open(), new PagerOptions(), CancellationToken.None);
+            tree = new BTree(pager);
+        }
+
+        // Una transacción de lectura sigue viendo su estado aunque el escritor borre todo después.
+        var scanned = 0;
+        await using (var read = ReadTransaction.Begin(pager))
+        {
+            await using (var transaction = await pager.BeginWriteAsync(CancellationToken.None))
+            {
+                for (var i = 0; i < Rows; i += 2)
+                {
+                    BinaryPrimitives.WriteInt64BigEndian(key, i);
+                    await tree.DeleteAsync(transaction, key, CancellationToken.None);
+                }
+
+                await transaction.CommitAsync(CancellationToken.None);
+            }
+
+            await foreach (var entry in BTree.RangeAsync(read, read.Root, default, default, CancellationToken.None))
+            {
+                scanned += entry.Key.Span.SequenceEqual(entry.Value.Span) ? 1 : 0;
+            }
+        }
+
+        BinaryPrimitives.WriteInt64BigEndian(key, (Rows / 2) + 1);
+        var found = await tree.GetAsync(key, new byte[8], CancellationToken.None);
+        if (scanned == Rows && found == 8)
+        {
+            return 0;
+        }
+
+        await Console.Error.WriteLineAsync($"B+Tree round-trip on {name} failed: scanned {scanned}, point read {found}.");
+        return 1;
+    }
+    finally
+    {
+        await pager.DisposeAsync();
+    }
+}
+
+/// <summary>Las rutinas del smoke: una escalar, una vectorizada y un procedimiento.</summary>
+internal static class SmokeRoutines
+{
+    public static int VectorCalls { get; set; }
+
+    [TkFunction("smoke_slug", Deterministic = true)]
+    public static string Slug(ReadOnlySpan<char> text)
+    {
+        Span<char> slug = stackalloc char[text.Length];
+        for (var i = 0; i < text.Length; i++)
+        {
+            slug[i] = char.IsLetterOrDigit(text[i]) ? char.ToLowerInvariant(text[i]) : '-';
+        }
+
+        return new string(slug);
+    }
+
+    [TkFunction("smoke_delta", Vectorized = true)]
+    public static void Delta(ReadOnlySpan<double> a, ReadOnlySpan<double> b, Span<double> result)
+    {
+        VectorCalls++;
+        for (var i = 0; i < result.Length; i++)
+        {
+            result[i] = Math.Abs(a[i] - b[i]);
+        }
+    }
+
+    [TkProcedure("smoke_trim")]
+    public static async ValueTask<int> TrimAsync(TkContext context, long from, CancellationToken cancellationToken)
+    {
+        return await context.ExecuteAsync(
+            "DELETE FROM readings WHERE id >= @from", new Dictionary<string, object?> { ["from"] = from }, cancellationToken);
+    }
+}

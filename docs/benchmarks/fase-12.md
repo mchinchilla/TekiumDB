@@ -6,7 +6,7 @@ Hecho el 2026-11-16. No se midieron tiempos.
 
 ## Qué hay
 
-Un paquete nuevo, `Tekium.Embedded.Sql`:
+Un paquete nuevo, `TekiumDB.Sql`:
 
 ```csharp
 await using var connection = new TkConnection("Data Source=app.tkdb;Password=…");

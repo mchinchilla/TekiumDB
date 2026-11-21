@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>TekiumDB.Vectors.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\TekiumDB.Core\TekiumDB.Core.csproj" />
+    <ProjectReference Include="..\..\src\TekiumDB.Vectors\TekiumDB.Vectors.csproj" />
+  </ItemGroup>
+
+  <!-- El mismo dispositivo de prueba y el mismo verificador de árboles que usan las pruebas del núcleo. -->
+  <ItemGroup>
+    <Compile Include="..\TekiumDB.Core.Tests\Storage\TestDevice.cs" Link="Shared\TestDevice.cs" />
+    <Compile Include="..\TekiumDB.Core.Tests\Indexing\BTreeVerifier.cs" Link="Shared\BTreeVerifier.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

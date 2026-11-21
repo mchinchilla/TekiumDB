@@ -54,7 +54,7 @@ No se verificó de forma independiente que `FlushToDisk` emita `F_FULLFSYNC` en 
 ## Reproducir
 
 ```bash
-dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*' --join
+dotnet run -c Release --project tests/TekiumDB.Benchmarks -- --filter '*' --join
 ```
 
 Tarda unos dos minutos. Los informes completos quedan en `BenchmarkDotNet.Artifacts/results/`.

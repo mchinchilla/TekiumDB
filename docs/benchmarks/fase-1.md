@@ -49,7 +49,7 @@ Valen las mismas advertencias que en la [Fase 0.5](fase-0.5.md): la comparación
 Las mismas de la Fase 0.5: Apple M2 Max, macOS 27.0.1, .NET 11.0.0 Arm64 con JIT, BenchmarkDotNet 0.16.0-preview.2, páginas de 8 KiB, caché de 256 MiB en ambos motores, SQLite con `journal_mode=WAL`, `synchronous=FULL` y `fullfsync=ON`.
 
 ```bash
-dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*' --join
+dotnet run -c Release --project tests/TekiumDB.Benchmarks -- --filter '*' --join
 ```
 
 ## Lo que falta para cerrar la fase

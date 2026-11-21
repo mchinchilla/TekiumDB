@@ -8,9 +8,9 @@ Hecho el 2026-11-17. Esta fase no tiene criterio de rendimiento y no se midieron
 
 | Paquete | Qué trae | Dependencia que agrega |
 | --- | --- | --- |
-| `Tekium.Embedded.Caching` | `TkDistributedCache` (un `IDistributedCache`) y `AddTekiumDistributedCache` | Ninguna: las abstracciones de caché e inyección de dependencias ya vienen con el SDK de .NET 11 |
-| `Tekium.Embedded.DataProtection` | `TkXmlRepository` (un `IXmlRepository`) y `PersistKeysToTekiumDb` | `Microsoft.AspNetCore.DataProtection` |
-| `Tekium.Embedded.HealthChecks` | `TkHealthCheck` (un `IHealthCheck`) y `AddTekiumDb` | `Microsoft.Extensions.Diagnostics.HealthChecks` |
+| `TekiumDB.Caching` | `TkDistributedCache` (un `IDistributedCache`) y `AddTekiumDistributedCache` | Ninguna: las abstracciones de caché e inyección de dependencias ya vienen con el SDK de .NET 11 |
+| `TekiumDB.DataProtection` | `TkXmlRepository` (un `IXmlRepository`) y `PersistKeysToTekiumDb` | `Microsoft.AspNetCore.DataProtection` |
+| `TekiumDB.HealthChecks` | `TkHealthCheck` (un `IHealthCheck`) y `AddTekiumDb` | `Microsoft.Extensions.Diagnostics.HealthChecks` |
 
 Los tres usan sólo la API pública del núcleo: ninguno ve sus internos.
 

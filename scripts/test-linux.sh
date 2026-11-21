@@ -15,6 +15,6 @@ docker run --rm -v "$PWD":/src:ro mcr.microsoft.com/dotnet/sdk:11.0 bash -c '
   dotnet build -c Release
   dotnet test -c Release --no-build
   apt-get update -qq && apt-get install -y -qq clang zlib1g-dev > /dev/null
-  dotnet publish tests/Tekium.Embedded.AotSmoke -c Release -o /tmp/aot
-  /tmp/aot/Tekium.Embedded.AotSmoke
+  dotnet publish tests/TekiumDB.AotSmoke -c Release -o /tmp/aot
+  /tmp/aot/TekiumDB.AotSmoke
 '

@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>TekiumDB</RootNamespace>
+    <PackageId>TekiumDB</PackageId>
+    <Description>TekiumDB: an embedded database for .NET in a single encrypted .tkdb file, async end to end, with no native binaries.</Description>
+    <!-- unsafe se justifica caso por caso en comentario. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TekiumDB.Core.Tests" />
+    <InternalsVisibleTo Include="TekiumDB.Benchmarks" />
+    <InternalsVisibleTo Include="TekiumDB.AotSmoke" />
+    <InternalsVisibleTo Include="TekiumDB.CrashChild" />
+    <!-- El índice vectorial vive en su paquete y guarda sus páginas por el mismo pager y la misma transacción. -->
+    <InternalsVisibleTo Include="TekiumDB.Sql" />
+    <InternalsVisibleTo Include="TekiumDB.Vectors" />
+    <InternalsVisibleTo Include="TekiumDB.Vectors.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Hashing" />
+  </ItemGroup>
+
+  <!-- El paquete lleva dentro el generador de código: quien instala el núcleo no instala nada más. -->
+  <ItemGroup>
+    <ProjectReference Include="..\TekiumDB.Generators\TekiumDB.Generators.csproj" ReferenceOutputAssembly="false" />
+    <None Include="..\TekiumDB.Generators\bin\$(Configuration)\netstandard2.0\TekiumDB.Generators.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+  </ItemGroup>
+
+</Project>

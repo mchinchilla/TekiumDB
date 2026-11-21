@@ -2,7 +2,7 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
-  <!-- Toda dependencia debe ser compatible con MIT. El núcleo (src/Tekium.Embedded.Core) no lleva ninguna en runtime. -->
+  <!-- Toda dependencia debe ser compatible con MIT. El núcleo (src/TekiumDB.Core) no lleva ninguna en runtime. -->
   <ItemGroup>
     <PackageVersion Include="BenchmarkDotNet" Version="0.16.0-preview.2" />
     <PackageVersion Include="CsCheck" Version="5.0.1" />
@@ -13,7 +13,7 @@
     <!-- Sólo el generador de código lo usa, en tiempo de compilación. Una versión que cualquier SDK reciente pueda cargar. -->
     <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="11.0.0" />
-    <!-- Sólo Tekium.Embedded.EntityFrameworkCore; el de Sqlite, sólo en pruebas, para comparar. Licencia MIT. -->
+    <!-- Sólo TekiumDB.EntityFrameworkCore; el de Sqlite, sólo en pruebas, para comparar. Licencia MIT. -->
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="11.0.0" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite" Version="11.0.0" />
     <!-- Sólo los adaptadores (DataProtection, HealthChecks) y sus pruebas. Licencia MIT. -->
@@ -21,7 +21,7 @@
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="11.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="11.0.0" />
     <PackageVersion Include="System.IO.Hashing" Version="11.0.0" />
-    <!-- Sólo Tekium.Embedded.Vectors lo usa. -->
+    <!-- Sólo TekiumDB.Vectors lo usa. -->
     <PackageVersion Include="System.Numerics.Tensors" Version="11.0.0" />
     <PackageVersion Include="xunit.v3" Version="4.0.3" />
   </ItemGroup>

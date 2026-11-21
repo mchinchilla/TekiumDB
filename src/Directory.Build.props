@@ -14,4 +14,22 @@
     <AdditionalFiles Include="$(MSBuildThisFileDirectory)BannedSymbols.Engine.txt" />
   </ItemGroup>
 
+  <!-- Lo que nuget.org muestra de cada paquete. El PackageId y la descripción van en cada proyecto. -->
+  <PropertyGroup>
+    <PackageIcon>tekiumdb-icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/mchinchilla/TekiumDB/wiki</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/mchinchilla/TekiumDB</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageTags>database;embedded;encrypted;btree;mvcc;async;aot;sql;vector;hnsw;tekiumdb</PackageTags>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <None Include="$(MSBuildThisFileDirectory)../assets/tekiumdb-icon-256.png" Pack="true" PackagePath="tekiumdb-icon.png" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)../assets/nuget-readme.md" Pack="true" PackagePath="README.md" Visible="false" />
+  </ItemGroup>
+
 </Project>

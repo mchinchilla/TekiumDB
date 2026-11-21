@@ -48,7 +48,7 @@ El plan describe el respaldo como "copiar las páginas alcanzables desde una ra�
 | No pasa por la caché | En una base más grande que la caché, lo que la aplicación tenía caliente sigue caliente después del backup |
 | Cifrado y compresión | Base cifrada sin decir nada: se rechaza; con contraseña propia; sin cifrar a pedido. El backup de una base comprimida queda comprimido |
 | Por ruta | El destino no debe existir; uno cancelado no deja archivo |
-| Índices vectoriales | El backup lleva el índice como estaba, aunque después crezca y pierda vectores (`Tekium.Embedded.Vectors.Tests`) |
+| Índices vectoriales | El backup lleva el índice como estaba, aunque después crezca y pierda vectores (`TekiumDB.Vectors.Tests`) |
 
 ### Las pruebas detectan el código roto
 

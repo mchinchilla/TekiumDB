@@ -95,12 +95,12 @@ Fuentes: [dotnet/skills](https://github.com/dotnet/skills) · [database-architec
 Tres paquetes opcionales sobre un núcleo de siete capas:
 
 ```
-Tekium.Embedded.Sql          Tekium.Embedded.Linq        Tekium.Embedded.Vectors
+TekiumDB.Sql          TekiumDB.Linq        TekiumDB.Vectors
 (SQL + proveedor ADO.NET)    (IQueryable tipado)         (HNSW + cuantización)
          |                            |                            |
          v                            v                            v
 +-------------------------------------------------------------------------+
-| Tekium.Embedded.Core — sin dependencias nativas, AOT-friendly           |
+| TekiumDB.Core — sin dependencias nativas, AOT-friendly           |
 |  API pública         IDatabase, ITable, ITransaction, IAsyncEnumerable  |
 |  Ejecutor y catálogo planes, cursores, serialización de filas sin boxing|
 |  Gestor de índices   B+Tree, temporal, UUID v7, IVectorIndex            |
@@ -662,7 +662,7 @@ Estrictamente secuenciales. Cada fase termina con su criterio de salida cumplido
 | 6.8 | Carga masiva: construcción del B+Tree de abajo hacia arriba | Importar diez millones de filas ordenadas es un orden de magnitud más rápido que insertarlas una por una |
 | 7 | Índice temporal con zone maps y split 100/0 | Un rango sobre diez millones de filas por debajo del umbral fijado en el benchmark |
 | 8 | Índice UUID v7 | Inserción secuencial no degrada; ocupación de hoja por encima del 90% |
-| 9 | HNSW en `Tekium.Embedded.Vectors` | Recall@10 por encima de 0.95 contra fuerza bruta en un conjunto de un millón de vectores |
+| 9 | HNSW en `TekiumDB.Vectors` | Recall@10 por encima de 0.95 contra fuerza bruta en un conjunto de un millón de vectores |
 | 10 | Herramientas: CLI de inspección, reparación, rekey y compactación | Un archivo corrupto a mano se diagnostica sin abrir la base |
 | 10.2 | Backup en caliente desde un snapshot fijado | Copia consistente con el escritor activo; la latencia de escritura no se mueve durante el respaldo |
 | 10.4 | VerifyAsync y contadores de diagnóstico por Meter | Un archivo con una página alterada a mano se detecta y se nombra; los contadores apagados cuestan cero |

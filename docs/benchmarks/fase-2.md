@@ -70,7 +70,7 @@ Consecuencia visible: en una base cifrada los ids de transacción no son consecu
 
 ```bash
 dotnet test --filter-namespace "*Security*"
-dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*Encryption*' '*KeyDerivation*' --join
+dotnet run -c Release --project tests/TekiumDB.Benchmarks -- --filter '*Encryption*' '*KeyDerivation*' --join
 ```
 
 ## Lo que queda fuera de esta fase

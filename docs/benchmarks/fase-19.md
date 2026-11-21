@@ -98,7 +98,7 @@ La describe `JsonBinary`. Empieza con un byte de versión y sigue con el valor:
 
 ## Mediciones
 
-`dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- json 100000`, en macOS (arm64), en memoria. El documento tiene doce claves y un arreglo de veinte objetos: 1 041 bytes de texto y 2 245 en binario. Mejor de cinco corridas.
+`dotnet run -c Release --project tests/TekiumDB.Benchmarks -- json 100000`, en macOS (arm64), en memoria. El documento tiene doce claves y un arreglo de veinte objetos: 1 041 bytes de texto y 2 245 en binario. Mejor de cinco corridas.
 
 | Qué | json (texto) | jsonb (binario) |
 | --- | ---: | ---: |

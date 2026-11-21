@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>TekiumDB.Vectors</RootNamespace>
+    <PackageId>TekiumDB.Vectors</PackageId>
+    <Description>TekiumDB: HNSW vector search stored in the same .tkdb file.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TekiumDB.Vectors.Tests" />
+    <InternalsVisibleTo Include="TekiumDB.Benchmarks" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Distancias con SIMD sin intrínsecos a mano. Licencia MIT. -->
+    <PackageReference Include="System.Numerics.Tensors" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TekiumDB.Core\TekiumDB.Core.csproj" PrivateAssets="none" />
+  </ItemGroup>
+
+</Project>

@@ -6,10 +6,10 @@ Hecho el 2026-11-16. No se midieron tiempos: una consulta traducida es la misma 
 
 ## Qué hay
 
-Un paquete nuevo, `Tekium.Embedded.Linq`:
+Un paquete nuevo, `TekiumDB.Linq`:
 
 ```csharp
-using Tekium.Embedded.Linq;
+using TekiumDB.Linq;
 
 var recent = await orders
     .Where(o => o.Customer == customerId && o.IssuedAt >= since && !o.Paid)

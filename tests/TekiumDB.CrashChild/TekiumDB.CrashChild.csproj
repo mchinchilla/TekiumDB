@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- El proceso que las pruebas de crash lanzan para que escriba y se mate a sí mismo a mitad de un commit. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>TekiumDB.CrashChild</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TekiumDB.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\TekiumDB.Core\TekiumDB.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Consumidor mínimo publicado con Native AOT: es la prueba de que el núcleo sigue siendo AOT-compatible. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>TekiumDB.AotSmoke</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\TekiumDB.Core\TekiumDB.Core.csproj" />
+    <ProjectReference Include="..\..\src\TekiumDB.Caching\TekiumDB.Caching.csproj" />
+    <ProjectReference Include="..\..\src\TekiumDB.DataProtection\TekiumDB.DataProtection.csproj" />
+    <ProjectReference Include="..\..\src\TekiumDB.HealthChecks\TekiumDB.HealthChecks.csproj" />
+    <ProjectReference Include="..\..\src\TekiumDB.Linq\TekiumDB.Linq.csproj" />
+    <ProjectReference Include="..\..\src\TekiumDB.Sql\TekiumDB.Sql.csproj" />
+    <ProjectReference Include="..\..\src\TekiumDB.Vectors\TekiumDB.Vectors.csproj" />
+    <!-- El generador de código corre en el compilador: se referencia como analizador, no como ensamblado. -->
+    <ProjectReference Include="..\..\src\TekiumDB.Generators\TekiumDB.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

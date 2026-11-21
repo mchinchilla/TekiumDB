@@ -91,19 +91,20 @@ Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (optimización
 
 | Paquete | Para qué |
 | --- | --- |
-| `Tekium.Embedded.Core` | El motor y la API tipada. Sin dependencias en tiempo de ejecución. Incluye el generador de código |
-| `Tekium.Embedded.Sql` | SQL y proveedor ADO.NET |
-| `Tekium.Embedded.Linq` | Consultas con predicados de C# |
-| `Tekium.Embedded.Vectors` | Búsqueda vectorial |
-| `Tekium.Embedded.EntityFrameworkCore` | Proveedor de Entity Framework Core, sólo asíncrono. El único paquete que no es compatible con Native AOT, porque EF Core no lo es |
-| `Tekium.Embedded.Caching` | `IDistributedCache` en un archivo local |
-| `Tekium.Embedded.DataProtection` | Las claves de Data Protection de ASP.NET Core en la base |
-| `Tekium.Embedded.HealthChecks` | El estado de la base en los health checks de la aplicación |
+| `TekiumDB` | El motor y la API tipada. Incluye el generador de código. Su única dependencia es `System.IO.Hashing` |
+| `TekiumDB.Sql` | SQL y proveedor ADO.NET |
+| `TekiumDB.Linq` | Consultas con predicados de C# |
+| `TekiumDB.Vectors` | Búsqueda vectorial |
+| `TekiumDB.EntityFrameworkCore` | Proveedor de Entity Framework Core, sólo asíncrono. El único paquete que no es compatible con Native AOT, porque EF Core no lo es |
+| `TekiumDB.Caching` | `IDistributedCache` en un archivo local |
+| `TekiumDB.DataProtection` | Las claves de Data Protection de ASP.NET Core en la base |
+| `TekiumDB.HealthChecks` | El estado de la base en los health checks de la aplicación |
+| `TekiumDB.Tool` | `tkdb`, la herramienta de línea de comandos: `dotnet tool install -g TekiumDB.Tool` |
 
 Mientras no haya paquetes publicados, se referencian los proyectos de `src/` (ver [Compilar y probar](#compilar-y-probar)).
 
 ```csharp
-using Tekium.Embedded;
+using TekiumDB;
 
 [TkTable("documents")]
 public sealed partial class Document
@@ -207,10 +208,10 @@ var plan = await orders.ExplainAsync(recent);                  // IndexScan, "Cu
 
 ### Consultas con LINQ
 
-En su propio paquete, `Tekium.Embedded.Linq`. El predicado se traduce al mismo filtro que se escribiría con `Fields`, sin compilar nada en caliente, y funciona bajo Native AOT:
+En su propio paquete, `TekiumDB.Linq`. El predicado se traduce al mismo filtro que se escribiría con `Fields`, sin compilar nada en caliente, y funciona bajo Native AOT:
 
 ```csharp
-using Tekium.Embedded.Linq;
+using TekiumDB.Linq;
 
 var recent = await orders
     .Where(o => o.Customer == customerId && o.IssuedAt >= since && !o.Paid)
@@ -231,11 +232,11 @@ await foreach (var order in orders.Where(o => o.Total > 1000m))
 
 ### SQL y ADO.NET
 
-En su propio paquete, `Tekium.Embedded.Sql`: un proveedor ADO.NET que Dapper usa sin adaptador.
+En su propio paquete, `TekiumDB.Sql`: un proveedor ADO.NET que Dapper usa sin adaptador.
 
 ```csharp
 using Dapper;
-using Tekium.Embedded.Sql;
+using TekiumDB.Sql;
 
 await using var connection = new TkConnection("Data Source=app.tkdb;Password=…");
 await connection.OpenAsync();
@@ -265,7 +266,7 @@ var big = await connection.QueryAsync<Order>(
 
 ### Entity Framework Core
 
-En su propio paquete, `Tekium.Embedded.EntityFrameworkCore`. Un modelo existente funciona sin reescribir la aplicación, siempre que use la API asíncrona.
+En su propio paquete, `TekiumDB.EntityFrameworkCore`. Un modelo existente funciona sin reescribir la aplicación, siempre que use la API asíncrona.
 
 ```csharp
 public sealed class Shop(DbContextOptions<Shop> options) : DbContext(options)
@@ -555,10 +556,10 @@ await tx.CommitAsync();
 
 ### Búsqueda vectorial
 
-En su propio paquete, `Tekium.Embedded.Vectors`. Un índice vectorial guarda vectores bajo una clave y encuentra los más cercanos a una consulta con un grafo HNSW, que vive en el mismo archivo y cambia en la misma transacción que las filas:
+En su propio paquete, `TekiumDB.Vectors`. Un índice vectorial guarda vectores bajo una clave y encuentra los más cercanos a una consulta con un grafo HNSW, que vive en el mismo archivo y cambia en la misma transacción que las filas:
 
 ```csharp
-using Tekium.Embedded.Vectors;
+using TekiumDB.Vectors;
 
 var embeddings = db.VectorIndex<Guid>("doc_embeddings", new VectorIndexOptions { Dimensions = 384 });
 
@@ -636,7 +637,7 @@ if (!verification.IsHealthy)
 
 `VerifyAsync` lee del archivo cada página en uso y comprueba su suma de verificación (o su etiqueta de autenticación, si la base está cifrada), que cada árbol esté bien formado, y que la lista de páginas libres no ofrezca una en uso. Lee el disco, no la caché: encuentra una página dañada aunque la aplicación tenga una copia buena en memoria. No bloquea al escritor.
 
-Con `Diagnostics = true`, la base publica contadores por un `Meter` llamado `Tekium.Embedded`, que lee OpenTelemetry, `dotnet-counters` o cualquier `MeterListener`:
+Con `Diagnostics = true`, la base publica contadores por un `Meter` llamado `TekiumDB`, que lee OpenTelemetry, `dotnet-counters` o cualquier `MeterListener`:
 
 | Instrumento | Qué dice |
 | --- | --- |
@@ -653,11 +654,11 @@ Tres paquetes pequeños, cada uno sólo con la dependencia a la que se adapta. E
 
 ```csharp
 await using var db = await TekiumDb.OpenAsync(new DbOptions { Path = "app.tkdb", Password = password.AsMemory() });
-var keys = await TkXmlRepository.CreateAsync(db);                       // Tekium.Embedded.DataProtection
+var keys = await TkXmlRepository.CreateAsync(db);                       // TekiumDB.DataProtection
 
-builder.Services.AddTekiumDistributedCache(_ => db);                    // Tekium.Embedded.Caching
+builder.Services.AddTekiumDistributedCache(_ => db);                    // TekiumDB.Caching
 builder.Services.AddDataProtection().PersistKeysToTekiumDb(keys);
-builder.Services.AddHealthChecks().AddTekiumDb(_ => db);                // Tekium.Embedded.HealthChecks
+builder.Services.AddHealthChecks().AddTekiumDb(_ => db);                // TekiumDB.HealthChecks
 ```
 
 | Adaptador | Qué hace | Conviene saber |
@@ -765,19 +766,19 @@ Copy-on-write tiene un costo conocido: una transacción de lectura que se deja a
 | Compresión por página | Reduce 3,3× los bytes escritos, pero no el tamaño del archivo: apagada por defecto ([detalle](docs/benchmarks/fase-5.5.md)) |
 | Tomar un snapshot y fijar una página en caché | 15,9 ns, sin asignaciones |
 
-Los benchmarks se reproducen con `dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'`.
+Los benchmarks se reproducen con `dotnet run -c Release --project tests/TekiumDB.Benchmarks -- --filter '*'`.
 
 ## Arquitectura
 
 Paquetes opcionales sobre un núcleo en capas. Las flechas son dependencias: el núcleo no referencia a ninguno de los paquetes de arriba.
 
 ```
-Tekium.Embedded.Sql          Tekium.Embedded.Linq        Tekium.Embedded.Vectors
+TekiumDB.Sql          TekiumDB.Linq        TekiumDB.Vectors
 (SQL, ADO.NET, procedimientos) (predicados de C#)        (HNSW + cuantización)
          |                            |                            |
          v                            v                            v
 +-------------------------------------------------------------------------+
-| Tekium.Embedded.Core — sin dependencias nativas, compatible con AOT     |
+| TekiumDB.Core — sin dependencias nativas, compatible con AOT     |
 |  API pública         TekiumDb, Table<T>, transacciones, IAsyncEnumerable|
 |  Catálogo y tablas   esquemas, filas tipadas, planificador, restricciones|
 |  Índices             B+Tree, secundarios, zone maps, carga masiva       |
@@ -835,11 +836,11 @@ dotnet test -c Release                                    # todas las pruebas
 dotnet test --filter-class "*BTreePropertyTests"          # una clase
 
 # Native AOT
-dotnet publish tests/Tekium.Embedded.AotSmoke -c Release -o artifacts/aot
-./artifacts/aot/Tekium.Embedded.AotSmoke
+dotnet publish tests/TekiumDB.AotSmoke -c Release -o artifacts/aot
+./artifacts/aot/TekiumDB.AotSmoke
 
 # Benchmarks
-dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*'
+dotnet run -c Release --project tests/TekiumDB.Benchmarks -- --filter '*'
 
 # Build, pruebas y AOT en Linux, dentro de un contenedor (requiere Docker)
 scripts/test-linux.sh
@@ -849,16 +850,16 @@ Las pruebas usan xUnit v3 sobre Microsoft.Testing.Platform, por eso los filtros 
 
 ```
 src/
-  Tekium.Embedded.Core/          Motor y API pública
-  Tekium.Embedded.Generators/    Generador de código: tablas, índices, restricciones y rutinas
-  Tekium.Embedded.Sql/           SQL, proveedor ADO.NET, rutinas de C# y procedimientos almacenados
-  Tekium.Embedded.Linq/          Consultas con predicados de C#
-  Tekium.Embedded.Vectors/       Búsqueda vectorial HNSW
-  Tekium.Embedded.EntityFrameworkCore/ Proveedor de Entity Framework Core
-  Tekium.Embedded.Caching/       IDistributedCache
-  Tekium.Embedded.DataProtection/ Almacén de claves de Data Protection
-  Tekium.Embedded.HealthChecks/  Health check
-  Tekium.Embedded.Cli/           tkdb
+  TekiumDB.Core/          Motor y API pública
+  TekiumDB.Generators/    Generador de código: tablas, índices, restricciones y rutinas
+  TekiumDB.Sql/           SQL, proveedor ADO.NET, rutinas de C# y procedimientos almacenados
+  TekiumDB.Linq/          Consultas con predicados de C#
+  TekiumDB.Vectors/       Búsqueda vectorial HNSW
+  TekiumDB.EntityFrameworkCore/ Proveedor de Entity Framework Core
+  TekiumDB.Caching/       IDistributedCache
+  TekiumDB.DataProtection/ Almacén de claves de Data Protection
+  TekiumDB.HealthChecks/  Health check
+  TekiumDB.Cli/           tkdb
 tests/                           Pruebas, benchmarks y el programa de verificación de Native AOT
 docs/benchmarks/                 Mediciones, con sus condiciones
 ```

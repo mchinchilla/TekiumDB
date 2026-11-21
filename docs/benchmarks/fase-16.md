@@ -30,7 +30,7 @@ EF Core escribe SQL que la Fase 12 no tenía. Se agregó al SQL, no se esquivó 
 
 ### El proveedor
 
-`Tekium.Embedded.EntityFrameworkCore`, con `UseTekium(cadena de conexión)`, `UseTekium(conexión)` y `UseTekium(base ya abierta)`.
+`TekiumDB.EntityFrameworkCore`, con `UseTekium(cadena de conexión)`, `UseTekium(conexión)` y `UseTekium(base ya abierta)`.
 
 | Pieza | Qué hace |
 | --- | --- |

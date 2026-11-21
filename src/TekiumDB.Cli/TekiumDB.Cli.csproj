@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- tkdb: inspección, reparación, compactación y cambio de contraseña desde la línea de comandos. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>TekiumDB.Cli</RootNamespace>
+    <AssemblyName>tkdb</AssemblyName>
+    <PackageId>TekiumDB.Tool</PackageId>
+    <Description>TekiumDB: the tkdb command-line tool to inspect, check, compact and repair .tkdb files.</Description>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>tkdb</ToolCommandName>
+    <!-- dotnet publish da un ejecutable nativo, sin runtime que instalar. -->
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TekiumDB.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TekiumDB.Core\TekiumDB.Core.csproj" PrivateAssets="none" />
+  </ItemGroup>
+
+</Project>

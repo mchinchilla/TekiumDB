@@ -1,21 +1,21 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/Tekium.Embedded.Cli/Tekium.Embedded.Cli.csproj" />
-    <Project Path="src/Tekium.Embedded.Core/Tekium.Embedded.Core.csproj" />
-    <Project Path="src/Tekium.Embedded.Generators/Tekium.Embedded.Generators.csproj" />
-    <Project Path="src/Tekium.Embedded.Caching/Tekium.Embedded.Caching.csproj" />
-    <Project Path="src/Tekium.Embedded.DataProtection/Tekium.Embedded.DataProtection.csproj" />
-    <Project Path="src/Tekium.Embedded.EntityFrameworkCore/Tekium.Embedded.EntityFrameworkCore.csproj" />
-    <Project Path="src/Tekium.Embedded.HealthChecks/Tekium.Embedded.HealthChecks.csproj" />
-    <Project Path="src/Tekium.Embedded.Linq/Tekium.Embedded.Linq.csproj" />
-    <Project Path="src/Tekium.Embedded.Sql/Tekium.Embedded.Sql.csproj" />
-    <Project Path="src/Tekium.Embedded.Vectors/Tekium.Embedded.Vectors.csproj" />
+    <Project Path="src/TekiumDB.Cli/TekiumDB.Cli.csproj" />
+    <Project Path="src/TekiumDB.Core/TekiumDB.Core.csproj" />
+    <Project Path="src/TekiumDB.Generators/TekiumDB.Generators.csproj" />
+    <Project Path="src/TekiumDB.Caching/TekiumDB.Caching.csproj" />
+    <Project Path="src/TekiumDB.DataProtection/TekiumDB.DataProtection.csproj" />
+    <Project Path="src/TekiumDB.EntityFrameworkCore/TekiumDB.EntityFrameworkCore.csproj" />
+    <Project Path="src/TekiumDB.HealthChecks/TekiumDB.HealthChecks.csproj" />
+    <Project Path="src/TekiumDB.Linq/TekiumDB.Linq.csproj" />
+    <Project Path="src/TekiumDB.Sql/TekiumDB.Sql.csproj" />
+    <Project Path="src/TekiumDB.Vectors/TekiumDB.Vectors.csproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/Tekium.Embedded.AotSmoke/Tekium.Embedded.AotSmoke.csproj" />
-    <Project Path="tests/Tekium.Embedded.Benchmarks/Tekium.Embedded.Benchmarks.csproj" />
-    <Project Path="tests/Tekium.Embedded.CrashChild/Tekium.Embedded.CrashChild.csproj" />
-    <Project Path="tests/Tekium.Embedded.Core.Tests/Tekium.Embedded.Core.Tests.csproj" />
-    <Project Path="tests/Tekium.Embedded.Vectors.Tests/Tekium.Embedded.Vectors.Tests.csproj" />
+    <Project Path="tests/TekiumDB.AotSmoke/TekiumDB.AotSmoke.csproj" />
+    <Project Path="tests/TekiumDB.Benchmarks/TekiumDB.Benchmarks.csproj" />
+    <Project Path="tests/TekiumDB.CrashChild/TekiumDB.CrashChild.csproj" />
+    <Project Path="tests/TekiumDB.Core.Tests/TekiumDB.Core.Tests.csproj" />
+    <Project Path="tests/TekiumDB.Vectors.Tests/TekiumDB.Vectors.Tests.csproj" />
   </Folder>
 </Solution>

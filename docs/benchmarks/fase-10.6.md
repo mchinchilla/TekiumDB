@@ -56,7 +56,7 @@ El archivo crece hasta un tamaño que depende del horizonte y ahí se queda: cad
 | Antes del primer commit | Vacía |
 | Un lector del pasado retiene su estado | Abierto dentro del horizonte, sigue leyendo lo mismo diecisiete commits después, cuando ese estado ya no se puede pedir; cuesta espacio mientras vive, y al cerrarlo (dos veces no hace daño) el espacio vuelve y leer por él se rechaza |
 | Tras cerrar y abrir | El pasado sigue ahí |
-| Índices vectoriales | Una búsqueda en el pasado encuentra lo que el índice tenía entonces (`Tekium.Embedded.Vectors.Tests`) |
+| Índices vectoriales | Una búsqueda en el pasado encuentra lo que el índice tenía entonces (`TekiumDB.Vectors.Tests`) |
 
 ### Las pruebas detectan el código roto
 

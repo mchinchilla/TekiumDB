@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>TekiumDB.DataProtection</RootNamespace>
+    <PackageId>TekiumDB.DataProtection</PackageId>
+    <Description>TekiumDB: ASP.NET Core Data Protection keys kept in a local file.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TekiumDB.Core\TekiumDB.Core.csproj" PrivateAssets="none" />
+    <ProjectReference Include="..\TekiumDB.Generators\TekiumDB.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

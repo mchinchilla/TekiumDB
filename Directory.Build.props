@@ -19,7 +19,8 @@
     <Authors>Tekium</Authors>
     <Copyright>Copyright (c) Tekium</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <Version>0.1.0-alpha</Version>
+    <!-- Lo que sale de un build local. Lo publicado lleva 0.1.N: publish.yml pasa la versión con -p:Version. -->
+    <Version>0.1.0-dev</Version>
   </PropertyGroup>
 
   <!-- Reglas duras de asincronía: nada de sync-over-async, ni siquiera en pruebas. -->

@@ -11,7 +11,7 @@ Hecho el 2026-11-16. Esta fase no tiene criterio de rendimiento y no se midieron
 | `TkInspector.InspectAsync` | Núcleo | Examina un archivo sin abrirlo y devuelve lo que encontró: cabecera, registros de raíz, árboles con sus entradas y páginas, y una lista de hallazgos con severidad, página y a qué pertenece |
 | `TkMaintenance.CompactAsync` | Núcleo | Escribe una copia sin espacio libre, con cada árbol reconstruido a páginas llenas. Se niega si el original está dañado |
 | `TkMaintenance.RepairAsync` | Núcleo | Escribe una copia con lo que se puede leer, e informa qué estaba mal y qué dejó fuera |
-| `tkdb` | `Tekium.Embedded.Cli` | Lo anterior desde la línea de comandos (`info`, `check`, `compact`, `repair`) y `passwd`, que cambia la contraseña en el sitio. Se instala como herramienta de .NET o se publica como ejecutable nativo de 2,8 MB |
+| `tkdb` | `TekiumDB.Cli` | Lo anterior desde la línea de comandos (`info`, `check`, `compact`, `repair`) y `passwd`, que cambia la contraseña en el sitio. Se instala como herramienta de .NET o se publica como ejecutable nativo de 2,8 MB |
 
 Ninguna cambia el archivo que recibe, salvo `passwd`, que reescribe sólo la cabecera (ya existía como `ChangePasswordAsync`).
 
@@ -47,7 +47,7 @@ Reparar copia todo lo que se puede leer, con una regla: la copia nunca responde 
 | Cifrado | Sin contraseña, con la equivocada, con la correcta, y una página cifrada alterada |
 | Compactar | Todo sigue ahí (filas, cinco índices, valores grandes), los índices se usan, no queda nada libre ni perdido, el archivo queda en menos de la mitad; se niega ante un archivo dañado; restricciones copiadas byte por byte y vigentes; otra contraseña o ninguna |
 | Reparar | Una hoja dañada: se pierden sus filas, las demás son idénticas, los índices de esa tabla se reconstruyen en la primera escritura. Un índice dañado: sólo ése queda fuera |
-| Índices vectoriales | Se inspeccionan, se compactan y responden igual; uno dañado queda fuera de la reparación (`Tekium.Embedded.Vectors.Tests`) |
+| Índices vectoriales | Se inspeccionan, se compactan y responden igual; uno dañado queda fuera de la reparación (`TekiumDB.Vectors.Tests`) |
 | `tkdb` | Cada comando, llamado como desde una terminal: salida, código de salida, contraseñas por variable, archivo y entrada estándar, y que una contraseña escrita como argumento se rechaza |
 
 Todas sobre archivo y sobre memoria, salvo las de `tkdb`, que son sobre archivos de verdad.

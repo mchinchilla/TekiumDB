@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>TekiumDB.Caching</RootNamespace>
+    <PackageId>TekiumDB.Caching</PackageId>
+    <Description>TekiumDB: an IDistributedCache over a local file, with no server.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TekiumDB.Core\TekiumDB.Core.csproj" PrivateAssets="none" />
+    <ProjectReference Include="..\TekiumDB.Generators\TekiumDB.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

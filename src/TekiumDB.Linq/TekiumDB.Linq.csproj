@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>TekiumDB.Linq</RootNamespace>
+    <PackageId>TekiumDB.Linq</PackageId>
+    <Description>TekiumDB: queries written as C# predicates, translated to the engine's filters.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TekiumDB.Core\TekiumDB.Core.csproj" PrivateAssets="none" />
+  </ItemGroup>
+
+</Project>

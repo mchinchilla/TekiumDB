@@ -31,7 +31,7 @@ Tres cosas que lo distinguen de simplemente leer la base:
 
 ```csharp
 var db = await TekiumDb.OpenAsync(new DbOptions { Path = "app.tkdb", Diagnostics = true });
-// Un Meter llamado "Tekium.Embedded" (TekiumDb.MeterName), con la etiqueta tekium.db = la ruta del archivo.
+// Un Meter llamado "TekiumDB" (TekiumDb.MeterName), con la etiqueta tekium.db = la ruta del archivo.
 ```
 
 | Instrumento | Tipo | Qué dice |
@@ -76,7 +76,7 @@ Las tres filas se solapan: de una corrida a otra varía más (420 a 439 ns con e
 | Un solo commit | Con el estado ya fijado, se borra casi todo y se reescribe el resto seis veces: lo verificado es el estado anterior, sin hallazgos |
 | Con el escritor activo | Verificaciones una tras otra mientras otra tarea confirma sin pausa: nunca un hallazgo; y la caché queda como estaba |
 | Contadores | `DiagnosticsTests`, escuchando como un exportador: fallos al leer en frío y aciertos al releer; una medida de páginas y duración por commit, ninguna por un commit vacío; lectores vivos (varios sobre el mismo estado) y edad del más viejo; profundidad por árbol; sin la opción no hay `Meter`; cada base bajo su nombre; al cerrar la base su `Meter` desaparece |
-| Índices vectoriales | La verificación sigue sus cuatro árboles (`Tekium.Embedded.Vectors.Tests`) |
+| Índices vectoriales | La verificación sigue sus cuatro árboles (`TekiumDB.Vectors.Tests`) |
 
 ### Las pruebas detectan el código roto
 

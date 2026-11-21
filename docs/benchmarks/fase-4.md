@@ -66,7 +66,7 @@ El plan pide medirla desde esta fase. 100 000 filas (clave UUID v7, valor de 100
 
 Sin lectores retenidos, copy-on-write cuesta 120 páginas libres en circulación: el archivo queda por debajo del de SQLite. Con una transacción de lectura olvidada, cada commit necesita páginas nuevas y el archivo crece sin límite: 84 veces los datos en esta carga. Es el riesgo que el plan ya nombraba, ahora con número. El espacio se recupera para reutilizarlo al cerrar el lector, pero el archivo no se encoge hasta que exista `CompactAsync`.
 
-Se reproduce con `dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- space`.
+Se reproduce con `dotnet run -c Release --project tests/TekiumDB.Benchmarks -- space`.
 
 ## Qué no cubre
 

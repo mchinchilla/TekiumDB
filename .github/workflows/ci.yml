@@ -1,9 +1,10 @@
 name: CI
 
+# Los push a main los compila y prueba publish.yml (Linux) antes de publicar; este corre los tres
+# sistemas en los pull requests, o a mano.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,7 +43,7 @@ jobs:
 
       # Criterio de salida de la Fase 0: publicar con Native AOT en los tres sistemas y ejecutar el binario.
       - name: Publish (Native AOT)
-        run: dotnet publish tests/Tekium.Embedded.AotSmoke -c Release -o artifacts/aot
+        run: dotnet publish tests/TekiumDB.AotSmoke -c Release -o artifacts/aot
 
       - name: Run AOT smoke
-        run: ./artifacts/aot/Tekium.Embedded.AotSmoke
+        run: ./artifacts/aot/TekiumDB.AotSmoke

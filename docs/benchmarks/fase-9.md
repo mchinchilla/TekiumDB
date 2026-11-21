@@ -1,4 +1,4 @@
-# Fase 9 — índice vectorial HNSW en `Tekium.Embedded.Vectors`
+# Fase 9 — índice vectorial HNSW en `TekiumDB.Vectors`
 
 **Criterio de salida cumplido en macOS; pruebas verificadas también en Linux.** Sobre un millón de vectores, el recall@10 contra fuerza bruta es 0,98 con los parámetros por defecto (el criterio pide más de 0,95). Vale para vectores con estructura, como los embeddings; con vectores sin ninguna estructura el recall es mucho más bajo, y está medido abajo. Windows no se ha verificado.
 

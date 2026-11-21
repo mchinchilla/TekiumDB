@@ -10,7 +10,7 @@ Medido el 2026-11-16. Una sola máquina (macOS, arm64); Linux en un contenedor s
 | --- | --- | --- |
 | Ida y vuelta de todos los tipos primitivos y anulables | `RoundTripTests`: filas al azar (CsCheck) con las 21 clases de columna, cada una en su forma no anulable y anulable, escritas y leídas a través de la base con el serializador generado; más los extremos de cada tipo | Pasa, sobre archivo y sobre memoria |
 | Una fila de la versión 1 se lee con el lector de la versión 2 | `SchemaEvolutionTests`: la versión 2 renombra una propiedad, quita una columna, agrega anulables y no anulables y cambia el orden | Pasa; leer con el tipo nuevo no escribe ni un byte |
-| AOT sigue funcionando | `Tekium.Embedded.AotSmoke`: base cifrada, escrita con un tipo, reabierta y leída con su versión siguiente, publicada con Native AOT | Pasa en macOS y en Linux |
+| AOT sigue funcionando | `TekiumDB.AotSmoke`: base cifrada, escrita con un tipo, reabierta y leída con su versión siguiente, publicada con Native AOT | Pasa en macOS y en Linux |
 
 La igualdad de .NET no mira todo lo que tiene que volver, así que las pruebas lo comprueban aparte: la clase (`Kind`) de un `DateTime`, el desplazamiento de un `DateTimeOffset`, el signo del cero, la escala de un `decimal` (`0.10` no vuelve como `0.1`) y la diferencia entre un `byte[]` nulo y uno vacío.
 
@@ -36,7 +36,7 @@ Seis veces más rápido. Los 326 bytes son la fila que se devuelve: el objeto y 
 
 No se midió la escritura a través de la API tipada.
 
-Se reproduce con `dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- --filter '*TypedTableBenchmarks*'`.
+Se reproduce con `dotnet run -c Release --project tests/TekiumDB.Benchmarks -- --filter '*TypedTableBenchmarks*'`.
 
 ## Cómo quedó hecho
 

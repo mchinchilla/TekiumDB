@@ -8,11 +8,11 @@ Medido el 2026-11-17. Una sola máquina (Apple M2 Max, macOS 27.0, arm64), mejor
 
 | Pieza | Dónde | Qué hace |
 | --- | --- | --- |
-| `[TkFunction]`, `[TkProcedure]` | `Tekium.Embedded.Sql` | Marcan un método estático como función o procedimiento de SQL |
-| `RoutineGenerator` | `Tekium.Embedded.Generators` | Por cada método marcado escribe, al compilar, un método que convierte los argumentos y lo llama por su nombre, y una tabla `TkRoutines.All` con todos los del ensamblado |
-| `database.UseRoutines(TkRoutines.All)` | `Tekium.Embedded.Sql` | Registra las rutinas para esa base. Viven en la aplicación, no en el archivo |
+| `[TkFunction]`, `[TkProcedure]` | `TekiumDB.Sql` | Marcan un método estático como función o procedimiento de SQL |
+| `RoutineGenerator` | `TekiumDB.Generators` | Por cada método marcado escribe, al compilar, un método que convierte los argumentos y lo llama por su nombre, y una tabla `TkRoutines.All` con todos los del ensamblado |
+| `database.UseRoutines(TkRoutines.All)` | `TekiumDB.Sql` | Registra las rutinas para esa base. Viven en la aplicación, no en el archivo |
 | `CALL nombre(…)` | SQL | Corre un procedimiento dentro de la transacción de la sentencia |
-| `TkContext` | `Tekium.Embedded.Sql` | Lo que recibe un procedimiento: la base, la transacción, y `ExecuteAsync`/`QueryAsync` para correr SQL dentro de ella |
+| `TkContext` | `TekiumDB.Sql` | Lo que recibe un procedimiento: la base, la transacción, y `ExecuteAsync`/`QueryAsync` para correr SQL dentro de ella |
 
 Tres clases de rutina:
 

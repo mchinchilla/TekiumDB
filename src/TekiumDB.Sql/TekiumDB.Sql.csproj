@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>TekiumDB.Sql</RootNamespace>
+    <PackageId>TekiumDB.Sql</PackageId>
+    <Description>TekiumDB: SQL and an ADO.NET provider over the same .tkdb file.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TekiumDB.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TekiumDB.Core\TekiumDB.Core.csproj" PrivateAssets="none" />
+  </ItemGroup>
+
+</Project>

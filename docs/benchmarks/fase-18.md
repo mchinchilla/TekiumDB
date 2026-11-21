@@ -55,7 +55,7 @@ Lo comprobé con lo que EF Core genera de verdad, no con migraciones escritas a 
 
 ## Mediciones
 
-`dotnet run -c Release --project tests/Tekium.Embedded.Benchmarks -- rewrite 1000000`, en macOS (arm64), con archivo. Es una tabla de un millón de filas de cinco columnas, con dos índices (uno único); el archivo ocupa 192 MB. Cada cambio corre en su transacción, con su commit.
+`dotnet run -c Release --project tests/TekiumDB.Benchmarks -- rewrite 1000000`, en macOS (arm64), con archivo. Es una tabla de un millón de filas de cinco columnas, con dos índices (uno único); el archivo ocupa 192 MB. Cada cambio corre en su transacción, con su commit.
 
 | Cambio | Tiempo | Por fila | Memoria pedida | Memoria residente (antes → pico) | El archivo crece |
 | --- | ---: | ---: | ---: | ---: | ---: |
