@@ -10,7 +10,7 @@ TekiumDB keeps everything in a single `.tkdb` file and is 100 % managed code. It
 
 | Package | What for |
 | --- | --- |
-| `TekiumDB` | The engine and the typed API, with its source generator. Namespace `Tekium.Embedded` |
+| `TekiumDB` | The engine and the typed API, with its source generator. Namespace `TekiumDB` |
 | `TekiumDB.Sql` | SQL and the ADO.NET provider (works with Dapper) |
 | `TekiumDB.Linq` | Queries with C# predicates |
 | `TekiumDB.Vectors` | HNSW vector search |
@@ -20,10 +20,15 @@ TekiumDB keeps everything in a single `.tkdb` file and is 100 % managed code. It
 | `TekiumDB.HealthChecks` | Health checks |
 | `TekiumDB.Tool` | `tkdb`: inspect, check, compact, repair and change the password of `.tkdb` files |
 
+```bash
+dotnet add package TekiumDB              # any other package brings it too, with its source generator
+dotnet tool install -g TekiumDB.Tool     # tkdb
+```
+
 ## Quick start
 
 ```csharp
-using Tekium.Embedded;
+using TekiumDB;
 
 [TkTable("documents")]
 public sealed partial class Document
