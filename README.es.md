@@ -13,7 +13,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y es código 100 % administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal. Encima hay tablas tipadas sin reflexión, índices secundarios, restricciones, SQL con proveedor ADO.NET, LINQ, búsqueda vectorial, change feed, backup en caliente y herramientas de inspección y reparación.
 
 > [!NOTE]
-> **Pre-alpha.** Todavía no hay paquete NuGet publicado y el formato de archivo puede cambiar entre versiones. Verificado en macOS y Linux (arm64); Windows no se ha verificado.
+> **Pre-alpha.** Los paquetes están en [nuget.org](https://www.nuget.org/packages/TekiumDB) como `0.1.x`, y el formato de archivo todavía puede cambiar entre versiones. Verificado en macOS y Linux (arm64); Windows no se ha verificado.
 
 ## Contenido
 
@@ -101,7 +101,12 @@ Lo que TekiumDB **no** pretende: ganarle a SQLite en SQL complejo (optimización
 | `TekiumDB.HealthChecks` | El estado de la base en los health checks de la aplicación |
 | `TekiumDB.Tool` | `tkdb`, la herramienta de línea de comandos: `dotnet tool install -g TekiumDB.Tool` |
 
-Mientras no haya paquetes publicados, se referencian los proyectos de `src/` (ver [Compilar y probar](#compilar-y-probar)).
+```bash
+dotnet add package TekiumDB              # el motor y la API tipada; cualquier otro paquete también lo trae
+dotnet tool install -g TekiumDB.Tool     # tkdb
+```
+
+Cada push a `main` publica una `0.1.N` nueva de todos los paquetes. Para trabajar desde el código fuente, ver [Compilar y probar](#compilar-y-probar).
 
 ```csharp
 using TekiumDB;
@@ -824,7 +829,7 @@ Lo que conviene saber antes de adoptarla:
 - **Sin triggers, vistas materializadas, replicación ni borrado en cascada.** En su lugar: restricciones declarativas, índices sobre expresiones y change feed.
 - **El índice vectorial** no recupera el espacio de los vectores borrados hasta eliminarlo, y no se consulta desde SQL.
 - **El proveedor de Entity Framework Core es sólo asíncrono.** Sus claves foráneas impiden pero nunca borran en cascada.
-- **Formato de archivo sin estabilizar** hasta la primera versión publicada.
+- **Formato de archivo sin estabilizar**: todavía puede cambiar entre versiones `0.1.x`.
 
 ## Compilar y probar
 

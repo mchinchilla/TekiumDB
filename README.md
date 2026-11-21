@@ -13,7 +13,7 @@
 TekiumDB keeps everything in a single `.tkdb` file and is 100 % managed code. Its engine is a copy-on-write B+Tree with MVCC: readers never block or wait, and a commit is atomic with no WAL and no journal. On top of it there are typed tables without reflection, secondary indexes, constraints, SQL with an ADO.NET provider, LINQ, vector search, a change feed, hot backup, and tools to inspect and repair files.
 
 > [!NOTE]
-> **Pre-alpha.** There is no published NuGet package yet, and the file format may change between versions. Verified on macOS and Linux (arm64); Windows has not been verified.
+> **Pre-alpha.** The packages are on [nuget.org](https://www.nuget.org/packages/TekiumDB) as `0.1.x`, and the file format may still change between versions. Verified on macOS and Linux (arm64); Windows has not been verified.
 
 ## Contents
 
@@ -101,7 +101,12 @@ What TekiumDB does **not** try to do: beat SQLite at complex SQL (cost-based opt
 | `TekiumDB.HealthChecks` | The state of the database in the application's health checks |
 | `TekiumDB.Tool` | `tkdb`, the command-line tool: `dotnet tool install -g TekiumDB.Tool` |
 
-Until packages are published, reference the projects under `src/` (see [Building and testing](#building-and-testing)).
+```bash
+dotnet add package TekiumDB              # the engine and the typed API; any other package brings it too
+dotnet tool install -g TekiumDB.Tool     # tkdb
+```
+
+Every push to `main` publishes a new `0.1.N` of every package. To work from source, see [Building and testing](#building-and-testing).
 
 ```csharp
 using TekiumDB;
@@ -824,7 +829,7 @@ What is worth knowing before adopting it:
 - **No triggers, materialized views, replication or cascading deletes.** Instead: declarative constraints, expression indexes and the change feed.
 - **The vector index** does not recover the space of deleted vectors until it is dropped, and cannot be queried from SQL.
 - **The Entity Framework Core provider is async only.** Its foreign keys refuse but never cascade.
-- **The file format is not stable** until the first published version.
+- **The file format is not stable** yet: it may still change between `0.1.x` versions.
 
 ## Building and testing
 
