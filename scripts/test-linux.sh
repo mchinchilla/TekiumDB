@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compila, prueba y publica con Native AOT dentro de un contenedor Linux, sin tocar el árbol de trabajo.
-# Sirve para verificar Linux desde macOS o Windows cuando no hay CI. Requiere Docker.
+# Sirve para verificar Linux desde macOS o Windows sin esperar a GitHub Actions. Requiere Docker.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

@@ -13,7 +13,7 @@
 TekiumDB keeps everything in a single `.tkdb` file and is 100 % managed code. Its engine is a copy-on-write B+Tree with MVCC: readers never block or wait, and a commit is atomic with no WAL and no journal. On top of it there are typed tables without reflection, secondary indexes, constraints, SQL with an ADO.NET provider, LINQ, vector search, a change feed, hot backup, and tools to inspect and repair files.
 
 > [!NOTE]
-> **Pre-alpha.** The packages are on [nuget.org](https://www.nuget.org/packages/TekiumDB) as `0.1.x`, and the file format may still change between versions. Verified on macOS and Linux (arm64); Windows has not been verified.
+> **Pre-alpha.** The packages are on [nuget.org](https://www.nuget.org/packages/TekiumDB) as `0.1.x`, and the file format may still change between versions. Verified on Windows, macOS and Linux.
 
 ## Contents
 
@@ -815,7 +815,7 @@ How the engine is tested:
 - **Native AOT.** A program published with AOT exercises the engine, the typed tables, vectors, the tools, LINQ and SQL on every verification.
 - **The tests are tested.** Defects are introduced by hand into the engine to check that some test fails.
 
-Platforms: verified on macOS (arm64) and on Linux (arm64, container). Windows has not been verified.
+Platforms: verified on Windows, on macOS (arm64) and on Linux (arm64, container).
 
 ## Limits
 

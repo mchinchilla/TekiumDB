@@ -13,7 +13,7 @@
 TekiumDB guarda todo en un único archivo `.tkdb` y es código 100 % administrado. Su motor es un B+Tree copy-on-write con MVCC: los lectores nunca bloquean ni esperan, y el commit es atómico sin WAL ni journal. Encima hay tablas tipadas sin reflexión, índices secundarios, restricciones, SQL con proveedor ADO.NET, LINQ, búsqueda vectorial, change feed, backup en caliente y herramientas de inspección y reparación.
 
 > [!NOTE]
-> **Pre-alpha.** Los paquetes están en [nuget.org](https://www.nuget.org/packages/TekiumDB) como `0.1.x`, y el formato de archivo todavía puede cambiar entre versiones. Verificado en macOS y Linux (arm64); Windows no se ha verificado.
+> **Pre-alpha.** Los paquetes están en [nuget.org](https://www.nuget.org/packages/TekiumDB) como `0.1.x`, y el formato de archivo todavía puede cambiar entre versiones. Verificado en Windows, macOS y Linux.
 
 ## Contenido
 
@@ -815,7 +815,7 @@ Cómo se prueba el motor:
 - **Native AOT.** Un programa publicado con AOT ejercita el motor, las tablas tipadas, los vectores, las herramientas, LINQ y SQL en cada verificación.
 - **Las pruebas se prueban.** Se introducen defectos a mano en el motor y se comprueba que alguna prueba falle.
 
-Plataformas: verificado en macOS (arm64) y en Linux (arm64, contenedor). Windows no se ha verificado.
+Plataformas: verificado en Windows, en macOS (arm64) y en Linux (arm64, contenedor).
 
 ## Límites
 
